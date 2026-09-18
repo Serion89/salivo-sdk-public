@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Salivo Programming Language - Definitive Reference & Tutorial</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text-main: #c9d1d9;
+            --text-heading: #f0f6fc;
+            --primary: #58a6ff;
+            --accent: #bc8cff;
+            --success: #3fb950;
+            --warning: #d29922;
+            --code-bg: #090d13;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: var(--card-bg);
+            padding: 40px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        h1 {
+            color: var(--text-heading);
+            font-size: 2.5rem;
+            border-bottom: 2px solid var(--primary);
+            padding-bottom: 15px;
+            margin-top: 0;
+        }
+        h2 {
+            color: var(--primary);
+            font-size: 1.8rem;
+            margin-top: 40px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+        }
+        h3 {
+            color: var(--accent);
+            font-size: 1.3rem;
+            margin-top: 25px;
+        }
+        p, li {
+            font-size: 1.05rem;
+        }
+        code {
+            font-family: "Fira Code", "Consolas", "Courier New", monospace;
+            background-color: var(--code-bg);
+            color: #79c0ff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.95em;
+        }
+        pre {
+            background-color: var(--code-bg);
+            padding: 18px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: #e6edf3;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+        th {
+            background-color: #21262d;
+            color: var(--primary);
+        }
+        tr:nth-child(even) {
+            background-color: #12161c;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.85rem;
+            background-color: var(--primary);
+            color: #000;
+        }
+        .alert {
+            padding: 15px;
+            border-left: 4px solid var(--primary);
+            background: #1c2128;
+            margin: 20px 0;
+            border-radius: 0 6px 6px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Salivo Programming Language Guide</h1>
+        <p>A comprehensive reference manual, tutorial, and cheat sheet for building high-performance applications with Salivo.</p>
+        
+        <div class="alert">
+            <strong>Key Architectural Highlights:</strong> Stream Header Imports (<code>&gt;&lt;</code>), Zero-Underscore Data Types, Deterministic RAII Memory (<code>Drop</code> trait), and Postfix <code>?</code> Error Propagation.
+        </div>
+
+        <h2>1. Stream Header Imports (<code>&gt;&lt;</code>)</h2>
+        <p>Salivo uses <code>&gt;&lt;</code> as the sole import operator in the language. It represents input streams flowing into the application module.</p>
+        <pre><code>module myapp.main;
+
+&gt;&lt;salivo.std.core::{out, outln, assertEq, Result, ok, err};
+&gt;&lt;salivo.std.fs::{open, close, pathJoin};
+&gt;&lt;salivo.std.collections::{Vec, vecNew, push, get, veclen};</code></pre>
+
+        <h2>2. Complete Data Types Reference</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Category</th>
+                    <th>Data Type</th>
+                    <th>Description</th>
+                    <th>Syntax Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Primitives</strong></td>
+                    <td><code>int</code></td>
+                    <td>64-bit signed integer</td>
+                    <td><code>let x: int = 42;</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>float</code></td>
+                    <td>64-bit floating point number</td>
+                    <td><code>let pi: float = 3.14159;</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>bool</code></td>
+                    <td>Boolean truth value</td>
+                    <td><code>let flag: bool = true;</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>string</code></td>
+                    <td>Owned UTF-8 string</td>
+                    <td><code>let s: string = "Salivo";</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>StrSlice</code></td>
+                    <td>Borrowed string slice</td>
+                    <td><code>let slice: StrSlice = "Hello";</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Monads</strong></td>
+                    <td><code>Option&lt;T&gt;</code></td>
+                    <td>Optional value: <code>some(v)</code> or <code>none()</code></td>
+                    <td><code>let val: Option&lt;int&gt; = some(5);</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>Result&lt;T, E&gt;</code></td>
+                    <td>Success or Error result</td>
+                    <td><code>let res: Result&lt;int, string&gt; = ok(10);</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Collections</strong></td>
+                    <td><code>Vec&lt;T&gt;</code></td>
+                    <td>Dynamic vector array</td>
+                    <td><code>let mut v = vecNew&lt;int&gt;();</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>Map&lt;K, V&gt;</code></td>
+                    <td>Hash map table</td>
+                    <td><code>let mut m = mapNew&lt;string, int&gt;();</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>Heap&lt;T&gt;</code></td>
+                    <td>Binary min/max heap</td>
+                    <td><code>let mut h = heapNew&lt;int&gt;();</code></td>
+                </tr>
+                <tr>
+                    <td></td>
+                    <td><code>BTree&lt;K, V&gt;</code></td>
+                    <td>B-Tree map</td>
+                    <td><code>let mut t = btreeNew&lt;string, int&gt;();</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>3. Hello World Program</h2>
+        <pre><code>&gt;&lt;salivo.std.core::{outln};
+
+pub func main() -&gt; int {
+    outln("Hello, Salivo!");
+    return 0;
+}</code></pre>
+
+        <h2>4. Input, Output & String Interpolation</h2>
+        <pre><code>&gt;&lt;salivo.std.core::{out, outln};
+
+pub func main() -&gt; int {
+    out("Enter your name: ");
+    let name = input();
+    
+    // Formatting with postfix modifiers (:trim and :upper)
+    outln($"Hello, {name:trim:upper}!");
+    return 0;
+}</code></pre>
+
+        <h2>5. Control Flow & Loops</h2>
+        <h3>3-Clause C-Style <code>for</code> Loop</h3>
+        <pre><code>for (let mut i = 0; i &lt; 5; i = i + 1) {
+    outln($"Index: {i:str}");
+}</code></pre>
+
+        <h3><code>while</code> Loop & Pattern Matching</h3>
+        <pre><code>let mut count = 3;
+while (count &gt; 0) {
+    count = count - 1;
+}
+
+match status {
+    0 =&gt; "Pending",
+    1 =&gt; "Active",
+    _ =&gt; "Unknown",
+}</code></pre>
+
+        <h2>6. Functions & Postfix <code>?</code> Operator</h2>
+        <pre><code>pub func safeDivide(int a, int b) -&gt; Result&lt;int, string&gt; {
+    if (b == 0) { return err&lt;int, string&gt;("Division by zero"); }
+    return ok&lt;int, string&gt;(a / b);
+}
+
+pub func readConfig(string path) -&gt; Result&lt;string, IoError&gt; {
+    let handle = open(path, "r")?; // Auto-unwraps or returns Err
+    return ok&lt;string, IoError&gt;(readStr(path)?);
+}</code></pre>
+
+        <h2>7. Structs, Enums & RAII <code>Drop</code></h2>
+        <pre><code>pub struct UserProfile {
+    int id;
+    string username;
+}
+
+pub trait Drop {
+    func drop(self);
+}
+
+impl Drop for UserProfile {
+    pub func drop(self) {
+        outln($"Cleaning up user session {self.id:str}");
+    }
+}</code></pre>
+
+    </div>
+</body>
+</html>

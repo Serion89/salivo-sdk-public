@@ -1,0 +1,26 @@
+// Salivo Standard Library: Iterator Module
+module salivo.std.iter;
+><salivo.std.core::{Option, some, none};
+
+pub struct RangeIterator {
+    int current;
+    int end_val;
+    int step_val;
+}
+
+pub func rangeiter(start_val: int, end_val: int, step_val: int) -> RangeIterator {
+    return RangeIterator {
+        current: start_val,
+        end_val: end_val,
+        step_val: step_val,
+    };
+}
+
+pub func next(iter: RangeIterator) -> Option<int> {
+    if (iter.current >= iter.end_val) {
+        return none<int>();
+    }
+    let val = iter.current;
+    iter.current = iter.current + iter.step_val;
+    return some<int>(val);
+}

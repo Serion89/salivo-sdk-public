@@ -1,0 +1,11 @@
+{
+  "iconDefinitions": {
+    "salivo_file": {
+      "iconPath": "./salivo.svg"
+    }
+  },
+  "fileExtensions": {
+    "sal": "salivo_file",
+    "sf": "salivo_file"
+  }
+}

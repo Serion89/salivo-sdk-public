@@ -1,0 +1,39 @@
+module salivo.std.thread;
+
+/// Native OS Thread handle.
+pub struct Thread {
+    int id;
+}
+
+/// Spawns a new native OS thread executing the given function pointer with no arguments.
+pub func spawn(int fn_ptr) -> Thread {
+    let handle = rtthreadspawn(fn_ptr, 0);
+    return Thread { id: handle };
+}
+
+/// Spawns a new native OS thread executing the given function pointer with an integer argument.
+pub func spawnwith(int fn_ptr, int arg) -> Thread {
+    let handle = rtthreadspawn(fn_ptr, arg);
+    return Thread { id: handle };
+}
+
+/// Waits for the thread to complete and returns the thread's integer exit result.
+pub func join(Thread t) -> int {
+    return rtthreadjoin(t.id);
+}
+
+/// Returns the OS thread ID of the current calling thread.
+pub func current() -> int {
+    return rtthreadcurrentid();
+}
+
+/// Relinquishes the remaining timeslice of the current thread to the OS scheduler.
+pub func yield() {
+    rtthreadyield();
+}
+
+/// Suspends the current thread for the specified number of milliseconds.
+pub func sleep(int ms) {
+    rtthreadsleep(ms);
+}
+

@@ -1,0 +1,34 @@
+module salivo.std.convert;
+
+pub func str(int v) -> string {
+    return intstr(v);
+}
+
+pub func floatstr(float f) -> string {
+    return rtfloatstr(f);
+}
+
+pub func intstr(int v) -> string {
+    return rtintstr(v);
+}
+
+pub func strint(string s) -> int {
+    return rtstrint(s);
+}
+
+pub func strfloat(string s) -> float {
+    return rtstrfloat(s);
+}
+
+pub func floattoint(float f) -> int {
+    return rtfloattoint(f);
+}
+
+pub func floatToInt(float f) -> int {
+    return rtfloattoint(f);
+}
+
+pub func float_to_int(float f) -> int {
+    return rtfloattoint(f);
+}
+

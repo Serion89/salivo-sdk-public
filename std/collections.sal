@@ -1,0 +1,2169 @@
+module salivo.std.collections;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none};
+><salivo.std.mem::{allocate, deallocate, reallocate, writei64, readi64, writeval, readval, cloneval, moveval, rthashval, Slice, fromrawparts, sizeof, alignof, strideof, drop, checkedadd, checkedmul, zero, move};
+
+// -----------------------------------------------------------------------------
+// 1. Dynamic Vector (Vec<T>)
+// -----------------------------------------------------------------------------
+
+pub struct Vec<T> {
+    int length;
+    int capacity;
+    int buffer_address;
+}
+
+pub func vecnew<T>() -> Vec<T> {
+    let initcap = 8;
+    let elemsize = strideof<T>();
+    let elemalign = alignof<T>();
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let totalbytes = checkedadd(32, checkedmul(initcap, elemsize));
+    let addr = allocate(totalbytes, elemalign);
+    writei64(addr, 0, 0);
+    writei64(addr, 8, initcap);
+    writei64(addr, 16, elemsize);
+    writei64(addr, 24, elemalign);
+    return Vec<T> {
+        length: 0,
+        capacity: initcap,
+        buffer_address: addr,
+    };
+}
+
+pub func vecNew<T>() -> Vec<T> {
+    return vecnew<T>();
+}
+
+pub func veccap<T>(int cap) -> Vec<T> {
+    let mut initcap = cap;
+    if (initcap <= 0) {
+        initcap = 4;
+    }
+    let elemsize = strideof<T>();
+    let elemalign = alignof<T>();
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let totalbytes = checkedadd(32, checkedmul(initcap, elemsize));
+    let addr = allocate(totalbytes, elemalign);
+    writei64(addr, 0, 0);
+    writei64(addr, 8, initcap);
+    writei64(addr, 16, elemsize);
+    writei64(addr, 24, elemalign);
+    return Vec<T> {
+        length: 0,
+        capacity: initcap,
+        buffer_address: addr,
+    };
+}
+
+pub func vecCap<T>(int cap) -> Vec<T> {
+    return veccap<T>(cap);
+}
+
+pub func vecWithCapacity<T>(int cap) -> Vec<T> {
+    return veccap<T>(cap);
+}
+
+pub func reserve<T>(Vec<T> v, int additional) -> Vec<T> {
+    if (additional <= 0) {
+        return v;
+    }
+    let curlen = veclen<T>(v);
+    let curcap = capacity<T>(v);
+    let required = checkedadd(curlen, additional);
+    if (required <= curcap) {
+        return v;
+    }
+    let mut newcap = checkedmul(curcap, 2);
+    if (newcap < 4) {
+        newcap = 4;
+    }
+    if (newcap < required) {
+        newcap = required;
+    }
+    let elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let elemalign = readi64(v.buffer_address, 24);
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let oldtotal = checkedadd(32, checkedmul(curcap, elemsize));
+    let newtotal = checkedadd(32, checkedmul(newcap, elemsize));
+    let newaddr = reallocate(v.buffer_address, oldtotal, newtotal, elemalign);
+    writei64(newaddr, 8, newcap);
+    return Vec<T> {
+        length: curlen,
+        capacity: newcap,
+        buffer_address: newaddr,
+    };
+}
+
+pub func reserveExact<T>(Vec<T> v, int additional) -> Vec<T> {
+    if (additional <= 0) {
+        return v;
+    }
+    let curlen = veclen<T>(v);
+    let curcap = capacity<T>(v);
+    let required = checkedadd(curlen, additional);
+    if (required <= curcap) {
+        return v;
+    }
+    let elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let elemalign = readi64(v.buffer_address, 24);
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let oldtotal = checkedadd(32, checkedmul(curcap, elemsize));
+    let newtotal = checkedadd(32, checkedmul(required, elemsize));
+    let newaddr = reallocate(v.buffer_address, oldtotal, newtotal, elemalign);
+    writei64(newaddr, 8, required);
+    return Vec<T> {
+        length: curlen,
+        capacity: required,
+        buffer_address: newaddr,
+    };
+}
+
+pub func reserve_exact<T>(Vec<T> v, int additional) -> Vec<T> {
+    return reserveExact<T>(v, additional);
+}
+
+pub func truncate<T>(Vec<T> v, int newlen) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    if (newlen >= curlen) {
+        return v;
+    }
+    let mut actual_new = newlen;
+    if (actual_new < 0) {
+        actual_new = 0;
+    }
+    let elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let mut i = actual_new;
+    while (i < curlen) {
+        let elemoffset = checkedadd(32, checkedmul(i, elemsize));
+        let val: T = moveval<T>(v.buffer_address, elemoffset);
+        drop<T>(val);
+        i = i + 1;
+    }
+    writei64(v.buffer_address, 0, actual_new);
+    return Vec<T> {
+        length: actual_new,
+        capacity: capacity<T>(v),
+        buffer_address: v.buffer_address,
+    };
+}
+
+pub func resize<T>(Vec<T> v, int newlen, T defaultval) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    if (newlen < curlen) {
+        return truncate<T>(v, newlen);
+    }
+    if (newlen > curlen) {
+        let diff = newlen - curlen;
+        let mut reserved_v = reserve<T>(v, diff);
+        let elemsize = readi64(reserved_v.buffer_address, 16);
+        if (elemsize <= 0) {
+            elemsize = strideof<T>();
+        }
+        let mut i = curlen;
+        while (i < newlen) {
+            let elemoffset = checkedadd(32, checkedmul(i, elemsize));
+            if (i == curlen) {
+                writeval<T>(reserved_v.buffer_address, elemoffset, defaultval);
+            } else {
+                let base_offset = checkedadd(32, checkedmul(curlen, elemsize));
+                let cloned_val: T = cloneval<T>(reserved_v.buffer_address, base_offset);
+                writeval<T>(reserved_v.buffer_address, elemoffset, cloned_val);
+            }
+            i = i + 1;
+        }
+        writei64(reserved_v.buffer_address, 0, newlen);
+        return Vec<T> {
+            length: newlen,
+            capacity: capacity<T>(reserved_v),
+            buffer_address: reserved_v.buffer_address,
+        };
+    }
+    return v;
+}
+
+pub func push<T>(Vec<T> v, T val) -> Vec<T> {
+    let curlen = readi64(v.buffer_address, 0);
+    let mut cap = v.capacity;
+    let mut addr = v.buffer_address;
+    let elemsize = strideof<T>();
+
+    if (curlen >= cap) {
+        let mut newcap = checkedmul(cap, 2);
+        if (newcap < 4) {
+            newcap = 4;
+        }
+        let elemalign = alignof<T>();
+        let mut align_act = elemalign;
+        if (align_act < 8) {
+            align_act = 8;
+        }
+        let oldtotal = checkedadd(32, checkedmul(cap, elemsize));
+        let newtotal = checkedadd(32, checkedmul(newcap, elemsize));
+        addr = reallocate(addr, oldtotal, newtotal, align_act);
+        cap = newcap;
+        writei64(addr, 8, cap);
+    }
+
+    let elemoffset = checkedadd(32, checkedmul(curlen, elemsize));
+    writeval<T>(addr, elemoffset, val);
+    let newlen = checkedadd(curlen, 1);
+    writei64(addr, 0, newlen);
+
+    return Vec<T> {
+        length: newlen,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func get<T>(Vec<T> v, int index) -> T {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        panic("Vec::get index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    let elemoffset = 32 + (index * elemsize);
+    return cloneval<T>(v.buffer_address, elemoffset);
+}
+
+pub func getRef<T>(Vec<T> v, int index) -> int {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        panic("Vec::getRef index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    return v.buffer_address + 32 + (index * elemsize);
+}
+
+pub func take<T>(Vec<T> v, int index) -> Option<T> {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        return none<T>();
+    }
+    let mut elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let targetoffset = checkedadd(32, checkedmul(index, elemsize));
+    let val: T = moveval<T>(v.buffer_address, targetoffset);
+    if (index < curlen - 1) {
+        let destaddr = checkedadd(v.buffer_address, targetoffset);
+        let srcaddr = checkedadd(destaddr, elemsize);
+        let shiftbytes = checkedmul((curlen - 1) - index, elemsize);
+        move(srcaddr, destaddr, shiftbytes);
+    }
+    let newlen = curlen - 1;
+    let trailingoffset = checkedadd(32, checkedmul(newlen, elemsize));
+    zero(v.buffer_address, trailingoffset, elemsize);
+    writei64(v.buffer_address, 0, newlen);
+    return some<T>(val);
+}
+
+pub func set<T>(Vec<T> v, int index, T val) {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        panic("Vec::set index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    let elemoffset = 32 + (index * elemsize);
+    let old: T = moveval<T>(v.buffer_address, elemoffset);
+    drop<T>(old);
+    writeval<T>(v.buffer_address, elemoffset, val);
+}
+
+pub func pop<T>(Vec<T> v) -> Option<T> {
+    let curlen = veclen<T>(v);
+    if (curlen == 0) {
+        return none<T>();
+    }
+    let newlen = curlen - 1;
+    writei64(v.buffer_address, 0, newlen);
+    let elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let elemoffset = checkedadd(32, checkedmul(newlen, elemsize));
+    let val: T = moveval<T>(v.buffer_address, elemoffset);
+    zero(v.buffer_address, elemoffset, elemsize);
+    return some<T>(val);
+}
+
+pub func insert<T>(Vec<T> v, int index, T val) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index > curlen) {
+        panic("Vec::insert index out of bounds");
+    }
+    let mut cap = capacity<T>(v);
+    let mut addr = v.buffer_address;
+    let mut elemsize = readi64(addr, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let mut elemalign = readi64(addr, 24);
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    if (curlen >= cap) {
+        let mut newcap = checkedmul(cap, 2);
+        if (newcap < 4) { newcap = 4; }
+        let oldtotal = checkedadd(32, checkedmul(cap, elemsize));
+        let newtotal = checkedadd(32, checkedmul(newcap, elemsize));
+        addr = reallocate(addr, oldtotal, newtotal, elemalign);
+        cap = newcap;
+        writei64(addr, 8, cap);
+    }
+    if (index < curlen) {
+        let srcaddr = checkedadd(addr, checkedadd(32, checkedmul(index, elemsize)));
+        let destaddr = checkedadd(srcaddr, elemsize);
+        let shiftbytes = checkedmul(curlen - index, elemsize);
+        move(srcaddr, destaddr, shiftbytes);
+    }
+    let targetoffset = checkedadd(32, checkedmul(index, elemsize));
+    writeval<T>(addr, targetoffset, val);
+    let newlen = checkedadd(curlen, 1);
+    writei64(addr, 0, newlen);
+    return Vec<T> {
+        length: newlen,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func remove<T>(Vec<T> v, int index) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        panic("Vec::remove index out of bounds");
+    }
+    let mut elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let targetoffset = checkedadd(32, checkedmul(index, elemsize));
+    let removed: T = moveval<T>(v.buffer_address, targetoffset);
+    drop<T>(removed);
+
+    if (index < curlen - 1) {
+        let destaddr = checkedadd(v.buffer_address, targetoffset);
+        let srcaddr = checkedadd(destaddr, elemsize);
+        let shiftbytes = checkedmul((curlen - 1) - index, elemsize);
+        move(srcaddr, destaddr, shiftbytes);
+    }
+    let newlen = curlen - 1;
+    let trailingoffset = checkedadd(32, checkedmul(newlen, elemsize));
+    zero(v.buffer_address, trailingoffset, elemsize);
+    writei64(v.buffer_address, 0, newlen);
+    return Vec<T> {
+        length: newlen,
+        capacity: capacity<T>(v),
+        buffer_address: v.buffer_address,
+    };
+}
+
+pub func swapRemove<T>(Vec<T> v, int index) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    if (index < 0 || index >= curlen) {
+        panic("Vec::swapRemove index out of bounds");
+    }
+    let mut elemsize = readi64(v.buffer_address, 16);
+    if (elemsize <= 0) {
+        elemsize = strideof<T>();
+    }
+    let lastindex = curlen - 1;
+    let targetoffset = checkedadd(32, checkedmul(index, elemsize));
+    let lastoffset = checkedadd(32, checkedmul(lastindex, elemsize));
+    let oldval: T = moveval<T>(v.buffer_address, targetoffset);
+    drop<T>(oldval);
+    if (index != lastindex) {
+        let last_slot = checkedadd(v.buffer_address, lastoffset);
+        let target_slot = checkedadd(v.buffer_address, targetoffset);
+        move(last_slot, target_slot, elemsize);
+        zero(v.buffer_address, lastoffset, elemsize);
+    } else {
+        zero(v.buffer_address, targetoffset, elemsize);
+    }
+    let newlen = lastindex;
+    writei64(v.buffer_address, 0, newlen);
+    return Vec<T> {
+        length: newlen,
+        capacity: capacity<T>(v),
+        buffer_address: v.buffer_address,
+    };
+}
+
+pub func swap_remove<T>(Vec<T> v, int index) -> Vec<T> {
+    return swapRemove<T>(v, index);
+}
+
+pub func capacity<T>(Vec<T> v) -> int {
+    return v.capacity;
+}
+
+pub func veclen<T>(Vec<T> v) -> int {
+    if (v.buffer_address != 0) {
+        return readi64(v.buffer_address, 0);
+    }
+    return v.length;
+}
+
+pub func empty<T>(Vec<T> v) -> bool {
+    return veclen<T>(v) == 0;
+}
+
+pub func isEmpty<T>(Vec<T> v) -> bool {
+    return veclen<T>(v) == 0;
+}
+
+pub func clear<T>(Vec<T> v) -> Vec<T> {
+    let curlen = veclen<T>(v);
+    let elemsize = strideof<T>();
+    let mut i = 0;
+    while (i < curlen) {
+        let elemoffset = checkedadd(32, checkedmul(i, elemsize));
+        let val: T = moveval<T>(v.buffer_address, elemoffset);
+        drop<T>(val);
+        i = i + 1;
+    }
+    writei64(v.buffer_address, 0, 0);
+    return Vec<T> {
+        length: 0,
+        capacity: capacity<T>(v),
+        buffer_address: v.buffer_address,
+    };
+}
+
+pub func vecdrop<T>(Vec<T> v) {
+    drop<Vec<T>>(v);
+}
+
+pub func toslice<T>(Vec<T> v) -> Slice<T> {
+    let curlen = veclen<T>(v);
+    return Slice<T> {
+        start_address: v.buffer_address + 32,
+        length: curlen,
+    };
+}
+
+pub func toSlice<T>(Vec<T> v) -> Slice<T> {
+    return toslice<T>(v);
+}
+
+pub func subslice<T>(Vec<T> v, int start, int end) -> Slice<T> {
+    let curlen = veclen<T>(v);
+    if (start < 0 || start > curlen) {
+        panic("Vec subslice start index out of bounds");
+    }
+    let mut actualend = end;
+    if (actualend == -1) {
+        actualend = curlen;
+    }
+    if (actualend < start || actualend > curlen) {
+        panic("Vec subslice end index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    return Slice<T> {
+        start_address: v.buffer_address + 32 + checkedmul(start, elemsize),
+        length: actualend - start,
+    };
+}
+
+pub func vecEq<T>(Vec<T> a, Vec<T> b) -> bool {
+    let lenA = veclen<T>(a);
+    let lenB = veclen<T>(b);
+    if (lenA != lenB) {
+        return false;
+    }
+    let mut i = 0;
+    while (i < lenA) {
+        let valA = get<T>(a, i);
+        let valB = get<T>(b, i);
+        if (valA != valB) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub struct VecIterator<T> {
+    int buffer_address;
+    int cursor;
+    int length;
+}
+
+pub func iter<T>(Vec<T> v) -> VecIterator<T> {
+    let cur_ptr = allocate(8, 8);
+    writei64(cur_ptr, 0, 0);
+    return VecIterator<T> {
+        buffer_address: v.buffer_address,
+        cursor: cur_ptr,
+        length: veclen<T>(v),
+    };
+}
+
+pub func vecIter<T>(Vec<T> v) -> VecIterator<T> {
+    return iter<T>(v);
+}
+
+pub func next<T>(VecIterator<T> it) -> Option<T> {
+    let cur = readi64(it.cursor, 0);
+    if (cur >= it.length) {
+        return none<T>();
+    }
+    writei64(it.cursor, 0, cur + 1);
+    let elemsize = strideof<T>();
+    let elemoffset = checkedadd(32, checkedmul(cur, elemsize));
+    let val: T = cloneval<T>(it.buffer_address, elemoffset);
+    return some<T>(val);
+}
+
+pub func vecNext<T>(VecIterator<T> it) -> Option<T> {
+    return next<T>(it);
+}
+
+pub func vecDebug<T>(Vec<T> v) -> string {
+    let clen = veclen<T>(v);
+    let mut res = "[";
+    let mut i = 0;
+    while (i < clen) {
+        let el = get<T>(v, i);
+        res = res + $"{el}";
+        if (i + 1 < clen) {
+            res = res + ", ";
+        }
+        i = i + 1;
+    }
+    res = res + "]";
+    return res;
+}
+
+pub func vecDisplay<T>(Vec<T> v) -> string {
+    return vecDebug<T>(v);
+}
+
+
+// -----------------------------------------------------------------------------
+// 2. Double-Ended Queue (Deque<T> & VecDeque<T>)
+// -----------------------------------------------------------------------------
+
+pub struct Deque<T> {
+    int head;
+    int tail;
+    int length;
+    int capacity;
+    int buffer_address;
+}
+
+pub struct VecDeque<T> {
+    int head;
+    int tail;
+    int length;
+    int capacity;
+    int buffer_address;
+}
+
+pub func dequeNew<T>() -> Deque<T> {
+    let cap = 8;
+    let elemsize = strideof<T>();
+    let mut elemalign = alignof<T>();
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let totalbytes = checkedadd(32, checkedmul(cap, elemsize));
+    let addr = allocate(totalbytes, elemalign);
+    writei64(addr, 0, 0);
+    writei64(addr, 8, cap);
+    writei64(addr, 16, 0);
+    writei64(addr, 24, 0);
+    return Deque<T> {
+        head: 0,
+        tail: 0,
+        length: 0,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func dequeWithCapacity<T>(int requested_cap) -> Deque<T> {
+    let mut cap = requested_cap;
+    if (cap < 4) { cap = 4; }
+    let elemsize = strideof<T>();
+    let mut elemalign = alignof<T>();
+    if (elemalign < 8) {
+        elemalign = 8;
+    }
+    let totalbytes = checkedadd(32, checkedmul(cap, elemsize));
+    let addr = allocate(totalbytes, elemalign);
+    writei64(addr, 0, 0);
+    writei64(addr, 8, cap);
+    writei64(addr, 16, 0);
+    writei64(addr, 24, 0);
+    return Deque<T> {
+        head: 0,
+        tail: 0,
+        length: 0,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func deqnew<T>() -> Deque<T> {
+    return dequeNew<T>();
+}
+
+pub func pushBack<T>(dq: Deque<T>, val: T) -> Deque<T> {
+    let mut cap = dq.capacity;
+    let mut addr = dq.buffer_address;
+    let mut head = dq.head;
+    let mut tail = dq.tail;
+    let elemsize = strideof<T>();
+    let mut elemalign = alignof<T>();
+    if (elemalign < 8) { elemalign = 8; }
+
+    if (dq.length >= cap) {
+        let mut newcap = checkedmul(cap, 2);
+        if (newcap < 4) {
+            newcap = 4;
+        }
+        let newtotal = checkedadd(32, checkedmul(newcap, elemsize));
+        let newaddr = allocate(newtotal, elemalign);
+        writei64(newaddr, 0, dq.length);
+        writei64(newaddr, 8, newcap);
+        writei64(newaddr, 16, elemsize);
+        writei64(newaddr, 24, elemalign);
+
+        let mut i = 0;
+        while (i < dq.length) {
+            let slot = (head + i) % cap;
+            let old_off = checkedadd(32, checkedmul(slot, elemsize));
+            let new_off = checkedadd(32, checkedmul(i, elemsize));
+            let old_slot_addr = checkedadd(addr, old_off);
+            let new_slot_addr = checkedadd(newaddr, new_off);
+            move(old_slot_addr, new_slot_addr, elemsize);
+            zero(addr, old_off, elemsize);
+            i = i + 1;
+        }
+        let oldtotal = checkedadd(32, checkedmul(cap, elemsize));
+        deallocate(addr, oldtotal, elemalign);
+        addr = newaddr;
+        head = 0;
+        tail = dq.length;
+        cap = newcap;
+    }
+
+    let slotoff = checkedadd(32, checkedmul(tail, elemsize));
+    writeval<T>(addr, slotoff, val);
+    let mut nexttail = tail + 1;
+    if (nexttail >= cap) {
+        nexttail = 0;
+    }
+    let newlen = checkedadd(dq.length, 1);
+    writei64(addr, 0, newlen);
+    writei64(addr, 8, cap);
+    writei64(addr, 16, head);
+    writei64(addr, 24, nexttail);
+
+    return Deque<T> {
+        head: head,
+        tail: nexttail,
+        length: newlen,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func push_back<T>(dq: Deque<T>, val: T) -> Deque<T> {
+    return pushBack<T>(dq, val);
+}
+
+pub func pushFront<T>(dq: Deque<T>, val: T) -> Deque<T> {
+    let mut cap = dq.capacity;
+    let mut addr = dq.buffer_address;
+    let mut head = dq.head;
+    let mut tail = dq.tail;
+    let elemsize = strideof<T>();
+    let mut elemalign = alignof<T>();
+    if (elemalign < 8) { elemalign = 8; }
+
+    if (dq.length >= cap) {
+        let mut newcap = checkedmul(cap, 2);
+        if (newcap < 4) {
+            newcap = 4;
+        }
+        let newtotal = checkedadd(32, checkedmul(newcap, elemsize));
+        let newaddr = allocate(newtotal, elemalign);
+        writei64(newaddr, 0, dq.length);
+        writei64(newaddr, 8, newcap);
+        writei64(newaddr, 16, 0);
+        writei64(newaddr, 24, dq.length);
+
+        let mut i = 0;
+        while (i < dq.length) {
+            let slot = (head + i) % cap;
+            let old_off = checkedadd(32, checkedmul(slot, elemsize));
+            let new_off = checkedadd(32, checkedmul(i, elemsize));
+            let old_slot_addr = checkedadd(addr, old_off);
+            let new_slot_addr = checkedadd(newaddr, new_off);
+            move(old_slot_addr, new_slot_addr, elemsize);
+            zero(addr, old_off, elemsize);
+            i = i + 1;
+        }
+        let oldtotal = checkedadd(32, checkedmul(cap, elemsize));
+        deallocate(addr, oldtotal, elemalign);
+        addr = newaddr;
+        head = 0;
+        tail = dq.length;
+        cap = newcap;
+    }
+
+    let mut newhead = head - 1;
+    if (newhead < 0) {
+        newhead = newhead + cap;
+    }
+    let slotoff = checkedadd(32, checkedmul(newhead, elemsize));
+    writeval<T>(addr, slotoff, val);
+    let newlen = checkedadd(dq.length, 1);
+    writei64(addr, 0, newlen);
+    writei64(addr, 8, cap);
+    writei64(addr, 16, newhead);
+    writei64(addr, 24, tail);
+
+    return Deque<T> {
+        head: newhead,
+        tail: tail,
+        length: newlen,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func push_front<T>(dq: Deque<T>, val: T) -> Deque<T> {
+    return pushFront<T>(dq, val);
+}
+
+pub func popFront<T>(dq: Deque<T>) -> Option<T> {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return none<T>();
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let slotoff = checkedadd(32, checkedmul(head, elemsize));
+    let val: T = moveval<T>(dq.buffer_address, slotoff);
+    zero(dq.buffer_address, slotoff, elemsize);
+    let mut nexthead = head + 1;
+    if (nexthead >= cap) {
+        nexthead = 0;
+    }
+    let newlen = curlen - 1;
+    writei64(dq.buffer_address, 0, newlen);
+    writei64(dq.buffer_address, 16, nexthead);
+    return some<T>(val);
+}
+
+pub func pop_front<T>(dq: Deque<T>) -> Option<T> {
+    return popFront<T>(dq);
+}
+
+pub func popBack<T>(dq: Deque<T>) -> Option<T> {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return none<T>();
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let lastslot = (head + curlen - 1) % cap;
+    let slotoff = checkedadd(32, checkedmul(lastslot, elemsize));
+    let val: T = moveval<T>(dq.buffer_address, slotoff);
+    zero(dq.buffer_address, slotoff, elemsize);
+    let newlen = curlen - 1;
+    writei64(dq.buffer_address, 0, newlen);
+    writei64(dq.buffer_address, 24, lastslot);
+    return some<T>(val);
+}
+
+pub func pop_back<T>(dq: Deque<T>) -> Option<T> {
+    return popBack<T>(dq);
+}
+
+pub func front<T>(dq: Deque<T>) -> Option<T> {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return none<T>();
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+    }
+    let slotoff = checkedadd(32, checkedmul(head, elemsize));
+    let val: T = cloneval<T>(dq.buffer_address, slotoff);
+    return some<T>(val);
+}
+
+pub func frontRef<T>(dq: Deque<T>) -> int {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return 0;
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+    }
+    return dq.buffer_address + 32 + (head * elemsize);
+}
+
+pub func back<T>(dq: Deque<T>) -> Option<T> {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return none<T>();
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let lastslot = (head + curlen - 1) % cap;
+    let slotoff = checkedadd(32, checkedmul(lastslot, elemsize));
+    let val: T = cloneval<T>(dq.buffer_address, slotoff);
+    return some<T>(val);
+}
+
+pub func backRef<T>(dq: Deque<T>) -> int {
+    let curlen = deqlen<T>(dq);
+    if (curlen == 0) {
+        return 0;
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let lastslot = (head + curlen - 1) % cap;
+    return dq.buffer_address + 32 + (lastslot * elemsize);
+}
+
+pub func deqget<T>(dq: Deque<T>, index: int) -> T {
+    let curlen = deqlen<T>(dq);
+    if (index < 0 || index >= curlen) {
+        panic("Deque::get index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let slot = (head + index) % cap;
+    let slotoff = checkedadd(32, checkedmul(slot, elemsize));
+    let val: T = cloneval<T>(dq.buffer_address, slotoff);
+    return val;
+}
+
+pub func deqGetRef<T>(dq: Deque<T>, index: int) -> int {
+    let curlen = deqlen<T>(dq);
+    if (index < 0 || index >= curlen) {
+        panic("Deque::getRef index out of bounds");
+    }
+    let elemsize = strideof<T>();
+    let mut head = dq.head;
+    let mut cap = dq.capacity;
+    if (dq.buffer_address != 0) {
+        head = readi64(dq.buffer_address, 16);
+        cap = readi64(dq.buffer_address, 8);
+    }
+    let slot = (head + index) % cap;
+    return dq.buffer_address + 32 + (slot * elemsize);
+}
+
+pub func deqlen<T>(dq: Deque<T>) -> int {
+    if (dq.buffer_address != 0) {
+        return readi64(dq.buffer_address, 0);
+    }
+    return dq.length;
+}
+
+pub func dequeClear<T>(dq: Deque<T>) -> Deque<T> {
+    let elemsize = strideof<T>();
+    let mut i = 0;
+    while (i < dq.length) {
+        let slot = (dq.head + i) % dq.capacity;
+        let slotoff = checkedadd(32, checkedmul(slot, elemsize));
+        let val: T = moveval<T>(dq.buffer_address, slotoff);
+        drop<T>(val);
+        i = i + 1;
+    }
+    writei64(dq.buffer_address, 0, 0);
+    writei64(dq.buffer_address, 16, 0);
+    writei64(dq.buffer_address, 24, 0);
+    return Deque<T> {
+        head: 0,
+        tail: 0,
+        length: 0,
+        capacity: dq.capacity,
+        buffer_address: dq.buffer_address,
+    };
+}
+
+pub func dequeEq<T>(Deque<T> a, Deque<T> b) -> bool {
+    if (a.length != b.length) {
+        return false;
+    }
+    let mut i = 0;
+    while (i < a.length) {
+        let valA = deqget<T>(a, i);
+        let valB = deqget<T>(b, i);
+        if (valA != valB) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub struct DequeIterator<T> {
+    int buffer_address;
+    int capacity;
+    int cursor;
+    int head;
+    int length;
+}
+
+pub func deqIter<T>(Deque<T> dq) -> DequeIterator<T> {
+    let cur_ptr = allocate(8, 8);
+    writei64(cur_ptr, 0, 0);
+    return DequeIterator<T> {
+        buffer_address: dq.buffer_address,
+        capacity: dq.capacity,
+        cursor: cur_ptr,
+        head: dq.head,
+        length: dq.length,
+    };
+}
+
+pub func deqNext<T>(DequeIterator<T> it) -> Option<T> {
+    let cur = readi64(it.cursor, 0);
+    if (cur >= it.length) {
+        return none<T>();
+    }
+    writei64(it.cursor, 0, cur + 1);
+    let slot = (it.head + cur) % it.capacity;
+    let elemsize = strideof<T>();
+    let slotoff = checkedadd(32, checkedmul(slot, elemsize));
+    let val: T = cloneval<T>(it.buffer_address, slotoff);
+    return some<T>(val);
+}
+
+pub func dequeDebug<T>(Deque<T> dq) -> string {
+    let mut res = "Deque([";
+    let mut i = 0;
+    while (i < dq.length) {
+        let el = deqget<T>(dq, i);
+        res = res + $"{el}";
+        if (i + 1 < dq.length) {
+            res = res + ", ";
+        }
+        i = i + 1;
+    }
+    res = res + "])";
+    return res;
+}
+
+// Backwards-compatible Deque aliases
+pub func pushback<T>(dq: Deque<T>, val: T) -> Deque<T> {
+    return pushBack<T>(dq, val);
+}
+
+pub func popfront<T>(dq: Deque<T>) -> Option<T> {
+    let opt = popFront<T>(dq);
+    if (opt.is_some) {
+        return some<T>(opt.value);
+    }
+    return none<T>();
+}
+
+
+// -----------------------------------------------------------------------------
+// [EXPERIMENTAL PROTOTYPE] Doubly Linked List (LinkedList<T>)
+// Note: Prototype scalar node implementation (not part of Stage 35.3 core target).
+// -----------------------------------------------------------------------------
+
+pub struct LinkedList<T> {
+    int head_ptr;
+    int tail_ptr;
+    int length;
+}
+
+pub func listnew<T>() -> LinkedList<T> {
+    return LinkedList<T> {
+        head_ptr: 0,
+        tail_ptr: 0,
+        length: 0,
+    };
+}
+
+pub func listpushfront<T>(list: LinkedList<T>, val: T) -> LinkedList<T> {
+    let node_size = 24;
+    let node = allocate(node_size, 8);
+    writei64(node, 0, val);
+    writei64(node, 8, 0);
+    writei64(node, 16, list.head_ptr);
+
+    if (list.head_ptr != 0) {
+        writei64(list.head_ptr, 8, node);
+    }
+    let mut new_tail = list.tail_ptr;
+    if (new_tail == 0) {
+        new_tail = node;
+    }
+
+    return LinkedList<T> {
+        head_ptr: node,
+        tail_ptr: new_tail,
+        length: list.length + 1,
+    };
+}
+
+pub func listpushback<T>(list: LinkedList<T>, val: T) -> LinkedList<T> {
+    let node_size = 24;
+    let node = allocate(node_size, 8);
+    writei64(node, 0, val);
+    writei64(node, 8, list.tail_ptr);
+    writei64(node, 16, 0);
+
+    if (list.tail_ptr != 0) {
+        writei64(list.tail_ptr, 16, node);
+    }
+    let mut new_head = list.head_ptr;
+    if (new_head == 0) {
+        new_head = node;
+    }
+
+    return LinkedList<T> {
+        head_ptr: new_head,
+        tail_ptr: node,
+        length: list.length + 1,
+    };
+}
+
+pub func listpopfront<T>(list: LinkedList<T>) -> Option<T> {
+    if (list.head_ptr == 0) {
+        return none<T>();
+    }
+    let val: T = readi64(list.head_ptr, 0);
+    let nextnode = readi64(list.head_ptr, 16);
+    deallocate(list.head_ptr, 24, 8);
+    list.head_ptr = nextnode;
+    list.length = list.length - 1;
+    if (nextnode != 0) {
+        writei64(nextnode, 8, 0);
+    }
+    return some<T>(val);
+}
+
+pub func listpopback<T>(list: LinkedList<T>) -> Option<T> {
+    if (list.tail_ptr == 0) {
+        return none<T>();
+    }
+    let val: T = readi64(list.tail_ptr, 0);
+    let nextnode = readi64(list.tail_ptr, 8);
+    deallocate(list.tail_ptr, 24, 8);
+    list.tail_ptr = nextnode;
+    list.length = list.length - 1;
+    if (nextnode != 0) {
+        writei64(nextnode, 16, 0);
+    }
+    return some<T>(val);
+}
+
+pub func listlen<T>(list: LinkedList<T>) -> int {
+    return list.length;
+}
+
+
+// -----------------------------------------------------------------------------
+// 4. Hash Map (HashMap<K, V>)
+// -----------------------------------------------------------------------------
+
+pub struct HashMap<K, V> {
+    int length;
+    int bucket_count;
+    int buckets_address;
+}
+
+pub func mapNew<K, V>() -> HashMap<K, V> {
+    let initbuckets = 16;
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+    let totalbytes = checkedmul(initbuckets, bucket_stride);
+    let addr = allocate(totalbytes, balign);
+    let mut i = 0;
+    while (i < initbuckets) {
+        writei64(addr, i * bucket_stride, 0);
+        i = i + 1;
+    }
+    return HashMap<K, V> {
+        length: 0,
+        bucket_count: initbuckets,
+        buckets_address: addr,
+    };
+}
+
+pub func mapnew<K, V>() -> HashMap<K, V> {
+    return mapNew<K, V>();
+}
+
+pub func mapWithCapacity<K, V>(int cap) -> HashMap<K, V> {
+    let cap_target = checkedmul(cap, 2);
+    let mut initbuckets = 16;
+    while (initbuckets < cap_target) {
+        initbuckets = checkedmul(initbuckets, 2);
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+    let totalbytes = checkedmul(initbuckets, bucket_stride);
+    let addr = allocate(totalbytes, balign);
+    let mut i = 0;
+    while (i < initbuckets) {
+        writei64(addr, i * bucket_stride, 0);
+        i = i + 1;
+    }
+    return HashMap<K, V> {
+        length: 0,
+        bucket_count: initbuckets,
+        buckets_address: addr,
+    };
+}
+
+pub func put<K, V>(map: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
+    let mut curcount = map.bucket_count;
+    let mut curaddr = map.buckets_address;
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    // Grow when load factor exceeds 75%
+    let load_req = checkedmul(checkedadd(map.length, 1), 4);
+    let load_cap = checkedmul(curcount, 3);
+    if (load_req > load_cap) {
+        let oldcount = curcount;
+        let oldaddr = curaddr;
+        let newcount = checkedmul(oldcount, 2);
+        let newtotal = checkedmul(newcount, bucket_stride);
+        let newaddr = allocate(newtotal, balign);
+        let mut j = 0;
+        while (j < newcount) {
+            writei64(newaddr, j * bucket_stride, 0);
+            j = j + 1;
+        }
+        let mut i = 0;
+        while (i < oldcount) {
+            let occ = readi64(oldaddr, i * bucket_stride);
+            if (occ == 1) {
+                let rehashh = readi64(oldaddr, i * bucket_stride + 8);
+                let mut idxrehash = rehashh % newcount;
+                while (readi64(newaddr, idxrehash * bucket_stride) == 1) {
+                    idxrehash = (idxrehash + 1) % newcount;
+                }
+                writei64(newaddr, idxrehash * bucket_stride, 1);
+                writei64(newaddr, idxrehash * bucket_stride + 8, rehashh);
+                let old_slot = oldaddr + i * bucket_stride + key_offset;
+                let new_slot = newaddr + idxrehash * bucket_stride + key_offset;
+                let payload_size = (val_offset + vstride) - key_offset;
+                move(old_slot, new_slot, payload_size);
+                zero(oldaddr, i * bucket_stride + key_offset, payload_size);
+            }
+            i = i + 1;
+        }
+        let oldtotal = checkedmul(oldcount, bucket_stride);
+        deallocate(oldaddr, oldtotal, balign);
+        curcount = newcount;
+        curaddr = newaddr;
+    }
+
+    let h = rthashval<K>(key);
+    let mut idx = h % curcount;
+    let mut first_tombstone = -1;
+    let mut count = 0;
+
+    while (count < curcount) {
+        let occ = readi64(curaddr, idx * bucket_stride);
+        if (occ == 0) {
+            let mut write_slot = idx;
+            if (first_tombstone != -1) {
+                write_slot = first_tombstone;
+            }
+            writei64(curaddr, write_slot * bucket_stride, 1);
+            writei64(curaddr, write_slot * bucket_stride + 8, h);
+            writeval<K>(curaddr, write_slot * bucket_stride + key_offset, key);
+            writeval<V>(curaddr, write_slot * bucket_stride + val_offset, val);
+            return HashMap<K, V> {
+                length: map.length + 1,
+                bucket_count: curcount,
+                buckets_address: curaddr,
+            };
+        }
+        if (occ == 2 && first_tombstone == -1) {
+            first_tombstone = idx;
+        }
+        if (occ == 1) {
+            let cached_h = readi64(curaddr, idx * bucket_stride + 8);
+            if (cached_h == h) {
+                let existingkey: K = cloneval<K>(curaddr, idx * bucket_stride + key_offset);
+                let is_match = (existingkey == key);
+                drop<K>(existingkey);
+                if (is_match) {
+                    let oldval: V = moveval<V>(curaddr, idx * bucket_stride + val_offset);
+                    drop<V>(oldval);
+                    writeval<V>(curaddr, idx * bucket_stride + val_offset, val);
+                    return HashMap<K, V> {
+                        length: map.length,
+                        bucket_count: curcount,
+                        buckets_address: curaddr,
+                    };
+                }
+            }
+        }
+        idx = (idx + 1) % curcount;
+        count = count + 1;
+    }
+
+    // Wrap-around case if table had only tombstones
+    if (first_tombstone != -1) {
+        writei64(curaddr, first_tombstone * bucket_stride, 1);
+        writei64(curaddr, first_tombstone * bucket_stride + 8, h);
+        writeval<K>(curaddr, first_tombstone * bucket_stride + key_offset, key);
+        writeval<V>(curaddr, first_tombstone * bucket_stride + val_offset, val);
+        return HashMap<K, V> {
+            length: map.length + 1,
+            bucket_count: curcount,
+            buckets_address: curaddr,
+        };
+    }
+
+    return HashMap<K, V> {
+        length: map.length,
+        bucket_count: curcount,
+        buckets_address: curaddr,
+    };
+}
+
+pub func mapPut<K, V>(map: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
+    return put<K, V>(map, key, val);
+}
+
+pub func lookup<K, V>(map: HashMap<K, V>, key: K) -> Option<V> {
+    if (map.length == 0 || map.bucket_count == 0) {
+        return none<V>();
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let h = rthashval<K>(key);
+    let mut idx = h % map.bucket_count;
+    let mut count = 0;
+
+    while (count < map.bucket_count) {
+        let occ = readi64(map.buckets_address, idx * bucket_stride);
+        if (occ == 0) {
+            return none<V>();
+        }
+        if (occ == 1) {
+            let cached_h = readi64(map.buckets_address, idx * bucket_stride + 8);
+            if (cached_h == h) {
+                let existingkey: K = cloneval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                let is_match = (existingkey == key);
+                drop<K>(existingkey);
+                if (is_match) {
+                    let v: V = cloneval<V>(map.buckets_address, idx * bucket_stride + val_offset);
+                    return some<V>(v);
+                }
+            }
+        }
+        idx = (idx + 1) % map.bucket_count;
+        count = count + 1;
+    }
+    return none<V>();
+}
+
+pub func lookupRef<K, V>(map: HashMap<K, V>, key: K) -> int {
+    if (map.length == 0 || map.bucket_count == 0) {
+        return 0;
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let h = rthashval<K>(key);
+    let mut idx = h % map.bucket_count;
+    let mut count = 0;
+
+    while (count < map.bucket_count) {
+        let occ = readi64(map.buckets_address, idx * bucket_stride);
+        if (occ == 0) {
+            return 0;
+        }
+        if (occ == 1) {
+            let cached_h = readi64(map.buckets_address, idx * bucket_stride + 8);
+            if (cached_h == h) {
+                let existingkey: K = cloneval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                let is_match = (existingkey == key);
+                drop<K>(existingkey);
+                if (is_match) {
+                    return map.buckets_address + idx * bucket_stride + val_offset;
+                }
+            }
+        }
+        idx = (idx + 1) % map.bucket_count;
+        count = count + 1;
+    }
+    return 0;
+}
+
+pub func mapTake<K, V>(map: HashMap<K, V>, key: K) -> Option<V> {
+    if (map.length == 0 || map.bucket_count == 0) {
+        return none<V>();
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let h = rthashval<K>(key);
+    let mut idx = h % map.bucket_count;
+    let mut count = 0;
+
+    while (count < map.bucket_count) {
+        let occ = readi64(map.buckets_address, idx * bucket_stride);
+        if (occ == 0) {
+            return none<V>();
+        }
+        if (occ == 1) {
+            let cached_h = readi64(map.buckets_address, idx * bucket_stride + 8);
+            if (cached_h == h) {
+                let existingkey: K = cloneval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                let is_match = (existingkey == key);
+                drop<K>(existingkey);
+                if (is_match) {
+                    let oldk: K = moveval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                    let oldval: V = moveval<V>(map.buckets_address, idx * bucket_stride + val_offset);
+                    drop<K>(oldk);
+                    writei64(map.buckets_address, idx * bucket_stride, 2);
+                    return some<V>(oldval);
+                }
+            }
+        }
+        idx = (idx + 1) % map.bucket_count;
+        count = count + 1;
+    }
+    return none<V>();
+}
+
+pub func mapGet<K, V>(map: HashMap<K, V>, key: K) -> Option<V> {
+    return lookup<K, V>(map, key);
+}
+
+pub func has<K, V>(map: HashMap<K, V>, key: K) -> bool {
+    let res = lookup<K, V>(map, key);
+    return res.is_some;
+}
+
+pub func containsKey<K, V>(map: HashMap<K, V>, key: K) -> bool {
+    return has<K, V>(map, key);
+}
+
+pub func delete<K, V>(map: HashMap<K, V>, key: K) -> HashMap<K, V> {
+    if (map.length == 0 || map.bucket_count == 0) {
+        return map;
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let h = rthashval<K>(key);
+    let mut idx = h % map.bucket_count;
+    let mut count = 0;
+
+    while (count < map.bucket_count) {
+        let occ = readi64(map.buckets_address, idx * bucket_stride);
+        if (occ == 0) {
+            return map;
+        }
+        if (occ == 1) {
+            let cached_h = readi64(map.buckets_address, idx * bucket_stride + 8);
+            if (cached_h == h) {
+                let existingkey: K = cloneval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                let is_match = (existingkey == key);
+                drop<K>(existingkey);
+                if (is_match) {
+                    let oldk: K = moveval<K>(map.buckets_address, idx * bucket_stride + key_offset);
+                    let oldval: V = moveval<V>(map.buckets_address, idx * bucket_stride + val_offset);
+                    drop<K>(oldk);
+                    drop<V>(oldval);
+                    writei64(map.buckets_address, idx * bucket_stride, 2);
+                    return HashMap<K, V> {
+                        length: map.length - 1,
+                        bucket_count: map.bucket_count,
+                        buckets_address: map.buckets_address,
+                    };
+                }
+            }
+        }
+        idx = (idx + 1) % map.bucket_count;
+        count = count + 1;
+    }
+    return map;
+}
+
+pub func mapRemove<K, V>(map: HashMap<K, V>, key: K) -> HashMap<K, V> {
+    return delete<K, V>(map, key);
+}
+
+pub func maplen<K, V>(map: HashMap<K, V>) -> int {
+    return map.length;
+}
+
+pub func mapIsEmpty<K, V>(map: HashMap<K, V>) -> bool {
+    return map.length == 0;
+}
+
+pub func mapClear<K, V>(map: HashMap<K, V>) -> HashMap<K, V> {
+    if (map.length == 0 || map.bucket_count == 0) {
+        return map;
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let mut i = 0;
+    while (i < map.bucket_count) {
+        let occ = readi64(map.buckets_address, i * bucket_stride);
+        if (occ == 1) {
+            let k: K = moveval<K>(map.buckets_address, i * bucket_stride + key_offset);
+            let v: V = moveval<V>(map.buckets_address, i * bucket_stride + val_offset);
+            drop<K>(k);
+            drop<V>(v);
+        }
+        writei64(map.buckets_address, i * bucket_stride, 0);
+        i = i + 1;
+    }
+    return HashMap<K, V> {
+        length: 0,
+        bucket_count: map.bucket_count,
+        buckets_address: map.buckets_address,
+    };
+}
+
+pub func mapEq<K, V>(HashMap<K, V> a, HashMap<K, V> b) -> bool {
+    if (a.length != b.length) {
+        return false;
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let mut i = 0;
+    while (i < a.bucket_count) {
+        let occ = readi64(a.buckets_address, i * bucket_stride);
+        if (occ == 1) {
+            let k: K = cloneval<K>(a.buckets_address, i * bucket_stride + key_offset);
+            let valA_addr = a.buckets_address + i * bucket_stride + val_offset;
+            let valB_addr = lookupRef<K, V>(b, k);
+            if (valB_addr == 0) {
+                drop<K>(k);
+                return false;
+            }
+            let valA: V = cloneval<V>(valA_addr, 0);
+            let valB: V = cloneval<V>(valB_addr, 0);
+            let eq = (valA == valB);
+            drop<K>(k);
+            drop<V>(valA);
+            drop<V>(valB);
+            if (!eq) {
+                return false;
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub struct MapIterator<K, V> {
+    int bucket_count;
+    int buckets_address;
+    int cursor;
+}
+
+pub func mapIter<K, V>(HashMap<K, V> m) -> MapIterator<K, V> {
+    let cur_ptr = allocate(8, 8);
+    writei64(cur_ptr, 0, 0);
+    return MapIterator<K, V> {
+        bucket_count: m.bucket_count,
+        buckets_address: m.buckets_address,
+        cursor: cur_ptr,
+    };
+}
+
+pub func mapNext<K, V>(MapIterator<K, V> it) -> Option<K> {
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let mut cur = readi64(it.cursor, 0);
+    while (cur < it.bucket_count) {
+        let occ = readi64(it.buckets_address, cur * bucket_stride);
+        if (occ == 1) {
+            writei64(it.cursor, 0, cur + 1);
+            let k: K = cloneval<K>(it.buckets_address, cur * bucket_stride + key_offset);
+            return some<K>(k);
+        }
+        cur = cur + 1;
+    }
+    writei64(it.cursor, 0, cur);
+    return none<K>();
+}
+
+pub func mapDebug<K, V>(HashMap<K, V> m) -> string {
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let mut res = "{";
+    let mut i = 0;
+    let mut count = 0;
+    while (i < m.bucket_count) {
+        let occ = readi64(m.buckets_address, i * bucket_stride);
+        if (occ == 1) {
+            let k: K = cloneval<K>(m.buckets_address, i * bucket_stride + key_offset);
+            let v: V = cloneval<V>(m.buckets_address, i * bucket_stride + val_offset);
+            if (count > 0) {
+                res = res + ", ";
+            }
+            res = res + $"\"{k}\": {v}";
+            drop<K>(k);
+            drop<V>(v);
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    res = res + "}";
+    return res;
+}
+
+
+// -----------------------------------------------------------------------------
+// 5. Hash Set (HashSet<T>)
+// -----------------------------------------------------------------------------
+
+pub struct HashSet<T> {
+    HashMap<T, int> map;
+}
+
+pub func setNew<T>() -> HashSet<T> {
+    return HashSet<T> { map: mapNew<T, int>() };
+}
+
+pub func setnew<T>() -> HashSet<T> {
+    return setNew<T>();
+}
+
+pub func setWithCapacity<T>(int cap) -> HashSet<T> {
+    return HashSet<T> { map: mapWithCapacity<T, int>(cap) };
+}
+
+pub func add<T>(set: HashSet<T>, val: T) -> HashSet<T> {
+    let updatedmap = put<T, int>(set.map, val, 1);
+    return HashSet<T> { map: updatedmap };
+}
+
+pub func setAdd<T>(set: HashSet<T>, val: T) -> HashSet<T> {
+    return add<T>(set, val);
+}
+
+pub func discard<T>(set: HashSet<T>, val: T) -> HashSet<T> {
+    let updatedmap = delete<T, int>(set.map, val);
+    return HashSet<T> { map: updatedmap };
+}
+
+pub func setRemove<T>(set: HashSet<T>, val: T) -> HashSet<T> {
+    return discard<T>(set, val);
+}
+
+pub func member<T>(set: HashSet<T>, val: T) -> bool {
+    return has<T, int>(set.map, val);
+}
+
+pub func setContains<T>(set: HashSet<T>, val: T) -> bool {
+    return member<T>(set, val);
+}
+
+pub func setlen<T>(set: HashSet<T>) -> int {
+    return maplen<T, int>(set.map);
+}
+
+pub func setIsEmpty<T>(set: HashSet<T>) -> bool {
+    return maplen<T, int>(set.map) == 0;
+}
+
+pub func setClear<T>(set: HashSet<T>) -> HashSet<T> {
+    let updatedmap = mapClear<T, int>(set.map);
+    return HashSet<T> { map: updatedmap };
+}
+
+pub func setUnion<T>(HashSet<T> a, HashSet<T> b) -> HashSet<T> {
+    let mut res = setNew<T>();
+    let itA = mapIter<T, int>(a.map);
+    let mut optA = mapNext<T, int>(itA);
+    while (optA.is_some) {
+        res = add<T>(res, optA.value);
+        optA = mapNext<T, int>(itA);
+    }
+    let itB = mapIter<T, int>(b.map);
+    let mut optB = mapNext<T, int>(itB);
+    while (optB.is_some) {
+        res = add<T>(res, optB.value);
+        optB = mapNext<T, int>(itB);
+    }
+    return res;
+}
+
+pub func setIntersection<T>(HashSet<T> a, HashSet<T> b) -> HashSet<T> {
+    let mut res = setNew<T>();
+    let itA = mapIter<T, int>(a.map);
+    let mut optA = mapNext<T, int>(itA);
+    while (optA.is_some) {
+        if (member<T>(b, optA.value)) {
+            res = add<T>(res, optA.value);
+        }
+        optA = mapNext<T, int>(itA);
+    }
+    return res;
+}
+
+pub func setDifference<T>(HashSet<T> a, HashSet<T> b) -> HashSet<T> {
+    let mut res = setNew<T>();
+    let itA = mapIter<T, int>(a.map);
+    let mut optA = mapNext<T, int>(itA);
+    while (optA.is_some) {
+        if (!member<T>(b, optA.value)) {
+            res = add<T>(res, optA.value);
+        }
+        optA = mapNext<T, int>(itA);
+    }
+    return res;
+}
+
+pub func setEq<T>(HashSet<T> a, HashSet<T> b) -> bool {
+    if (setlen<T>(a) != setlen<T>(b)) {
+        return false;
+    }
+    let itA = mapIter<T, int>(a.map);
+    let mut optA = mapNext<T, int>(itA);
+    while (optA.is_some) {
+        if (!member<T>(b, optA.value)) {
+            return false;
+        }
+        optA = mapNext<T, int>(itA);
+    }
+    return true;
+}
+
+pub struct SetIterator<T> {
+    MapIterator<T, int> inner;
+}
+
+pub func setIter<T>(HashSet<T> s) -> SetIterator<T> {
+    return SetIterator<T> {
+        inner: mapIter<T, int>(s.map),
+    };
+}
+
+pub func setNext<T>(SetIterator<T> it) -> Option<T> {
+    return mapNext<T, int>(it.inner);
+}
+
+pub func setDebug<T>(HashSet<T> s) -> string {
+    let mut res = "{";
+    let it = setIter<T>(s);
+    let mut opt = setNext<T>(it);
+    let mut count = 0;
+    while (opt.is_some) {
+        if (count > 0) {
+            res = res + ", ";
+        }
+        let el = opt.value;
+        res = res + $"{el}";
+        count = count + 1;
+        opt = setNext<T>(it);
+    }
+    res = res + "}";
+    return res;
+}
+
+
+// -----------------------------------------------------------------------------
+// [EXPERIMENTAL PROTOTYPE] Binary Heap Priority Queue (BinaryHeap<T>)
+// Note: Prototype 8-byte scalar slot implementation (not part of Stage 35.3 core target).
+// -----------------------------------------------------------------------------
+
+pub struct BinaryHeap<T> {
+    int length;
+    int capacity;
+    int buffer_address;
+}
+
+pub func heapnew<T>() -> BinaryHeap<T> {
+    let cap = 8;
+    let addr = allocate(cap * 8, 8);
+    return BinaryHeap<T> {
+        length: 0,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func heappush<T>(heap: BinaryHeap<T>, val: T) -> BinaryHeap<T> {
+    let mut cap = heap.capacity;
+    let mut addr = heap.buffer_address;
+    if (heap.length >= cap) {
+        let newcap = cap * 2;
+        addr = reallocate(addr, cap * 8, newcap * 8, 8);
+        cap = newcap;
+    }
+    let mut idx = heap.length;
+    writei64(addr, idx * 8, val);
+
+    while (idx > 0) {
+        let parent = (idx - 1) / 2;
+        let parentval: T = readi64(addr, parent * 8);
+        let currval: T = readi64(addr, idx * 8);
+        if (currval > parentval) {
+            writei64(addr, parent * 8, currval);
+            writei64(addr, idx * 8, parentval);
+            idx = parent;
+        } else {
+            return BinaryHeap<T> {
+                length: heap.length + 1,
+                capacity: cap,
+                buffer_address: addr,
+            };
+        }
+    }
+
+    return BinaryHeap<T> {
+        length: heap.length + 1,
+        capacity: cap,
+        buffer_address: addr,
+    };
+}
+
+pub func heappop<T>(heap: BinaryHeap<T>) -> Option<T> {
+    if (heap.length == 0) {
+        return none<T>();
+    }
+    let top: T = readi64(heap.buffer_address, 0);
+    let newlen = heap.length - 1;
+    if (newlen == 0) {
+        return some<T>(top);
+    }
+
+    let last: T = readi64(heap.buffer_address, newlen * 8);
+    writei64(heap.buffer_address, 0, last);
+
+    let mut idx = 0;
+    while (idx * 2 + 1 < newlen) {
+        let left = idx * 2 + 1;
+        let right = idx * 2 + 2;
+        let mut largest = idx;
+
+        let largestval: T = readi64(heap.buffer_address, largest * 8);
+        let leftval: T = readi64(heap.buffer_address, left * 8);
+        if (leftval > largestval) {
+            largest = left;
+        }
+
+        if (right < newlen) {
+            let currlargest: T = readi64(heap.buffer_address, largest * 8);
+            let rightval: T = readi64(heap.buffer_address, right * 8);
+            if (rightval > currlargest) {
+                largest = right;
+            }
+        }
+
+        if (largest != idx) {
+            let ival: T = readi64(heap.buffer_address, idx * 8);
+            let lval: T = readi64(heap.buffer_address, largest * 8);
+            writei64(heap.buffer_address, idx * 8, lval);
+            writei64(heap.buffer_address, largest * 8, ival);
+            idx = largest;
+        } else {
+            return some<T>(top);
+        }
+    }
+
+    return some<T>(top);
+}
+
+pub func heaplen<T>(heap: BinaryHeap<T>) -> int {
+    return heap.length;
+}
+
+
+// -----------------------------------------------------------------------------
+// 7. [EXPERIMENTAL PROTOTYPE - NON-PRODUCTION] B-Tree Map (BTreeMap<K, V>) & B-Tree Set (BTreeSet<T>)
+//    NOTE: BTreeMap<K, V> and BTreeSet<T> are experimental prototypes with
+//    scalar slot layout (i64 key/value) and are NOT part of the Stage 35.3
+//    production generic standard collection surface. Full generic node
+//    allocation, balancing, removal, and drop traversal are planned for a
+//    future release.
+// -----------------------------------------------------------------------------
+
+pub struct BTreeMap<K, V> {
+    int root_ptr;
+    int length;
+}
+
+pub func btreenew<K, V>() -> BTreeMap<K, V> {
+    return BTreeMap<K, V> {
+        root_ptr: 0,
+        length: 0,
+    };
+}
+
+pub func btreeput<K, V>(map: BTreeMap<K, V>, key: K, val: V) -> BTreeMap<K, V> {
+    let node_size = 32;
+    if (map.root_ptr == 0) {
+        let root = allocate(node_size, 8);
+        writei64(root, 0, key);
+        writei64(root, 8, val);
+        writei64(root, 16, 0);
+        writei64(root, 24, 0);
+        return BTreeMap<K, V> {
+            root_ptr: root,
+            length: 1,
+        };
+    }
+
+    let mut curr = map.root_ptr;
+    while (curr != 0) {
+        let curr_key: K = readi64(curr, 0);
+        if (key == curr_key) {
+            writei64(curr, 8, val);
+            return map;
+        }
+        if (key < curr_key) {
+            let left = readi64(curr, 16);
+            if (left == 0) {
+                let node = allocate(node_size, 8);
+                writei64(node, 0, key);
+                writei64(node, 8, val);
+                writei64(node, 16, 0);
+                writei64(node, 24, 0);
+                writei64(curr, 16, node);
+                return BTreeMap<K, V> {
+                    root_ptr: map.root_ptr,
+                    length: map.length + 1,
+                };
+            }
+            curr = left;
+        } else {
+            let right = readi64(curr, 24);
+            if (right == 0) {
+                let node = allocate(node_size, 8);
+                writei64(node, 0, key);
+                writei64(node, 8, val);
+                writei64(node, 16, 0);
+                writei64(node, 24, 0);
+                writei64(curr, 24, node);
+                return BTreeMap<K, V> {
+                    root_ptr: map.root_ptr,
+                    length: map.length + 1,
+                };
+            }
+            curr = right;
+        }
+    }
+    return map;
+}
+
+pub func btreelookup<K, V>(map: BTreeMap<K, V>, key: K) -> Option<V> {
+    let mut curr = map.root_ptr;
+    while (curr != 0) {
+        let curr_key: K = readi64(curr, 0);
+        if (key == curr_key) {
+            let val: V = readi64(curr, 8);
+            return some<V>(val);
+        }
+        if (key < curr_key) {
+            curr = readi64(curr, 16);
+        } else {
+            curr = readi64(curr, 24);
+        }
+    }
+    return none<V>();
+}
+
+pub func btreelen<K, V>(map: BTreeMap<K, V>) -> int {
+    return map.length;
+}
+
+pub struct BTreeSet<T> {
+    BTreeMap<T, int> map;
+}
+
+pub func btsetnew<T>() -> BTreeSet<T> {
+    return BTreeSet<T> { map: btreenew<T, int>() };
+}
+
+pub func btsetadd<T>(set: BTreeSet<T>, val: T) -> BTreeSet<T> {
+    let m = btreeput<T, int>(set.map, val, 1);
+    return BTreeSet<T> { map: m };
+}
+
+pub func btsethas<T>(set: BTreeSet<T>, val: T) -> bool {
+    let res = btreelookup<T, int>(set.map, val);
+    return res.is_some;
+}
+
+
+// -----------------------------------------------------------------------------
+// 8. Queue<T> & Stack<T> Adapters
+// -----------------------------------------------------------------------------
+
+pub struct Queue<T> {
+    Deque<T> inner;
+}
+
+pub func queueNew<T>() -> Queue<T> {
+    return Queue<T> { inner: dequeNew<T>() };
+}
+
+pub func qnew<T>() -> Queue<T> {
+    return queueNew<T>();
+}
+
+pub func enqueue<T>(q: Queue<T>, val: T) -> Queue<T> {
+    let updatedinner = pushBack<T>(q.inner, val);
+    return Queue<T> { inner: updatedinner };
+}
+
+pub func dequeue<T>(q: Queue<T>) -> Option<T> {
+    return popFront<T>(q.inner);
+}
+
+pub func queuePeek<T>(q: Queue<T>) -> Option<T> {
+    return front<T>(q.inner);
+}
+
+pub func queueLen<T>(q: Queue<T>) -> int {
+    return deqlen<T>(q.inner);
+}
+
+pub func queueIsEmpty<T>(q: Queue<T>) -> bool {
+    return deqlen<T>(q.inner) == 0;
+}
+
+pub func queueClear<T>(q: Queue<T>) -> Queue<T> {
+    let updatedinner = dequeClear<T>(q.inner);
+    return Queue<T> { inner: updatedinner };
+}
+
+pub func queueDebug<T>(Queue<T> q) -> string {
+    let dq_str = dequeDebug<T>(q.inner);
+    return "Queue(" + dq_str + ")";
+}
+
+
+pub struct Stack<T> {
+    Vec<T> inner;
+}
+
+pub func stackNew<T>() -> Stack<T> {
+    return Stack<T> { inner: vecnew<T>() };
+}
+
+pub func stacknew<T>() -> Stack<T> {
+    return stackNew<T>();
+}
+
+pub func stackPush<T>(s: Stack<T>, val: T) -> Stack<T> {
+    let updatedinner = push<T>(s.inner, val);
+    return Stack<T> { inner: updatedinner };
+}
+
+pub func stackpush<T>(s: Stack<T>, val: T) -> Stack<T> {
+    return stackPush<T>(s, val);
+}
+
+pub func stackPop<T>(s: Stack<T>) -> Option<T> {
+    return pop<T>(s.inner);
+}
+
+pub func stackpop<T>(s: Stack<T>) -> Option<T> {
+    return stackPop<T>(s);
+}
+
+pub func stackPeek<T>(s: Stack<T>) -> Option<T> {
+    let l = veclen<T>(s.inner);
+    if (l == 0) {
+        return none<T>();
+    }
+    return some<T>(get<T>(s.inner, l - 1));
+}
+
+pub func stackLen<T>(s: Stack<T>) -> int {
+    return veclen<T>(s.inner);
+}
+
+pub func stackIsEmpty<T>(s: Stack<T>) -> bool {
+    return veclen<T>(s.inner) == 0;
+}
+
+pub func stackClear<T>(s: Stack<T>) -> Stack<T> {
+    let updatedinner = clear<T>(s.inner);
+    return Stack<T> { inner: updatedinner };
+}
+
+pub func stackDebug<T>(Stack<T> s) -> string {
+    let v_str = vecDebug<T>(s.inner);
+    return "Stack(" + v_str + ")";
+}
+
+pub func testcollections() -> bool {
+    let mut v: Vec<int> = vecnew<int>();
+    v = push<int>(v, 100);
+    v = push<int>(v, 200);
+    v = push<int>(v, 300);
+    let l = veclen<int>(v);
+    let val = get<int>(v, 1);
+    return l == 3 && val == 200;
+}
+
+pub func testCollections() -> bool {
+    return testcollections();
+}
+
+
+

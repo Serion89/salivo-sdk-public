@@ -1,0 +1,188 @@
+
+module salivo.std.core;
+
+pub struct Option<T> {
+    T value;
+    bool is_some;
+}
+
+pub func some<T>(val: T) -> Option<T> {
+    return Option<T> {
+        value: val,
+        is_some: true,
+    };
+}
+
+pub func none<T>() -> Option<T> {
+    let uninit_val: T;
+    return Option<T> {
+        value: uninit_val,
+        is_some: false,
+    };
+}
+
+pub struct Result<T, E> {
+    T value;
+    E error;
+    bool is_ok;
+}
+
+pub func ok<T, E>(val: T) -> Result<T, E> {
+    let uninit_err: E;
+    return Result<T, E> {
+        value: val,
+        error: uninit_err,
+        is_ok: true,
+    };
+}
+
+pub func err<T, E>(e: E) -> Result<T, E> {
+    let uninit_val: T;
+    return Result<T, E> {
+        value: uninit_val,
+        error: e,
+        is_ok: false,
+    };
+}
+
+pub func panic(string msg) {
+    rtpanic(msg);
+}
+
+
+pub func assert(bool cond, string msg) {
+    if (!cond) {
+        panic(msg);
+    }
+}
+
+pub func assertEq(int a, int b, string msg) {
+    if (a != b) {
+        panic(msg);
+    }
+}
+
+pub func asserteq(int a, int b, string msg) {
+    assertEq(a, b, msg);
+}
+
+pub func assertStrEq(string a, string b, string msg) {
+    if (a != b) {
+        panic(msg);
+    }
+}
+
+pub func assertstreq(string a, string b, string msg) {
+    assertStrEq(a, b, msg);
+}
+
+pub func assertNe(int a, int b, string msg) {
+    if (a == b) {
+        panic(msg);
+    }
+}
+
+pub func assertne(int a, int b, string msg) {
+    assertNe(a, b, msg);
+}
+
+pub func assertStrNe(string a, string b, string msg) {
+    if (a == b) {
+        panic(msg);
+    }
+}
+
+pub func assertstrne(string a, string b, string msg) {
+    assertStrNe(a, b, msg);
+}
+
+
+pub trait Display {
+    func display(self) -> string;
+}
+
+
+pub trait Debug {
+    func debug(self) -> string;
+}
+
+
+/// Standard Iterator Protocol
+pub trait Iterator<T> {
+    func next(self) -> Option<T>;
+}
+
+/// Standard Automatic Cleanup Protocol
+pub trait Drop {
+    func drop(self);
+}
+
+
+impl Display for int {
+    pub func display(self) -> string {
+        return rtintstr(self);
+    }
+}
+
+impl Debug for int {
+    pub func debug(self) -> string {
+        return rtintstr(self);
+    }
+}
+
+impl Display for float {
+    pub func display(self) -> string {
+        return rtfloatstr(self);
+    }
+}
+
+impl Debug for float {
+    pub func debug(self) -> string {
+        return rtfloatstr(self);
+    }
+}
+
+impl Display for bool {
+    pub func display(self) -> string {
+        if (self) {
+            return "true";
+        }
+        return "false";
+    }
+}
+
+impl Debug for bool {
+    pub func debug(self) -> string {
+        if (self) {
+            return "true";
+        }
+        return "false";
+    }
+}
+
+impl Display for string {
+    pub func display(self) -> string {
+        return self;
+    }
+}
+
+impl Debug for string {
+    pub func debug(self) -> string {
+        return rtdebugstr(self);
+    }
+}
+
+impl Display for char {
+    pub func display(self) -> string {
+        return rtdebugchar(self);
+    }
+}
+
+impl Debug for char {
+    pub func debug(self) -> string {
+        return rtdebugchar(self);
+    }
+}
+
+
+

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Vibrant Crimson Gradient -->
+    <linearGradient id="salivoCrimson" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF1A2A"/>
+      <stop offset="100%" stop-color="#D90416"/>
+    </linearGradient>
+    <!-- Sleek Carbon/Titanium Dark Gradient -->
+    <linearGradient id="salivoCarbon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D2D31"/>
+      <stop offset="100%" stop-color="#18181A"/>
+    </linearGradient>
+    <!-- Subtle drop shadow -->
+    <filter id="subtleGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <!-- Dark Obsidian Container Frame -->
+  <rect width="512" height="512" rx="72" fill="#08080A"/>
+
+  <g filter="url(#subtleGlow)">
+    <!-- Top Crimson Red S-Blade / Chevron -->
+    <polygon 
+      points="200,76 456,76 366,150 232,150 144,226 284,354 196,354 68,226" 
+      fill="url(#salivoCrimson)" 
+    />
+
+    <!-- Bottom Carbon Dark S-Blade / Chevron (180deg Inverted Symmetry) -->
+    <polygon 
+      points="312,436 56,436 146,362 280,362 368,286 228,158 316,158 444,286" 
+      fill="url(#salivoCarbon)" 
+    />
+  </g>
+</svg>

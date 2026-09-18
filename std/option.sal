@@ -1,0 +1,55 @@
+// Salivo Standard Library: Option Module
+module salivo.std.option;
+><salivo.std.core::{panic, Option, some, none};
+
+pub func unwrap<T>(Option<T> o) -> T {
+    if (!o.is_some) {
+        panic("called unwrap() on a None value");
+    }
+    return o.value;
+}
+
+pub func unwrapor<T>(Option<T> o, T default_val) -> T {
+    if (o.is_some) {
+        return o.value;
+    }
+    return default_val;
+}
+
+pub func unwrapOr<T>(Option<T> o, T default_val) -> T {
+    if (o.is_some) {
+        return o.value;
+    }
+    return default_val;
+}
+
+pub func unwrap_or<T>(Option<T> o, T default_val) -> T {
+    if (o.is_some) {
+        return o.value;
+    }
+    return default_val;
+}
+
+pub func issome<T>(Option<T> o) -> bool {
+    return o.is_some;
+}
+
+pub func isSome<T>(Option<T> o) -> bool {
+    return o.is_some;
+}
+
+pub func is_some<T>(Option<T> o) -> bool {
+    return o.is_some;
+}
+
+pub func isnone<T>(Option<T> o) -> bool {
+    return !o.is_some;
+}
+
+pub func isNone<T>(Option<T> o) -> bool {
+    return !o.is_some;
+}
+
+pub func is_none<T>(Option<T> o) -> bool {
+    return !o.is_some;
+}

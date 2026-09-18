@@ -1,0 +1,489 @@
+module salivo.std.mem;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none};
+
+/// =============================================================================
+/// SALIVO STANDARD LIBRARY: MEMORY MANAGEMENT (std/mem.sal)
+///
+/// Heap allocation engine, ARC reference counting, smart pointers, slices, pointers, and memory operations.
+/// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Core Dynamic Heap Allocator Engine
+// -----------------------------------------------------------------------------
+
+/// Dynamically allocates size_bytes of memory with alignment via memory layer
+pub func allocate(int size_bytes, int alignment) -> int {
+    return rtalloc(size_bytes, alignment);
+}
+
+pub func alloc(int size_bytes, int alignment) -> int {
+    return allocate(size_bytes, alignment);
+}
+
+/// Dynamically allocates zeroed memory bytes via memory layer
+pub func alloczero(int size_bytes, int alignment) -> int {
+    return rtalloczeroed(size_bytes, alignment);
+}
+
+/// Deallocates dynamic memory block at target address
+pub func deallocate(int addr, int size_bytes, int alignment) {
+    rtdeallocate(addr, size_bytes, alignment);
+}
+
+pub func dealloc(int addr, int size_bytes, int alignment) {
+    deallocate(addr, size_bytes, alignment);
+}
+
+/// Reallocates dynamic memory block at target address to new size
+pub func reallocate(int addr, int old_size, int new_size, int alignment) -> int {
+    return rtreallocate(addr, old_size, new_size, alignment);
+}
+
+pub func realloc(int addr, int old_size, int new_size, int alignment) -> int {
+    return reallocate(addr, old_size, new_size, alignment);
+}
+
+/// Queries the runtime allocator to check whether a heap pointer is currently live.
+pub func isallocated(int addr) -> bool {
+    return rtisallocated(addr) != 0;
+}
+
+/// Queries the runtime allocator for the count of currently live allocations.
+pub func activeAllocations() -> int {
+    return rtactiveallocations();
+}
+
+pub func active_allocations() -> int {
+    return activeAllocations();
+}
+
+// -----------------------------------------------------------------------------
+// Pointer & Memory Primitive Representations
+// -----------------------------------------------------------------------------
+
+/// Raw Pointer Wrapper RawPtr<T> allocating through memory layer
+pub struct RawPtr<T> {
+    int address;
+}
+
+pub func rawptr<T>(int size_bytes) -> RawPtr<T> {
+    let addr = allocate(size_bytes, 8);
+    return RawPtr<T> { address: addr };
+}
+
+/// NonNull<T> Raw Pointer wrapper guaranteed to be non-zero
+pub struct NonNull<T> {
+    int address;
+}
+
+pub func nonnull<T>(int size_bytes) -> NonNull<T> {
+    let addr = allocate(size_bytes, 8);
+    if (addr == 0) {
+        panic("NonNull allocation failed");
+    }
+    return NonNull<T> { address: addr };
+}
+
+/// Compile-time layout intrinsics
+pub func size_of<T>() -> int {
+    panic("size_of<T> intrinsic not folded by compiler");
+    return 0;
+}
+
+pub func sizeof<T>() -> int {
+    return size_of<T>();
+}
+
+pub func align_of<T>() -> int {
+    panic("align_of<T> intrinsic not folded by compiler");
+    return 0;
+}
+
+pub func alignof<T>() -> int {
+    return align_of<T>();
+}
+
+pub func stride_of<T>() -> int {
+    panic("stride_of<T> intrinsic not folded by compiler");
+    return 0;
+}
+
+pub func strideof<T>() -> int {
+    return stride_of<T>();
+}
+
+/// Generic drop and resource cleanup primitive.
+pub func drop<T>(T val) {
+}
+
+pub func rthashval<T>(T val) -> int {
+    panic("rthashval<T> intrinsic not lowered by compiler");
+    return 0;
+}
+
+/// Checked arithmetic helpers to prevent allocation overflow
+pub func checkedAdd(int a, int b) -> int {
+    if (b > 0) {
+        if (a > 9223372036854775807 - b) {
+            panic("Integer overflow in addition");
+        }
+    }
+    if (b < 0) {
+        if (a < -9223372036854775807 - b) {
+            panic("Integer underflow in addition");
+        }
+    }
+    return a + b;
+}
+
+pub func checkedadd(int a, int b) -> int {
+    return checkedAdd(a, b);
+}
+
+pub func checkedMul(int a, int b) -> int {
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    if (a > 0) {
+        if (b > 0) {
+            if (a > 9223372036854775807 / b) {
+                panic("Integer overflow in multiplication");
+            }
+        }
+        if (b < 0) {
+            if (b < -9223372036854775807 / a) {
+                panic("Integer underflow in multiplication");
+            }
+        }
+    }
+    if (a < 0) {
+        if (b > 0) {
+            if (a < -9223372036854775807 / b) {
+                panic("Integer underflow in multiplication");
+            }
+        }
+        if (b < 0) {
+            if (a < 9223372036854775807 / b) {
+                panic("Integer overflow in multiplication");
+            }
+        }
+    }
+    return a * b;
+}
+
+pub func checkedmul(int a, int b) -> int {
+    return checkedMul(a, b);
+}
+
+/// Typed generic memory load and store intrinsics (handled by LLVM backend)
+pub func readval<T>(int addr, int offset) -> T {
+    return rtmemreadval<T>(addr, offset);
+}
+
+pub func writeval<T>(int addr, int offset, T val) {
+    rtmemwriteval<T>(addr, offset, val);
+}
+
+/// Typed generic memory clone intrinsic (deep clone for owning types, direct load for primitives)
+pub func cloneval<T>(int addr, int offset) -> T {
+    return rtmemcloneval<T>(addr, offset);
+}
+
+/// Typed generic memory move intrinsic (loads value and immediately zeroes source slot in memory)
+pub func moveval<T>(int addr, int offset) -> T {
+    return rtmemmoveval<T>(addr, offset);
+}
+
+pub func move_val<T>(int addr, int offset) -> T {
+    return rtmemmoveval<T>(addr, offset);
+}
+
+/// Dynamic Memory Slice View Slice<T> (Non-owning borrowed view)
+pub struct Slice<T> {
+    int start_address;
+    int length;
+}
+
+/// Constructs a non-owning borrowed slice view from raw memory address and length
+pub func fromrawparts<T>(int start_address, int length) -> Slice<T> {
+    return Slice<T> {
+        start_address: start_address,
+        length: length,
+    };
+}
+
+pub func slicelen<T>(Slice<T> s) -> int {
+    return s.length;
+}
+
+pub func sliceempty<T>(Slice<T> s) -> bool {
+    return s.length == 0;
+}
+
+pub func sliceget<T>(Slice<T> s, int index) -> T {
+    if (index < 0 || index >= s.length) {
+        panic("Slice::get index out of bounds");
+    }
+    let elem_size = strideof<T>();
+    let val: T = cloneval<T>(s.start_address, index * elem_size);
+    return val;
+}
+
+pub func sliceset<T>(Slice<T> s, int index, T val) {
+    if (index < 0 || index >= s.length) {
+        panic("Slice::set index out of bounds");
+    }
+    let elem_size = strideof<T>();
+    let old: T = rtmemreadval<T>(s.start_address, index * elem_size);
+    drop<T>(old);
+    rtmemwriteval<T>(s.start_address, index * elem_size, val);
+}
+
+pub func slicesub<T>(Slice<T> s, int start, int end) -> Slice<T> {
+    if (start < 0 || start > s.length) {
+        panic("Slice subslice start index out of bounds");
+    }
+    let actual_end = end;
+    if (actual_end == -1) {
+        actual_end = s.length;
+    }
+    if (actual_end < start || actual_end > s.length) {
+        panic("Slice subslice end index out of bounds");
+    }
+    let elem_size = strideof<T>();
+    return Slice<T> {
+        start_address: s.start_address + (start * elem_size),
+        length: actual_end - start,
+    };
+}
+
+/// Contiguous Memory Span View Span<T>
+pub struct Span<T> {
+    int start_address;
+    int length;
+}
+
+pub func span<T>(int element_count, int element_size) -> Span<T> {
+    let total_size = element_count * element_size;
+    let addr = allocate(total_size, 8);
+    return Span<T> {
+        start_address: addr,
+        length: element_count,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// Smart Pointer Representations (Box<T>, Arc<T>, Weak<T>, Arena)
+// -----------------------------------------------------------------------------
+
+/// Single-owner Heap Box Pointer Box<T>
+pub struct Box<T> {
+    T value;
+    int address;
+}
+
+pub func boxnew<T>(T val, int element_size) -> Box<T> {
+    let addr = allocate(element_size, 8);
+    return Box<T> {
+        value: val,
+        address: addr,
+    };
+}
+
+pub func deref<T>(Box<T> b) -> T {
+    return b.value;
+}
+
+/// Atomic Reference Counted Pointer Arc<T>
+pub struct Arc<T> {
+    T value;
+    int strong_ref_count;
+    int weak_ref_count;
+    int address;
+}
+
+pub func arcnew<T>(T val, int element_size) -> Arc<T> {
+    let addr = allocate(element_size + 16, 8);
+    return Arc<T> {
+        value: val,
+        strong_ref_count: 1,
+        weak_ref_count: 0,
+        address: addr,
+    };
+}
+
+/// Weak Reference Pointer Weak<T> corresponding to Arc<T>
+pub struct Weak<T> {
+    int address;
+    int weak_id;
+}
+
+/// Arena Memory Allocator representation
+pub struct Arena {
+    int capacity_bytes;
+    int allocated_bytes;
+    int base_address;
+}
+
+pub func arena(int capacity) -> Arena {
+    let addr = allocate(capacity, 8);
+    return Arena {
+        capacity_bytes: capacity,
+        allocated_bytes: 0,
+        base_address: addr,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// ARC Reference Counting Operations
+// -----------------------------------------------------------------------------
+
+/// Increments strong reference count of Arc<T>
+pub func retain<T>(Arc<T> ptr) -> Arc<T> {
+    return Arc<T> {
+        value: ptr.value,
+        strong_ref_count: ptr.strong_ref_count + 1,
+        weak_ref_count: ptr.weak_ref_count,
+        address: ptr.address,
+    };
+}
+
+/// Decrements strong reference count of Arc<T>, destroying value if count drops to 0
+pub func release<T>(Arc<T> ptr) -> Arc<T> {
+    let new_count = ptr.strong_ref_count - 1;
+    if (new_count <= 0) {
+        deallocate(ptr.address, 32, 8);
+        new_count = 0;
+    }
+    return Arc<T> {
+        value: ptr.value,
+        strong_ref_count: new_count,
+        weak_ref_count: ptr.weak_ref_count,
+        address: ptr.address,
+    };
+}
+
+pub func strongcount<T>(Arc<T> ptr) -> int {
+    return ptr.strong_ref_count;
+}
+
+pub func weakcount<T>(Arc<T> ptr) -> int {
+    return ptr.weak_ref_count;
+}
+
+pub func downgrade<T>(Arc<T> ptr) -> Weak<T> {
+    return Weak<T> {
+        address: ptr.address,
+        weak_id: 1,
+    };
+}
+
+pub func upgrade<T>(Weak<T> ptr, Arc<T> original) -> Option<Arc<T>> {
+    if (original.strong_ref_count > 0) {
+        let retained = retain<T>(original);
+        return some<Arc<T>>(retained);
+    }
+    return none<Arc<T>>();
+}
+
+// -----------------------------------------------------------------------------
+// Low-Level Memory Operations
+// -----------------------------------------------------------------------------
+
+pub func readbyte(int addr, int offset) -> int {
+    return rtmemreadbyte(addr, offset);
+}
+
+pub func writebyte(int addr, int offset, int val) {
+    rtmemwritebyte(addr, offset, val);
+}
+
+/// Zero-fills a range of memory bytes starting at address + offset
+pub func zero(int addr, int offset, int count_bytes) {
+    let i = 0;
+    while (i < count_bytes) {
+        rtmemwritebyte(addr, offset + i, 0);
+        i = i + 1;
+    }
+}
+
+pub func readi64(int addr, int offset) -> int {
+    return rtmemreadi64(addr, offset);
+}
+
+pub func writei64(int addr, int offset, int val) {
+    rtmemwritei64(addr, offset, val);
+}
+
+/// Copies memory bytes from source to destination address
+pub func copy(int src_addr, int dest_addr, int count_bytes) {
+    if (src_addr == 0 || dest_addr == 0) {
+        return;
+    }
+    rtmemcopy(src_addr, dest_addr, count_bytes);
+}
+
+/// Moves memory bytes from source to destination
+pub func move(int src_addr, int dest_addr, int count_bytes) {
+    if (src_addr == 0 || dest_addr == 0) {
+        return;
+    }
+    rtmemmove(src_addr, dest_addr, count_bytes);
+}
+
+/// Fills memory bytes at destination address with byte value
+pub func fill(int dest_addr, int val, int count_bytes) {
+    if (dest_addr == 0 || count_bytes <= 0) {
+        return;
+    }
+    rtmemfill(dest_addr, val, count_bytes);
+}
+
+pub func memFill(int dest_addr, int val, int count_bytes) {
+    fill(dest_addr, val, count_bytes);
+}
+
+pub func memswap<T>(T a, T b) -> T {
+    return a;
+}
+
+pub func memreplace<T>(T target, T new_val) -> T {
+    let old = target;
+    return old;
+}
+
+pub func memtake<T>(T src, T replacement_val) -> T {
+    let val = src;
+    return val;
+}
+
+pub func memforget<T>(T val) {
+}
+
+// -----------------------------------------------------------------------------
+// Pointer Arithmetic & Alignment Helpers
+// -----------------------------------------------------------------------------
+
+pub func offset(base_addr: int, count: int, element_size: int) -> int {
+    return base_addr + (count * element_size);
+}
+
+pub func alignup(int addr, int alignment) -> int {
+    let rem = addr % alignment;
+    if (rem == 0) {
+        return addr;
+    }
+    return addr + (alignment - rem);
+}
+
+/// Converts raw memory address integer to string pointer
+pub func ptrtostr(int addr) -> string {
+    return rtptrtostr(addr);
+}
+
+/// Converts string pointer to raw memory address integer
+pub func strtoptr(string s) -> int {
+    return rtstrtoptr(s);
+}
+
+

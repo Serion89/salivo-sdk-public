@@ -1,0 +1,384 @@
+module salivo.std.io;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none, Result, ok, err};
+><salivo.std.mem::{allocate, deallocate, reallocate, arcnew, retain, release, Arc};
+><salivo.std.strings::{String};
+
+/// =============================================================================
+/// SALIVO STANDARD LIBRARY: INPUT / OUTPUT (std/io.sal)
+///
+/// Production I/O streams, file system operations, buffered readers/writers,
+/// directory manipulation, and error handling via Result<T, IoError>.
+/// Storage allocated through std::mem and ARC ownership.
+/// =============================================================================
+
+// -----------------------------------------------------------------------------
+// I/O Error Taxonomy
+// -----------------------------------------------------------------------------
+
+pub enum IoErrorKind {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    InvalidInput,
+    UnexpectedEof,
+    WriteZero,
+    BrokenPipe,
+    Other,
+}
+
+pub struct IoError {
+    IoErrorKind kind;
+    string message;
+}
+
+pub func ioerror(k: IoErrorKind, msg: string) -> IoError {
+    return IoError {
+        kind: k,
+        message: msg,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// Standard Stream Representations
+// -----------------------------------------------------------------------------
+
+pub struct Stdin {
+    int handle_id;
+}
+
+pub func stdin() -> Stdin {
+    return Stdin { handle_id: 0 };
+}
+
+pub struct Stdout {
+    int handle_id;
+}
+
+pub func stdout() -> Stdout {
+    return Stdout { handle_id: 1 };
+}
+
+pub struct Stderr {
+    int handle_id;
+}
+
+pub func stderr() -> Stderr {
+    return Stderr { handle_id: 2 };
+}
+
+pub struct Stream {
+    int handle_id;
+    bool is_readable;
+    bool is_writable;
+}
+
+// -----------------------------------------------------------------------------
+// File & Directory Handles
+// -----------------------------------------------------------------------------
+
+pub struct File {
+    int handle_id;
+    int position;
+    bool is_open;
+    Arc<int> arc_ref;
+}
+
+pub struct Directory {
+    int handle_id;
+    string path;
+}
+
+pub struct Metadata {
+    int file_size_bytes;
+    bool is_directory;
+    bool is_readonly;
+}
+
+pub func open(path: string) -> Result<File, IoError> {
+    if (path == "") {
+        return err<File, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let h = rtcfileopen(path, "rb+");
+    if (h < 0) {
+        h = rtcfileopen(path, "rb");
+    }
+    if (h < 0) {
+        return err<File, IoError>(ioerror(IoErrorKind::NotFound, "Failed to open file"));
+    }
+    let arc_ref = arcnew<int>(1, 8);
+    return ok<File, IoError>(File {
+        handle_id: h,
+        position: 0,
+        is_open: true,
+        arc_ref: arc_ref,
+    });
+}
+
+pub func create(path: string) -> Result<File, IoError> {
+    if (path == "") {
+        return err<File, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let h = rtcfileopen(path, "wb+");
+    if (h < 0) {
+        return err<File, IoError>(ioerror(IoErrorKind::PermissionDenied, "Failed to create file"));
+    }
+    let arc_ref = arcnew<int>(1, 8);
+    return ok<File, IoError>(File {
+        handle_id: h,
+        position: 0,
+        is_open: true,
+        arc_ref: arc_ref,
+    });
+}
+
+pub func isopen(f: File) -> bool {
+    let res = rtcfileisopen(f.handle_id);
+    return res != 0;
+}
+
+pub func close(f: File) -> Result<bool, IoError> {
+    let res = rtcfileclose(f.handle_id);
+    f.is_open = false;
+    if (res < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::Other, "Failed to close file handle"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func read(f: File, buf_ptr: int, count_bytes: int) -> Result<int, IoError> {
+    if (f.is_open == false) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "File handle is closed"));
+    }
+    let n = rtcfileread(f.handle_id, buf_ptr, count_bytes);
+    if (n < 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Read error"));
+    }
+    f.position = f.position + n;
+    return ok<int, IoError>(n);
+}
+
+pub func write(f: File, buf_ptr: int, count_bytes: int) -> Result<int, IoError> {
+    if (f.is_open == false) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "File handle is closed"));
+    }
+    let n = rtcfilewritebuf(f.handle_id, buf_ptr, count_bytes);
+    if (n < 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Write error"));
+    }
+    f.position = f.position + n;
+    return ok<int, IoError>(n);
+}
+
+pub func flush(f: File) -> Result<bool, IoError> {
+    let res = rtcfileflush(f.handle_id);
+    if (res < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::Other, "Flush failed"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func seek(f: File, offset: int, whence: int) -> Result<int, IoError> {
+    let res = rtcfileseek(f.handle_id, offset, whence);
+    if (res < 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Seek failed"));
+    }
+    f.position = res;
+    return ok<int, IoError>(res);
+}
+
+pub func tell(f: File) -> Result<int, IoError> {
+    let pos = rtcfiletell(f.handle_id);
+    if (pos < 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Tell failed"));
+    }
+    return ok<int, IoError>(pos);
+}
+
+pub func delete(path: string) -> Result<bool, IoError> {
+    if (path == "") {
+        return err<bool, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let res = rtcfileremove(path);
+    if (res < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::NotFound, "Failed to delete file"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func exists(path: string) -> bool {
+    if (path == "") { return false; }
+    let h = rtcfileopen(path, "rb");
+    if (h >= 0) {
+        rtcfileclose(h);
+        return true;
+    }
+    return false;
+}
+
+// -----------------------------------------------------------------------------
+// Directory Operations
+// -----------------------------------------------------------------------------
+
+pub func mkdir(path: string) -> Result<Directory, IoError> {
+    if (path == "") {
+        return err<Directory, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty directory path"));
+    }
+    let res = rtcdircreate(path);
+    if (res < 0) {
+        return err<Directory, IoError>(ioerror(IoErrorKind::Other, "Failed to create directory"));
+    }
+    return ok<Directory, IoError>(Directory { handle_id: res, path: path });
+}
+
+pub func rmdir(path: string) -> Result<bool, IoError> {
+    if (path == "") {
+        return err<bool, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let res = rtcdirremove(path);
+    if (res < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::NotFound, "Failed to remove directory"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func dirlist(path: string) -> Result<string, IoError> {
+    if (path == "") {
+        return err<string, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let ex = rtcdirexists(path);
+    if (ex == 0) {
+        return err<string, IoError>(ioerror(IoErrorKind::NotFound, "Directory not found"));
+    }
+    let entries = rtcdirliststring(path);
+    return ok<string, IoError>(entries);
+}
+
+pub func dircount(path: string) -> Result<int, IoError> {
+    if (path == "") {
+        return err<int, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let ex = rtcdirexists(path);
+    if (ex == 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::NotFound, "Directory not found"));
+    }
+    let cnt = rtcdirlist(path);
+    return ok<int, IoError>(cnt);
+}
+
+pub func pwd() -> string {
+    return rtprocesscwd();
+}
+
+pub func cd(path: string) -> Result<bool, IoError> {
+    if (path == "") {
+        return err<bool, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));
+    }
+    let res = rtcdirchangedirectory(path);
+    if (res < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::NotFound, "Failed to change directory"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+// -----------------------------------------------------------------------------
+// Text & Binary I/O Operations
+// -----------------------------------------------------------------------------
+
+pub func readstr(path: string) -> Result<string, IoError> {
+    let f_res = open(path);
+    if (f_res.is_ok == false) {
+        return err<string, IoError>(f_res.error);
+    }
+    let f = f_res.value;
+    let content = rtcfilereadstring(f.handle_id);
+    close(f);
+    return ok<string, IoError>(content);
+}
+
+pub func writestr(path: string, content: string) -> Result<bool, IoError> {
+    let f_res = create(path);
+    if (f_res.is_ok == false) {
+        return err<bool, IoError>(f_res.error);
+    }
+    let f = f_res.value;
+    let len = rtstrlen(content);
+    let n = rtcfilewrite(f.handle_id, content, len);
+    close(f);
+    if (n < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::Other, "Failed to write file contents"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func readStr(path: string) -> Result<string, IoError> {
+    return readstr(path);
+}
+
+pub func writeStr(path: string, content: string) -> Result<bool, IoError> {
+    return writestr(path, content);
+}
+
+pub func readline() -> Result<string, IoError> {
+    let s = rtreadline();
+    return ok<string, IoError>(s);
+}
+
+pub func inln() -> string {
+    return rtreadline();
+}
+
+pub func inint() -> int {
+    return rtreadint();
+}
+
+pub func infloat() -> float {
+    return rtreadfloat();
+}
+
+pub func readbytes(File f, int count_bytes) -> Result<int, IoError> {
+    if (rtcfileisopen(f.handle_id) == 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "File not open"));
+    }
+    if (count_bytes <= 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::InvalidInput, "Invalid count_bytes"));
+    }
+    let addr = allocate(count_bytes, 8);
+    let n = rtcfileread(f.handle_id, addr, count_bytes);
+    if (n < 0) {
+        deallocate(addr, count_bytes, 8);
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Failed to read binary bytes from file"));
+    }
+    return ok<int, IoError>(addr);
+}
+
+pub func writebytes(File f, int buffer_addr, int count_bytes) -> Result<int, IoError> {
+    if (rtcfileisopen(f.handle_id) == 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "File not open"));
+    }
+    if (buffer_addr == 0 || count_bytes <= 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::InvalidInput, "Invalid buffer address or count_bytes"));
+    }
+    let n = rtcfilewritebuf(f.handle_id, buffer_addr, count_bytes);
+    if (n < 0) {
+        return err<int, IoError>(ioerror(IoErrorKind::Other, "Failed to write binary bytes to file"));
+    }
+    return ok<int, IoError>(n);
+}
+
+pub func appendstr(path: string, content: string) -> Result<bool, IoError> {
+    let len = rtstrlen(content);
+    let f_handle = rtcfileopen(path, "ab");
+    if (f_handle < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::NotFound, "Failed to open file for appending"));
+    }
+    let n = rtcfilewrite(f_handle, content, len);
+    rtcfileclose(f_handle);
+    if (n < 0) {
+        return err<bool, IoError>(ioerror(IoErrorKind::Other, "Failed to append string content"));
+    }
+    return ok<bool, IoError>(true);
+}
+
+pub func appendStr(path: string, content: string) -> Result<bool, IoError> {
+    return appendstr(path, content);
+}

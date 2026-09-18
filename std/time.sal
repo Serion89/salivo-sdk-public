@@ -1,0 +1,249 @@
+module salivo.std.time;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none, Result, ok, err};
+><salivo.std.strings::{String};
+
+/// =============================================================================
+/// SALIVO STANDARD LIBRARY: TIME & TIMERS (std/time.sal)
+///
+/// Production Duration, Instant, Date, Time, DateTime, Timezone, Timer, and Stopwatch.
+/// Backed by high-precision OS monotonic clock and calendar routines.
+/// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Time Abstraction Structs
+// -----------------------------------------------------------------------------
+
+pub struct Duration {
+    int seconds;
+    int nanoseconds;
+}
+
+pub func duration(sec: int, nanos: int) -> Duration {
+    return Duration {
+        seconds: sec,
+        nanoseconds: nanos,
+    };
+}
+
+pub func fromms(ms: int) -> Duration {
+    let sec = ms / 1000;
+    let rem_ms = ms % 1000;
+    return Duration {
+        seconds: sec,
+        nanoseconds: rem_ms * 1000000,
+    };
+}
+
+pub struct Instant {
+    int ticks_nanos;
+}
+
+pub struct Date {
+    int year;
+    int month;
+    int day;
+}
+
+pub struct Time {
+    int hour;
+    int minute;
+    int second;
+    int nanosecond;
+}
+
+pub struct DateTime {
+    Date date;
+    Time time;
+    int offset_seconds;
+}
+
+pub struct Timezone {
+    string name;
+    int offset_seconds;
+}
+
+pub struct Timer {
+    int id;
+    Duration interval;
+    bool is_active;
+}
+
+pub struct Stopwatch {
+    Instant start_instant;
+    bool is_running;
+}
+
+// -----------------------------------------------------------------------------
+// Time Operations
+// -----------------------------------------------------------------------------
+
+pub func now() -> Instant {
+    let ticks = rtclocknanos();
+    return Instant { ticks_nanos: ticks };
+}
+
+pub func epoch() -> int {
+    return rttimenowms();
+}
+
+pub func elapsed(Instant start_t) -> Duration {
+    let current_t = now();
+    let diff_nanos = current_t.ticks_nanos - start_t.ticks_nanos;
+    if (diff_nanos < 0) {
+        diff_nanos = 0;
+    }
+    let sec = diff_nanos / 1000000000;
+    let rem_nanos = diff_nanos % 1000000000;
+    return Duration {
+        seconds: sec,
+        nanoseconds: rem_nanos,
+    };
+}
+
+pub func sleepdur(Duration dur) {
+    if (dur.seconds < 0) {
+        return;
+    }
+    let total_nanos = dur.seconds * 1000000000 + dur.nanoseconds;
+    rtsleepnanos(total_nanos);
+}
+
+pub func sleep(int ms) {
+    rtsleepms(ms);
+}
+
+pub func sleepuntil(int target_time_ms) {
+    let current_ms = rttimenowms();
+    if (target_time_ms > current_ms) {
+        rtsleepms(target_time_ms - current_ms);
+    }
+}
+
+pub func timer(int delay_ms) -> Timer {
+    let dur = fromms(delay_ms);
+    let t_id = rttimercreate(delay_ms);
+    return Timer {
+        id: t_id,
+        interval: dur,
+        is_active: true,
+    };
+}
+
+pub func isactive(Timer t) -> bool {
+    let res = rttimerisactive(t.id);
+    return res != 0;
+}
+
+pub func canceltimer(Timer t) -> bool {
+    let res = rttimercancel(t.id);
+    return res != 0;
+}
+
+pub func processtimers() -> int {
+    return rtruntimeprocesstimers();
+}
+
+pub func addduration(Duration d1, Duration d2) -> Duration {
+    let total_nanos = d1.nanoseconds + d2.nanoseconds;
+    let extra_sec = total_nanos / 1000000000;
+    let rem_nanos = total_nanos % 1000000000;
+    return Duration {
+        seconds: d1.seconds + d2.seconds + extra_sec,
+        nanoseconds: rem_nanos,
+    };
+}
+
+pub func subduration(Duration d1, Duration d2) -> Duration {
+    let sec_diff = d1.seconds - d2.seconds;
+    let nanos_diff = d1.nanoseconds - d2.nanoseconds;
+    if (nanos_diff < 0) {
+        sec_diff = sec_diff - 1;
+        nanos_diff = nanos_diff + 1000000000;
+    }
+    if (sec_diff < 0) {
+        return Duration { seconds: 0, nanoseconds: 0 };
+    }
+    return Duration {
+        seconds: sec_diff,
+        nanoseconds: nanos_diff,
+    };
+}
+
+pub func diffinstant(Instant i1, Instant i2) -> Duration {
+    let diff = i1.ticks_nanos - i2.ticks_nanos;
+    if (diff < 0) {
+        diff = -diff;
+    }
+    return Duration {
+        seconds: diff / 1000000000,
+        nanoseconds: diff % 1000000000,
+    };
+}
+
+func pad2(int v) -> string {
+    if (v < 10 && v >= 0) {
+        return "0" + intstr(v);
+    }
+    return intstr(v);
+}
+
+func pad4(int v) -> string {
+    let s = intstr(v);
+    let slen = rtstrlen(s);
+    if (slen == 1) { return "000" + s; }
+    if (slen == 2) { return "00" + s; }
+    if (slen == 3) { return "0" + s; }
+    return s;
+}
+
+pub func format(DateTime dt, string fmt_str) -> string {
+    let yr = pad4(dt.date.year);
+    let mo = pad2(dt.date.month);
+    let dy = pad2(dt.date.day);
+    let hr = pad2(dt.time.hour);
+    let mn = pad2(dt.time.minute);
+    let sc = pad2(dt.time.second);
+
+    let d_part = yr + "-" + mo + "-" + dy;
+    let t_part = hr + ":" + mn + ":" + sc;
+    let iso = d_part + "T" + t_part + "Z";
+    return iso;
+}
+
+pub func parse(string date_str, string fmt_str) -> Result<DateTime, string> {
+    let slen = len(date_str);
+    if (slen < 10) {
+        return err<DateTime, string>("Invalid date string: too short");
+    }
+    let yr_str = slice(date_str, 0, 4);
+    let mo_str = slice(date_str, 5, 7);
+    let dy_str = slice(date_str, 8, 10);
+
+    let yr = strint(yr_str);
+    let mo = strint(mo_str);
+    let dy = strint(dy_str);
+
+    let hr = 0;
+    let mn = 0;
+    let sc = 0;
+
+    if (slen >= 19) {
+        let hr_str = slice(date_str, 11, 13);
+        let mn_str = slice(date_str, 14, 16);
+        let sc_str = slice(date_str, 17, 19);
+        hr = strint(hr_str);
+        mn = strint(mn_str);
+        sc = strint(sc_str);
+    }
+
+    let d = Date { year: yr, month: mo, day: dy };
+    let t = Time { hour: hr, minute: mn, second: sc, nanosecond: 0 };
+    let dt = DateTime { date: d, time: t, offset_seconds: 0 };
+    return ok<DateTime, string>(dt);
+}
+
+pub func testtime() -> bool {
+    let t = now();
+    let d = fromms(100);
+    return d.nanoseconds == 100000000;
+}

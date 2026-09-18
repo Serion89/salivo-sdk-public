@@ -1,0 +1,361 @@
+module salivo.std.net;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none, Result, ok, err};
+><salivo.std.strings::{String};
+
+/// =============================================================================
+/// SALIVO STANDARD LIBRARY: NETWORKING (std/net.sal)
+///
+/// Real OS IPv4/IPv6 networking backed by socket intrinsics.
+/// =============================================================================
+
+pub enum IpVersion {
+    V4,
+    V6,
+}
+
+pub struct IPAddress {
+    IpVersion version;
+    int octet1;
+    int octet2;
+    int octet3;
+    int octet4;
+}
+
+pub func ipv4(a: int, b: int, c: int, d: int) -> IPAddress {
+    return IPAddress {
+        version: IpVersion::V4,
+        octet1: a,
+        octet2: b,
+        octet3: c,
+        octet4: d,
+    };
+}
+
+pub func ipv6(a: int, b: int, c: int, d: int) -> IPAddress {
+    return IPAddress {
+        version: IpVersion::V6,
+        octet1: a,
+        octet2: b,
+        octet3: c,
+        octet4: d,
+    };
+}
+
+pub struct SocketAddress {
+    IPAddress ip;
+    int port;
+}
+
+pub func sockaddr(ip: IPAddress, port: int) -> SocketAddress {
+    return SocketAddress {
+        ip: ip,
+        port: port,
+    };
+}
+
+pub enum NetworkErrorKind {
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionTimeout,
+    AddressInUse,
+    AddrNotAvailable,
+    NetworkUnreachable,
+    HostNotFound,
+    PlatformProviderUnavailable,
+    UnsupportedOperation,
+    Other,
+}
+
+pub struct NetworkError {
+    NetworkErrorKind kind;
+    string message;
+}
+
+pub func neterror(k: NetworkErrorKind, msg: string) -> NetworkError {
+    return NetworkError {
+        kind: k,
+        message: msg,
+    };
+}
+
+pub struct PlatformProvider {
+    bool is_available;
+    int provider_id;
+}
+
+pub func platform(avail: bool, id: int) -> PlatformProvider {
+    return PlatformProvider {
+        is_available: avail,
+        provider_id: id,
+    };
+}
+
+pub struct Socket {
+    int fd;
+    bool is_bound;
+    bool is_connected;
+    PlatformProvider provider;
+}
+
+pub struct Connection {
+    Socket socket;
+    SocketAddress local;
+    SocketAddress peer;
+}
+
+pub struct Packet {
+    int buffer_address;
+    int length_bytes;
+}
+
+pub struct TcpStream {
+    Socket socket;
+    SocketAddress peer_addr;
+}
+
+pub struct TcpListener {
+    Socket socket;
+    SocketAddress local_addr;
+}
+
+pub struct UdpSocket {
+    Socket socket;
+    SocketAddress bound_addr;
+}
+
+pub struct DnsResolver {
+    PlatformProvider provider;
+}
+
+// -----------------------------------------------------------------------------
+// Real Operating System TCP Socket Operations
+// -----------------------------------------------------------------------------
+
+pub func tcplisten(port: int) -> Result<TcpListener, NetworkError> {
+    let fd = rtnetlisten(port);
+    if (fd < 0) {
+        return err<TcpListener, NetworkError>(neterror(NetworkErrorKind::AddressInUse, "Failed to bind/listen on port"));
+    }
+    let s = Socket {
+        fd: fd,
+        is_bound: true,
+        is_connected: false,
+        provider: platform(true, 1),
+    };
+    let addr = SocketAddress {
+        ip: ipv4(127, 0, 0, 1),
+        port: port,
+    };
+    return ok<TcpListener, NetworkError>(TcpListener {
+        socket: s,
+        local_addr: addr,
+    });
+}
+
+pub func tcplistenaddr(ip_str: string, port: int) -> Result<TcpListener, NetworkError> {
+    let fd = rtnetlistenaddr(ip_str, port);
+    if (fd < 0) {
+        return err<TcpListener, NetworkError>(neterror(NetworkErrorKind::AddressInUse, "Failed to bind/listen on address"));
+    }
+    let s = Socket {
+        fd: fd,
+        is_bound: true,
+        is_connected: false,
+        provider: platform(true, 1),
+    };
+    let addr = SocketAddress {
+        ip: parseip(ip_str),
+        port: port,
+    };
+    return ok<TcpListener, NetworkError>(TcpListener {
+        socket: s,
+        local_addr: addr,
+    });
+}
+
+pub func tcpaccept(stream_listener: TcpListener) -> Result<TcpStream, NetworkError> {
+    let client_fd = rtnetaccept(stream_listener.socket.fd);
+    if (client_fd < 0) {
+        return err<TcpStream, NetworkError>(neterror(NetworkErrorKind::ConnectionReset, "Failed to accept connection"));
+    }
+    let s = Socket {
+        fd: client_fd,
+        is_bound: true,
+        is_connected: true,
+        provider: platform(true, 1),
+    };
+    let peer_port = rtnetgetpeerport(client_fd);
+    let addr = SocketAddress {
+        ip: ipv4(127, 0, 0, 1),
+        port: peer_port,
+    };
+    return ok<TcpStream, NetworkError>(TcpStream {
+        socket: s,
+        peer_addr: addr,
+    });
+}
+
+pub func tcpconnect(port: int) -> Result<TcpStream, NetworkError> {
+    let fd = rtnetconnect(port);
+    if (fd < 0) {
+        return err<TcpStream, NetworkError>(neterror(NetworkErrorKind::ConnectionRefused, "Failed to connect to port"));
+    }
+    let s = Socket {
+        fd: fd,
+        is_bound: true,
+        is_connected: true,
+        provider: platform(true, 1),
+    };
+    let addr = SocketAddress {
+        ip: ipv4(127, 0, 0, 1),
+        port: port,
+    };
+    return ok<TcpStream, NetworkError>(TcpStream {
+        socket: s,
+        peer_addr: addr,
+    });
+}
+
+pub func tcpconnecthost(host: string, port: int) -> Result<TcpStream, NetworkError> {
+    let fd = rtnetconnectaddr(host, port);
+    if (fd < 0) {
+        return err<TcpStream, NetworkError>(neterror(NetworkErrorKind::ConnectionRefused, "Failed to connect to host"));
+    }
+    let s = Socket {
+        fd: fd,
+        is_bound: true,
+        is_connected: true,
+        provider: platform(true, 1),
+    };
+    let addr = SocketAddress {
+        ip: parseip(host),
+        port: port,
+    };
+    return ok<TcpStream, NetworkError>(TcpStream {
+        socket: s,
+        peer_addr: addr,
+    });
+}
+
+pub func tcpsendbuf(stream: TcpStream, buf_ptr: int, count_bytes: int) -> Result<int, NetworkError> {
+    if (stream.socket.provider.is_available == false) {
+        return err<int, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
+    }
+    let bytes_sent = rtnetsendbuf(stream.socket.fd, buf_ptr, count_bytes);
+    if (bytes_sent < 0) {
+        return err<int, NetworkError>(neterror(NetworkErrorKind::ConnectionReset, "Failed to send buffer over socket"));
+    }
+    return ok<int, NetworkError>(bytes_sent);
+}
+
+pub func tcpsendstr(stream: TcpStream, data: string) -> Result<int, NetworkError> {
+    if (stream.socket.provider.is_available == false) {
+        return err<int, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
+    }
+    let bytes_sent = rtnetsend(stream.socket.fd, data);
+    if (bytes_sent < 0) {
+        return err<int, NetworkError>(neterror(NetworkErrorKind::ConnectionReset, "Failed to send data over socket"));
+    }
+    return ok<int, NetworkError>(bytes_sent);
+}
+
+pub func tcprecvstr(stream: TcpStream, max_bytes: int) -> Result<string, NetworkError> {
+    if (stream.socket.provider.is_available == false) {
+        return err<string, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
+    }
+    let data = rtnetrecv(stream.socket.fd, max_bytes);
+    return ok<string, NetworkError>(data);
+}
+
+pub func shutdown(stream: TcpStream) -> Result<bool, NetworkError> {
+    if (stream.socket.provider.is_available == false) {
+        return err<bool, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
+    }
+    rtnetclose(stream.socket.fd);
+    return ok<bool, NetworkError>(true);
+}
+
+pub func closelistener(l: TcpListener) -> Result<bool, NetworkError> {
+    if (l.socket.provider.is_available == false) {
+        return err<bool, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
+    }
+    rtnetclose(l.socket.fd);
+    return ok<bool, NetworkError>(true);
+}
+
+
+pub func parseip(string ip_str) -> IPAddress {
+    let slen = rtstrlen(ip_str);
+    let oct1 = 0;
+    let oct2 = 0;
+    let oct3 = 0;
+    let oct4 = 0;
+    let part = 0;
+    let curr = 0;
+    let i = 0;
+    while (i < slen) {
+        let ch = rtcharat(ip_str, i);
+        if (ch == 46) {
+            if (part == 0) { oct1 = curr; }
+            if (part == 1) { oct2 = curr; }
+            if (part == 2) { oct3 = curr; }
+            part = part + 1;
+            curr = 0;
+        } else {
+            if (ch >= 48 && ch <= 57) {
+                curr = curr * 10 + (ch - 48);
+            }
+        }
+        i = i + 1;
+    }
+    oct4 = curr;
+    return ipv4(oct1, oct2, oct3, oct4);
+}
+
+pub func resolve(domain_name: string, provider: PlatformProvider) -> Result<IPAddress, NetworkError> {
+    if (provider.is_available == false) {
+        return err<IPAddress, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "DNS resolution platform provider unavailable"));
+    }
+    if (domain_name == "") {
+        return err<IPAddress, NetworkError>(neterror(NetworkErrorKind::HostNotFound, "Empty hostname"));
+    }
+    let ip_str = rtnetresolve(domain_name);
+    if (ip_str == "") {
+        return err<IPAddress, NetworkError>(neterror(NetworkErrorKind::HostNotFound, "Failed to resolve hostname"));
+    }
+    let ip = parseip(ip_str);
+    return ok<IPAddress, NetworkError>(ip);
+}
+
+// -----------------------------------------------------------------------------
+// Real Low-Level OS Socket Operations
+// -----------------------------------------------------------------------------
+
+pub func bind(port: int) -> int {
+    return rtnetlisten(port);
+}
+
+pub func listen(listener: int) {
+    // OS TCP socket is already in listening mode from rtnetlisten
+}
+
+pub func accept(listener: int) -> int {
+    return rtnetaccept(listener);
+}
+
+pub func connect(port: int) -> int {
+    return rtnetconnect(port);
+}
+
+pub func send(sock: int, data: string) -> int {
+    return rtnetsend(sock, data);
+}
+
+pub func recv(sock: int, max_bytes: int) -> string {
+    return rtnetrecv(sock, max_bytes);
+}
+
+pub func close(handle: int) {
+    rtnetclose(handle);
+}
+

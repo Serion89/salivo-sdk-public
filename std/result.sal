@@ -1,0 +1,55 @@
+// Salivo Standard Library: Result Module
+module salivo.std.result;
+><salivo.std.core::{panic, Result, ok, err};
+
+pub func unwrap<T, E>(Result<T, E> r) -> T {
+    if (!r.is_ok) {
+        panic("called unwrap() on an Err value");
+    }
+    return r.value;
+}
+
+pub func unwraperr<T, E>(Result<T, E> r) -> E {
+    if (r.is_ok) {
+        panic("called unwraperr() on an Ok value");
+    }
+    return r.error;
+}
+
+pub func isok<T, E>(Result<T, E> r) -> bool {
+    return r.is_ok;
+}
+
+pub func isOk<T, E>(Result<T, E> r) -> bool {
+    return r.is_ok;
+}
+
+pub func is_ok<T, E>(Result<T, E> r) -> bool {
+    return r.is_ok;
+}
+
+pub func iserr<T, E>(Result<T, E> r) -> bool {
+    return !r.is_ok;
+}
+
+pub func isErr<T, E>(Result<T, E> r) -> bool {
+    return !r.is_ok;
+}
+
+pub func is_err<T, E>(Result<T, E> r) -> bool {
+    return !r.is_ok;
+}
+
+pub func unwrapErr<T, E>(Result<T, E> r) -> E {
+    if (r.is_ok) {
+        panic("called unwrapErr() on an Ok value");
+    }
+    return r.error;
+}
+
+pub func unwrap_err<T, E>(Result<T, E> r) -> E {
+    if (r.is_ok) {
+        panic("called unwrap_err() on an Ok value");
+    }
+    return r.error;
+}

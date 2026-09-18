@@ -1,0 +1,1353 @@
+// Salivo Standard Library: Rich String Primitives Module (Stage 35.2)
+module salivo.std.strings;
+><salivo.std.core::{Option, some, none, Iterator, Display, Debug, panic};
+><salivo.std.option::{isnone, unwrap};
+><salivo.std.mem::{allocate, deallocate, reallocate, readbyte, writebyte, move, zero, ptrtostr, strtoptr, checkedAdd, checkedMul, checkedadd, checkedmul};
+
+/// Raw unvalidated byte slice view (pointer + byte length of arbitrary memory)
+pub struct ByteSlice {
+    int ptr;
+    int len;
+}
+
+/// Canonical borrowed string slice view (&str representation: verified UTF-8 pointer + byte length)
+pub struct StrSlice {
+    int ptr;
+    int len;
+}
+
+/// Canonical owned growable string representation (heap pointer + byte length + byte capacity)
+pub struct String {
+    int ptr;
+    int len;
+    int cap;
+}
+
+/// Unicode scalar code point iterator
+pub struct CharIterator {
+    int ptr;
+    int len;
+    int index;
+}
+
+pub func chars(String s) -> CharIterator {
+    return CharIterator {
+        ptr: s.ptr,
+        len: s.len,
+        index: 0,
+    };
+}
+
+pub func nextchar(CharIterator it) -> Option<int> {
+    if (it.index >= it.len) {
+        return none<int>();
+    }
+    let b0 = readbyte(it.ptr, it.index);
+    if (b0 < 0x80) {
+        return some<int>(b0);
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        if (it.index + 1 >= it.len) {
+            return none<int>();
+        }
+        let b1 = readbyte(it.ptr, it.index + 1);
+        let cp = ((b0 & 0x1F) * 64) + (b1 & 0x3F);
+        return some<int>(cp);
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        if (it.index + 2 >= it.len) {
+            return none<int>();
+        }
+        let b1 = readbyte(it.ptr, it.index + 1);
+        let b2 = readbyte(it.ptr, it.index + 2);
+        let cp = ((b0 & 0x0F) * 4096) + ((b1 & 0x3F) * 64) + (b2 & 0x3F);
+        return some<int>(cp);
+    }
+    if ((b0 & 0xF8) == 0xF0) {
+        if (it.index + 3 >= it.len) {
+            return none<int>();
+        }
+        let b1 = readbyte(it.ptr, it.index + 1);
+        let b2 = readbyte(it.ptr, it.index + 2);
+        let b3 = readbyte(it.ptr, it.index + 3);
+        let cp = ((b0 & 0x07) * 262144) + ((b1 & 0x3F) * 4096) + ((b2 & 0x3F) * 64) + (b3 & 0x3F);
+        return some<int>(cp);
+    }
+    return some<int>(b0);
+}
+
+pub func stepchar(CharIterator it) -> CharIterator {
+    if (it.index >= it.len) {
+        return it;
+    }
+    let b0 = readbyte(it.ptr, it.index);
+    let step = 1;
+    if (b0 < 0x80) {
+        step = 1;
+    } else if ((b0 & 0xE0) == 0xC0) {
+        step = 2;
+    } else if ((b0 & 0xF0) == 0xE0) {
+        step = 3;
+    } else if ((b0 & 0xF8) == 0xF0) {
+        step = 4;
+    }
+    let new_idx = it.index + step;
+    if (new_idx > it.len) {
+        new_idx = it.len;
+    }
+    return CharIterator {
+        ptr: it.ptr,
+        len: it.len,
+        index: new_idx,
+    };
+}
+
+/// Constructs a raw borrowed byte slice from raw memory address and length
+pub func byteslice(int ptr, int len) -> ByteSlice {
+    if (len < 0) {
+        panic("Negative length passed to byteslice");
+    }
+    if (ptr == 0 && len > 0) {
+        panic("Null pointer with positive length passed to byteslice");
+    }
+    return ByteSlice {
+        ptr: ptr,
+        len: len,
+    };
+}
+
+/// Constructs a zero-copy borrowed string slice view from raw memory address and length (low-level constructor)
+/// Unchecked raw constructor constructing a StrSlice directly from raw memory address and length.
+/// WARNING: Does not validate UTF-8 invariants or allocation bounds.
+/// For validated construction, prefer tryFromParts() / tryfromparts() or fromUtf8() / fromutf8().
+pub func fromparts(int ptr, int len) -> StrSlice {
+    if (len < 0) {
+        panic("Negative length passed to fromparts");
+    }
+    if (ptr == 0 && len > 0) {
+        panic("Null pointer with positive length passed to fromparts");
+    }
+    return StrSlice {
+        ptr: ptr,
+        len: len,
+    };
+}
+
+/// Explicit unchecked raw constructor alias (fromRawParts).
+pub func fromRawParts(int ptr, int len) -> StrSlice {
+    return fromparts(ptr, len);
+}
+
+/// Validates whether a raw ByteSlice contains valid UTF-8
+pub func bytevalidutf8(ByteSlice b) -> bool {
+    let s = StrSlice { ptr: b.ptr, len: b.len };
+    return sliceutf8valid(s);
+}
+
+pub func byteValidUtf8(ByteSlice b) -> bool {
+    return bytevalidutf8(b);
+}
+
+/// Checked promotion of raw ByteSlice to validated StrSlice
+pub func fromutf8(ByteSlice b) -> Option<StrSlice> {
+    if (!bytevalidutf8(b)) {
+        return none<StrSlice>();
+    }
+    return some<StrSlice>(StrSlice {
+        ptr: b.ptr,
+        len: b.len,
+    });
+}
+
+pub func fromUtf8(ByteSlice b) -> Option<StrSlice> {
+    return fromutf8(b);
+}
+
+/// Checked constructor from raw pointer and length (returns Option<StrSlice>)
+pub func tryfromparts(int ptr, int len) -> Option<StrSlice> {
+    if (len < 0 || (ptr == 0 && len > 0)) {
+        return none<StrSlice>();
+    }
+    let b = ByteSlice { ptr: ptr, len: len };
+    return fromutf8(b);
+}
+
+pub func tryFromParts(int ptr, int len) -> Option<StrSlice> {
+    return tryfromparts(ptr, len);
+}
+
+/// Converts a validated StrSlice into a raw ByteSlice
+pub func asbytes(StrSlice s) -> ByteSlice {
+    return ByteSlice {
+        ptr: s.ptr,
+        len: s.len,
+    };
+}
+
+pub func asBytes(StrSlice s) -> ByteSlice {
+    return asbytes(s);
+}
+
+/// Converts an owned String into a raw ByteSlice
+pub func stringbytes(String s) -> ByteSlice {
+    return ByteSlice {
+        ptr: s.ptr,
+        len: s.len,
+    };
+}
+
+/// Creates a new empty String
+pub func stringNew() -> String {
+    let initcap = 8;
+    let ptr = allocate(initcap, 1);
+    writebyte(ptr, 0, 0);
+    return String {
+        ptr: ptr,
+        len: 0,
+        cap: initcap,
+    };
+}
+
+pub func stringnew() -> String {
+    return stringNew();
+}
+
+/// Creates a String with preallocated capacity
+pub func stringWithCap(int cap) -> String {
+    if (cap < 0) {
+        panic("Negative capacity in stringWithCap");
+    }
+    let mut initcap = cap;
+    if (initcap < 4) {
+        initcap = 4;
+    }
+    let alloc_cap = checkedAdd(initcap, 1);
+    let ptr = allocate(alloc_cap, 1);
+    writebyte(ptr, 0, 0);
+    return String {
+        ptr: ptr,
+        len: 0,
+        cap: initcap,
+    };
+}
+
+pub func stringwithcap(int cap) -> String {
+    return stringWithCap(cap);
+}
+
+/// Converts an owned String into a borrowed StrSlice view (O(1) zero-copy)
+pub func asStr(String s) -> StrSlice {
+    return StrSlice {
+        ptr: s.ptr,
+        len: s.len,
+    };
+}
+
+pub func asstr(String s) -> StrSlice {
+    return asStr(s);
+}
+
+/// Creates an owned String copy from a borrowed StrSlice
+pub func fromStr(StrSlice s) -> String {
+    if (s.len < 0) {
+        panic("Negative length in fromstr");
+    }
+    if (s.ptr == 0 && s.len > 0) {
+        panic("Null pointer with positive length in fromstr");
+    }
+    let mut cap = checkedAdd(s.len, 1);
+    if (cap < 8) {
+        cap = 8;
+    }
+    let ptr = allocate(cap, 1);
+    if (s.len > 0 && s.ptr != 0) {
+        move(s.ptr, ptr, s.len);
+    }
+    writebyte(ptr, s.len, 0);
+    return String {
+        ptr: ptr,
+        len: s.len,
+        cap: cap,
+    };
+}
+
+pub func fromstr(StrSlice s) -> String {
+    return fromStr(s);
+}
+
+/// Creates an owned String copy from a string literal or raw C-string pointer
+pub func fromCString(string s) -> String {
+    let raw_addr = strtoptr(s);
+    let mut slen = 0;
+    while (readbyte(raw_addr, slen) != 0) {
+        slen = checkedAdd(slen, 1);
+    }
+    let mut cap = checkedAdd(slen, 1);
+    if (cap < 8) {
+        cap = 8;
+    }
+    let ptr = allocate(cap, 1);
+    if (slen > 0) {
+        move(raw_addr, ptr, slen);
+    }
+    writebyte(ptr, slen, 0);
+    return String {
+        ptr: ptr,
+        len: slen,
+        cap: cap,
+    };
+}
+
+pub func fromcstring(string s) -> String {
+    return fromCString(s);
+}
+
+/// Creates a borrowed StrSlice view from a string literal
+pub func cStringView(string s) -> StrSlice {
+    let raw_addr = strtoptr(s);
+    let slen = 0;
+    while (readbyte(raw_addr, slen) != 0) {
+        slen = slen + 1;
+    }
+    return StrSlice {
+        ptr: raw_addr,
+        len: slen,
+    };
+}
+
+pub func cstringview(string s) -> StrSlice {
+    return cStringView(s);
+}
+
+/// Asserts two owned Strings are byte-for-byte equal
+pub func assertStringEq(String a, String b, string msg) {
+    if (a.len != b.len) {
+        panic(msg);
+    }
+    let i = 0;
+    while (i < a.len) {
+        if (readbyte(a.ptr, i) != readbyte(b.ptr, i)) {
+            panic(msg);
+        }
+        i = i + 1;
+    }
+}
+
+pub func assertstringeq(String a, String b, string msg) {
+    assertStringEq(a, b, msg);
+}
+
+/// Asserts two borrowed StrSlices are byte-for-byte equal
+pub func assertSliceEq(StrSlice a, StrSlice b, string msg) {
+    if (a.len != b.len) {
+        panic(msg);
+    }
+    let i = 0;
+    while (i < a.len) {
+        if (readbyte(a.ptr, i) != readbyte(b.ptr, i)) {
+            panic(msg);
+        }
+        i = i + 1;
+    }
+}
+
+pub func assertsliceeq(StrSlice a, StrSlice b, string msg) {
+    assertSliceEq(a, b, msg);
+}
+
+/// Zero-copy subslice on StrSlice: O(1) pointer arithmetic without allocation
+pub func subslicestr(StrSlice s, int start, int end) -> StrSlice {
+    if (start < 0 || start > s.len) {
+        panic("String slice start index out of bounds");
+    }
+    let actend = end;
+    if (actend < 0 || actend > s.len) {
+        actend = s.len;
+    }
+    if (actend < start) {
+        panic("String slice start index exceeds end index");
+    }
+    return StrSlice {
+        ptr: s.ptr + start,
+        len: actend - start,
+    };
+}
+
+/// Zero-copy slice of a borrowed StrSlice (&str slice)
+pub func slicestr(StrSlice s, int start, int end) -> StrSlice {
+    return subslicestr(s, start, end);
+}
+
+/// Zero-copy slice of an owned String producing a borrowed StrSlice
+pub func stringslice(String s, int start, int end) -> StrSlice {
+    return subslicestr(asstr(s), start, end);
+}
+
+/// Canonical zero-copy slice of an owned String
+pub func slice(String s, int start, int end) -> StrSlice {
+    return subslicestr(asstr(s), start, end);
+}
+
+/// Returns byte length of owned String
+pub func stringlen(String s) -> int {
+    return s.len;
+}
+
+/// Returns capacity of owned String
+pub func stringcap(String s) -> int {
+    return s.cap;
+}
+
+/// Returns whether owned String is empty
+pub func stringisempty(String s) -> bool {
+    return s.len == 0;
+}
+
+/// Returns byte length of borrowed StrSlice
+pub func slicelen(StrSlice s) -> int {
+    return s.len;
+}
+
+/// Returns whether borrowed StrSlice is empty
+pub func sliceisempty(StrSlice s) -> bool {
+    return s.len == 0;
+}
+
+/// Converts owned String to primitive C-string pointer (explicit interop boundary)
+pub func tocstring(String s) -> string {
+    return ptrtostr(s.ptr);
+}
+
+/// Converts borrowed StrSlice to primitive C-string pointer (explicit interop boundary)
+pub func slicetocstring(StrSlice s) -> string {
+    let copy_str = fromstr(s);
+    return ptrtostr(copy_str.ptr);
+}
+
+pub func len(String s) -> int {
+    return s.len;
+}
+
+pub func isempty(String s) -> bool {
+    return s.len == 0;
+}
+
+/// Concatenates two owned Strings producing a new owned String
+pub func concat(String a, String b) -> String {
+    if (a.len < 0 || b.len < 0) {
+        panic("Negative length in concat");
+    }
+    let total_len = checkedAdd(a.len, b.len);
+    let mut cap = checkedAdd(total_len, 1);
+    if (cap < 8) {
+        cap = 8;
+    }
+    let ptr = allocate(cap, 1);
+    if (a.len > 0 && a.ptr != 0) {
+        move(a.ptr, ptr, a.len);
+    }
+    if (b.len > 0 && b.ptr != 0) {
+        move(b.ptr, ptr + a.len, b.len);
+    }
+    writebyte(ptr, total_len, 0);
+    return String {
+        ptr: ptr,
+        len: total_len,
+        cap: cap,
+    };
+}
+
+/// Appends a borrowed StrSlice to an owned String
+pub func pushStr(String s, StrSlice appendtext) -> String {
+    if (appendtext.len < 0) {
+        panic("Invalid negative slice length in pushstr");
+        return s;
+    }
+    if (appendtext.len == 0) {
+        return s;
+    }
+    if (appendtext.ptr == 0) {
+        panic("Null pointer with non-zero length in pushstr");
+        return s;
+    }
+
+    let append_len = appendtext.len;
+    let s_len = s.len;
+    let total_len = checkedAdd(s_len, append_len);
+    let needed = checkedAdd(total_len, 1);
+
+    let mut ptr = s.ptr;
+    let mut cap = s.cap;
+    let mut append_ptr = appendtext.ptr;
+    let append_end = checkedAdd(append_ptr, append_len);
+
+    let mut bound = s_len;
+    if (cap > s_len) {
+        bound = cap;
+    }
+    let is_overlapping = (append_ptr < ptr + bound) && (append_end > ptr);
+    if (is_overlapping) {
+        if (append_ptr < ptr || append_end > ptr + s_len) {
+            panic("StrSlice extends outside valid source String initialized memory boundary");
+            return s;
+        }
+    }
+
+    let offset = append_ptr - ptr;
+    if (needed > cap) {
+        let new_cap = checkedMul(needed, 2);
+        if (s.cap == 0) {
+            ptr = allocate(new_cap, 1);
+            move(s.ptr, ptr, s_len);
+        } else {
+            ptr = reallocate(s.ptr, s.cap, new_cap, 1);
+        }
+        cap = new_cap;
+        if (is_overlapping) {
+            append_ptr = ptr + offset;
+        }
+    }
+
+    move(append_ptr, ptr + s_len, append_len);
+    writebyte(ptr, total_len, 0);
+    return String {
+        ptr: ptr,
+        len: total_len,
+        cap: cap,
+    };
+}
+
+pub func pushstr(String s, StrSlice appendtext) -> String {
+    return pushStr(s, appendtext);
+}
+
+/// Appends a Unicode code point to an owned String
+pub func push(String s, int codepoint) -> String {
+    let cp = codepoint;
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        panic("Invalid Unicode code point passed to push");
+    }
+    let mut ptr = s.ptr;
+    let mut cap = s.cap;
+    let mut slen = s.len;
+    let needed = checkedAdd(slen, 5);
+    if (needed > cap) {
+        let new_cap = checkedMul(checkedAdd(cap, 5), 2);
+        if (s.cap == 0) {
+            ptr = allocate(new_cap, 1);
+            move(s.ptr, ptr, slen);
+        } else {
+            ptr = reallocate(s.ptr, s.cap, new_cap, 1);
+        }
+        cap = new_cap;
+    }
+    if (cp < 0x80) {
+        writebyte(ptr, slen, cp);
+        slen = slen + 1;
+    } else if (cp < 0x800) {
+        writebyte(ptr, slen, 0xC0 | (cp / 64));
+        writebyte(ptr, slen + 1, 0x80 | (cp % 64));
+        slen = slen + 2;
+    } else if (cp < 0x10000) {
+        writebyte(ptr, slen, 0xE0 | (cp / 4096));
+        writebyte(ptr, slen + 1, 0x80 | ((cp / 64) % 64));
+        writebyte(ptr, slen + 2, 0x80 | (cp % 64));
+        slen = slen + 3;
+    } else {
+        writebyte(ptr, slen, 0xF0 | (cp / 262144));
+        writebyte(ptr, slen + 1, 0x80 | ((cp / 4096) % 64));
+        writebyte(ptr, slen + 2, 0x80 | ((cp / 64) % 64));
+        writebyte(ptr, slen + 3, 0x80 | (cp % 64));
+        slen = slen + 4;
+    }
+    writebyte(ptr, slen, 0);
+    return String {
+        ptr: ptr,
+        len: slen,
+        cap: cap,
+    };
+}
+
+/// Appends a single raw byte to an owned String efficiently
+pub func pushByte(String s, int b) -> String {
+    let mut ptr = s.ptr;
+    let mut cap = s.cap;
+    let slen = s.len;
+    let needed = checkedAdd(slen, 2);
+    if (needed > cap) {
+        let new_cap = checkedMul(checkedAdd(cap, 2), 2);
+        if (s.cap == 0) {
+            ptr = allocate(new_cap, 1);
+            move(s.ptr, ptr, slen);
+        } else {
+            ptr = reallocate(s.ptr, s.cap, new_cap, 1);
+        }
+        cap = new_cap;
+    }
+    writebyte(ptr, slen, b);
+    writebyte(ptr, slen + 1, 0);
+    return String {
+        ptr: ptr,
+        len: slen + 1,
+        cap: cap,
+    };
+}
+
+pub func pushbyte(String s, int b) -> String {
+    return pushByte(s, b);
+}
+
+/// Clears an owned String to length 0
+pub func clear(String s) -> String {
+    if (s.cap == 0) {
+        return stringNew();
+    }
+    writebyte(s.ptr, 0, 0);
+    return String {
+        ptr: s.ptr,
+        len: 0,
+        cap: s.cap,
+    };
+}
+
+/// Reserves additional capacity for an owned String
+pub func reserve(String s, int mincap) -> String {
+    if (mincap < 0) {
+        panic("Negative mincap in reserve");
+    }
+    if (mincap <= s.cap) {
+        return s;
+    }
+    let alloc_cap = checkedAdd(mincap, 1);
+    let mut ptr = s.ptr;
+    if (s.cap == 0) {
+        ptr = allocate(alloc_cap, 1);
+        move(s.ptr, ptr, s.len);
+    } else {
+        ptr = reallocate(s.ptr, s.cap, alloc_cap, 1);
+    }
+    return String {
+        ptr: ptr,
+        len: s.len,
+        cap: mincap,
+    };
+}
+
+/// =============================================================================
+/// UNICODE-AWARE CASE MAPPING ROUTINES (1:1 SCALAR SCOPE)
+///
+/// Scope & Architectural Specification:
+/// Salivo provides Unicode-aware 1:1 scalar code point case mapping across major
+/// global scripts:
+/// - Basic Latin / ASCII (a-z <-> A-Z, 0x0041..0x005A <-> 0x0061..0x007A)
+/// - Latin-1 Supplement (0x00C0..0x00D6, 0x00D8..0x00DE <-> 0x00E0..0x00F6, 0x00F8..0x00FE)
+/// - Latin Extended-A (0x0100..0x017E pairs, 0x00FF ÿ <-> 0x0178 Ÿ, 0x017F ſ -> S)
+/// - German Capital Sharp S (0x1E9E ẞ <-> 0x00DF ß)
+/// - Greek & Coptic (0x0391..0x03A9 <-> 0x03B1..0x03C9, accented vowels, final sigma 0x03C2 -> 0x03A3)
+/// - Cyrillic (0x0410..0x044F, 0x0400..0x040F <-> 0x0450..0x045F, Ukrainian ґ 0x0491 <-> Ґ 0x0490)
+/// - Fullwidth Latin Forms (0xFF21..0xFF3A <-> 0xFF41..0xFF5A)
+///
+/// Structural Invariant & Limitations:
+/// - 1:1 Scalar Mapping: The function signature returns a single `int` code point
+///   (`int -> int`). By design, this cannot represent Unicode SpecialCasing expansions
+///   where a single code point maps to multiple code points (e.g. ligature 'ﬁ' U+FB01
+///   expanding to 'FI', or German 'ß' traditional expansion to 'SS').
+/// - Contextual/Locale Casing: Context-sensitive casing (such as Greek final sigma
+///   rules depending on word position, or Turkish locale dotted/dotless I) is not
+///   handled by 1:1 scalar mappings.
+/// - Any code point outside the supported 1:1 set is preserved verbatim without corruption.
+/// =============================================================================
+
+/// Unicode-aware 1:1 scalar uppercase mapping
+pub func unicodetopper(int cp) -> int {
+    if (cp >= 97 && cp <= 122) { return cp - 32; }
+    // Latin-1 Supplement
+    if (cp >= 0xE0 && cp <= 0xF6) { return cp - 32; }
+    if (cp >= 0xF8 && cp <= 0xFE) { return cp - 32; }
+    if (cp == 0xFF) { return 0x0178; }
+    if (cp == 0x00DF) { return 0x1E9E; } // German ß -> ẞ (1:1 scalar)
+    // Latin Extended-A
+    if (cp >= 0x0100 && cp <= 0x0177) {
+        if ((cp % 2) == 1) { return cp - 1; }
+        return cp;
+    }
+    if (cp >= 0x0179 && cp <= 0x017E) {
+        if ((cp % 2) == 0) { return cp - 1; }
+        return cp;
+    }
+    if (cp == 0x017F) { return 0x0053; } // ſ -> S
+    // Greek (α-ω -> Α-Ω)
+    if (cp >= 0x03B1 && cp <= 0x03C9) { return cp - 32; }
+    if (cp == 0x03C2) { return 0x03A3; }
+    if (cp == 0x03AC) { return 0x0386; }
+    if (cp == 0x03AD) { return 0x0388; }
+    if (cp == 0x03AE) { return 0x0389; }
+    if (cp == 0x03AF) { return 0x038A; }
+    if (cp == 0x03CC) { return 0x038C; }
+    if (cp == 0x03CD) { return 0x038E; }
+    if (cp == 0x03CE) { return 0x038F; }
+    // Cyrillic (а-я -> А-Я)
+    if (cp >= 0x0430 && cp <= 0x044F) { return cp - 32; }
+    if (cp >= 0x0450 && cp <= 0x045F) { return cp - 80; }
+    if (cp == 0x0491) { return 0x0490; }
+    // Fullwidth ASCII (0xFF41..0xFF5A -> 0xFF21..0xFF3A)
+    if (cp >= 0xFF41 && cp <= 0xFF5A) { return cp - 32; }
+    return cp;
+}
+
+/// Modern camelCase alias for unicodetopper
+pub func unicodeToUpper(int cp) -> int {
+    return unicodetopper(cp);
+}
+
+/// Unicode-aware 1:1 scalar lowercase mapping
+pub func unicodetolower(int cp) -> int {
+    if (cp >= 65 && cp <= 90) { return cp + 32; }
+    // Latin-1 Supplement
+    if (cp >= 0xC0 && cp <= 0xD6) { return cp + 32; }
+    if (cp >= 0xD8 && cp <= 0xDE) { return cp + 32; }
+    if (cp == 0x0178) { return 0xFF; }
+    if (cp == 0x1E9E) { return 0x00DF; } // German ẞ -> ß (1:1 scalar)
+    // Latin Extended-A
+    if (cp >= 0x0100 && cp <= 0x0177) {
+        if ((cp % 2) == 0) { return cp + 1; }
+        return cp;
+    }
+    if (cp >= 0x0179 && cp <= 0x017E) {
+        if ((cp % 2) == 1) { return cp + 1; }
+        return cp;
+    }
+    // Greek (Α-Ω -> α-ω)
+    if (cp >= 0x0391 && cp <= 0x03A9 && cp != 0x03A2) { return cp + 32; }
+    if (cp == 0x0386) { return 0x03AC; }
+    if (cp == 0x0388) { return 0x03AD; }
+    if (cp == 0x0389) { return 0x03AE; }
+    if (cp == 0x038A) { return 0x03AF; }
+    if (cp == 0x038C) { return 0x03CC; }
+    if (cp == 0x038E) { return 0x03CD; }
+    if (cp == 0x038F) { return 0x03CE; }
+    // Cyrillic (А-Я -> а-я)
+    if (cp >= 0x0410 && cp <= 0x042F) { return cp + 32; }
+    if (cp >= 0x0400 && cp <= 0x040F) { return cp + 80; }
+    if (cp == 0x0490) { return 0x0491; }
+    // Fullwidth ASCII (0xFF21..0xFF3A -> 0xFF41..0xFF5A)
+    if (cp >= 0xFF21 && cp <= 0xFF3A) { return cp + 32; }
+    return cp;
+}
+
+/// Modern camelCase alias for unicodetolower
+pub func unicodeToLower(int cp) -> int {
+    return unicodetolower(cp);
+}
+
+/// Converts String to uppercase with Unicode-aware 1:1 scalar case mapping
+pub func upper(String s) -> String {
+    let mut out_str = stringwithcap(s.len);
+    let mut iter = chars(s);
+    while (true) {
+        let next_opt = nextchar(iter);
+        if (isnone<int>(next_opt)) {
+            break;
+        }
+        let cp = unwrap<int>(next_opt);
+        let up_cp = unicodetopper(cp);
+        out_str = push(out_str, up_cp);
+        iter = stepchar(iter);
+    }
+    return out_str;
+}
+
+/// Modern camelCase alias for upper
+pub func toUpper(String s) -> String {
+    return upper(s);
+}
+
+/// Converts String to lowercase with Unicode-aware 1:1 scalar case mapping
+pub func lower(String s) -> String {
+    let mut out_str = stringwithcap(s.len);
+    let mut iter = chars(s);
+    while (true) {
+        let next_opt = nextchar(iter);
+        if (isnone<int>(next_opt)) {
+            break;
+        }
+        let cp = unwrap<int>(next_opt);
+        let low_cp = unicodetolower(cp);
+        out_str = push(out_str, low_cp);
+        iter = stepchar(iter);
+    }
+    return out_str;
+}
+
+/// Modern camelCase alias for lower
+pub func toLower(String s) -> String {
+    return lower(s);
+}
+
+/// =============================================================================
+/// WHITESPACE TRIMMING ROUTINES (ASCII SCOPE)
+///
+/// NOTE on Unicode Scope:
+/// The standard `trim()`, `trimStart()`, and `trimEnd()` functions are explicitly
+/// scoped to the standard ASCII whitespace set:
+/// - Space (0x20, ' ')
+/// - Horizontal Tab (0x09, '\t')
+/// - Line Feed (0x0A, '\n')
+/// - Carriage Return (0x0D, '\r')
+/// - Vertical Tab (0x0B, '\v')
+/// - Form Feed (0x0C, '\f')
+///
+/// For broader multi-byte Unicode whitespace (e.g. U+00A0 NBSP, U+2000-U+200A En/Em Quads,
+/// U+3000 Ideographic Space), use custom char iterators (`chars(s)` / `charsSlice(s)`).
+/// =============================================================================
+
+pub func isAsciiWhitespace(int b) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13 || b == 11 || b == 12;
+}
+
+pub func isWhitespace(int b) -> bool {
+    return isAsciiWhitespace(b);
+}
+
+/// Trims leading and trailing ASCII whitespace
+pub func trim(String s) -> String {
+    let mut start = 0;
+    while (start < s.len) {
+        let b = readbyte(s.ptr, start);
+        if (isAsciiWhitespace(b)) {
+            start = start + 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = s.len;
+    while (end > start) {
+        let b = readbyte(s.ptr, end - 1);
+        if (isAsciiWhitespace(b)) {
+            end = end - 1;
+        } else {
+            break;
+        }
+    }
+    let trimmed_len = end - start;
+    let cap = checkedAdd(trimmed_len, 1);
+    let ptr = allocate(cap, 1);
+    if (trimmed_len > 0) {
+        move(s.ptr + start, ptr, trimmed_len);
+    }
+    writebyte(ptr, trimmed_len, 0);
+    return String {
+        ptr: ptr,
+        len: trimmed_len,
+        cap: cap,
+    };
+}
+
+/// Explicit alias for ASCII whitespace trimming
+pub func trimAscii(String s) -> String {
+    return trim(s);
+}
+
+/// Trims leading ASCII whitespace
+pub func trimStart(String s) -> String {
+    let mut start = 0;
+    while (start < s.len) {
+        let b = readbyte(s.ptr, start);
+        if (isAsciiWhitespace(b)) {
+            start = start + 1;
+        } else {
+            break;
+        }
+    }
+    let trimmed_len = s.len - start;
+    let cap = checkedAdd(trimmed_len, 1);
+    let ptr = allocate(cap, 1);
+    if (trimmed_len > 0) {
+        move(s.ptr + start, ptr, trimmed_len);
+    }
+    writebyte(ptr, trimmed_len, 0);
+    return String {
+        ptr: ptr,
+        len: trimmed_len,
+        cap: cap,
+    };
+}
+
+pub func trimstart(String s) -> String {
+    return trimStart(s);
+}
+
+/// Trims trailing ASCII whitespace
+pub func trimEnd(String s) -> String {
+    let mut end = s.len;
+    while (end > 0) {
+        let b = readbyte(s.ptr, end - 1);
+        if (isAsciiWhitespace(b)) {
+            end = end - 1;
+        } else {
+            break;
+        }
+    }
+    let trimmed_len = end;
+    let cap = checkedAdd(trimmed_len, 1);
+    let ptr = allocate(cap, 1);
+    if (trimmed_len > 0) {
+        move(s.ptr, ptr, trimmed_len);
+    }
+    writebyte(ptr, trimmed_len, 0);
+    return String {
+        ptr: ptr,
+        len: trimmed_len,
+        cap: cap,
+    };
+}
+
+pub func trimend(String s) -> String {
+    return trimEnd(s);
+}
+
+/// Finds first occurrence of sub in s
+pub func find(String s, String sub) -> int {
+    if (sub.len == 0) {
+        return 0;
+    }
+    if (sub.len > s.len) {
+        return -1;
+    }
+    let limit = s.len - sub.len;
+    let mut i = 0;
+    while (i <= limit) {
+        let mut match_found = true;
+        let mut j = 0;
+        while (j < sub.len) {
+            if (readbyte(s.ptr, i + j) != readbyte(sub.ptr, j)) {
+                match_found = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if (match_found) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Finds last occurrence of sub in s
+pub func rfind(String s, String sub) -> int {
+    if (sub.len == 0) {
+        return s.len;
+    }
+    if (sub.len > s.len) {
+        return -1;
+    }
+    let mut i = s.len - sub.len;
+    while (i >= 0) {
+        let mut match_found = true;
+        let mut j = 0;
+        while (j < sub.len) {
+            if (readbyte(s.ptr, i + j) != readbyte(sub.ptr, j)) {
+                match_found = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if (match_found) {
+            return i;
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+/// Returns whether s contains sub
+pub func contains(String s, String sub) -> bool {
+    return find(s, sub) >= 0;
+}
+
+/// Returns whether s starts with prefix
+pub func startsWith(String s, String prefix) -> bool {
+    if (prefix.len > s.len) {
+        return false;
+    }
+    let mut j = 0;
+    while (j < prefix.len) {
+        if (readbyte(s.ptr, j) != readbyte(prefix.ptr, j)) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+pub func startswith(String s, String prefix) -> bool {
+    return startsWith(s, prefix);
+}
+
+/// Returns whether s ends with suffix
+pub func endsWith(String s, String suffix) -> bool {
+    if (suffix.len > s.len) {
+        return false;
+    }
+    let offset = s.len - suffix.len;
+    let mut j = 0;
+    while (j < suffix.len) {
+        if (readbyte(s.ptr, offset + j) != readbyte(suffix.ptr, j)) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+pub func endswith(String s, String suffix) -> bool {
+    return endsWith(s, suffix);
+}
+
+/// Replaces occurrences of target with repl
+pub func replace(String s, String target, String repl) -> String {
+    if (target.len == 0) {
+        return fromstr(asstr(s));
+    }
+    let pos = find(s, target);
+    if (pos < 0) {
+        return fromstr(asstr(s));
+    }
+    let mut out_str = stringnew();
+    let mut curr = 0;
+    while (curr <= s.len - target.len) {
+        let mut match_found = true;
+        let mut j = 0;
+        while (j < target.len) {
+            if (readbyte(s.ptr, curr + j) != readbyte(target.ptr, j)) {
+                match_found = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if (match_found) {
+            out_str = pushstr(out_str, asstr(repl));
+            curr = curr + target.len;
+        } else {
+            out_str = pushbyte(out_str, readbyte(s.ptr, curr));
+            curr = curr + 1;
+        }
+    }
+    while (curr < s.len) {
+        out_str = pushbyte(out_str, readbyte(s.ptr, curr));
+        curr = curr + 1;
+    }
+    return out_str;
+}
+
+/// Repeats String s count times
+pub func repeat(String s, int count) -> String {
+    if (count < 0) {
+        panic("Negative count in repeat");
+    }
+    if (count == 0 || s.len == 0) {
+        return stringnew();
+    }
+    let total_len = checkedMul(s.len, count);
+    let cap = checkedAdd(total_len, 1);
+    let ptr = allocate(cap, 1);
+    let mut i = 0;
+    while (i < count) {
+        let offset = checkedMul(i, s.len);
+        move(s.ptr, ptr + offset, s.len);
+        i = i + 1;
+    }
+    writebyte(ptr, total_len, 0);
+    return String {
+        ptr: ptr,
+        len: total_len,
+        cap: cap,
+    };
+}
+
+/// Pads start of s to targetlen using pad
+pub func padStart(String s, int targetlen, String pad) -> String {
+    if (targetlen < 0) {
+        panic("Negative targetlen in padStart");
+    }
+    if (s.len >= targetlen) {
+        return fromstr(asstr(s));
+    }
+    let pad_needed = targetlen - s.len;
+    let pad_unit = pad.len;
+    if (pad_unit == 0) {
+        return fromstr(asstr(s));
+    }
+    let cap = checkedAdd(targetlen, 1);
+    let ptr = allocate(cap, 1);
+    let mut i = 0;
+    while (i < pad_needed) {
+        let b = readbyte(pad.ptr, i % pad_unit);
+        writebyte(ptr, i, b);
+        i = i + 1;
+    }
+    move(s.ptr, ptr + pad_needed, s.len);
+    writebyte(ptr, targetlen, 0);
+    return String {
+        ptr: ptr,
+        len: targetlen,
+        cap: cap,
+    };
+}
+
+pub func padstart(String s, int targetlen, String pad) -> String {
+    return padStart(s, targetlen, pad);
+}
+
+/// Pads end of s to targetlen using pad
+pub func padEnd(String s, int targetlen, String pad) -> String {
+    if (targetlen < 0) {
+        panic("Negative targetlen in padEnd");
+    }
+    if (s.len >= targetlen) {
+        return fromstr(asstr(s));
+    }
+    let pad_needed = targetlen - s.len;
+    let pad_unit = pad.len;
+    if (pad_unit == 0) {
+        return fromstr(asstr(s));
+    }
+    let cap = checkedAdd(targetlen, 1);
+    let ptr = allocate(cap, 1);
+    move(s.ptr, ptr, s.len);
+    let mut i = 0;
+    while (i < pad_needed) {
+        let b = readbyte(pad.ptr, i % pad_unit);
+        writebyte(ptr, s.len + i, b);
+        i = i + 1;
+    }
+    writebyte(ptr, targetlen, 0);
+    return String {
+        ptr: ptr,
+        len: targetlen,
+        cap: cap,
+    };
+}
+
+pub func padend(String s, int targetlen, String pad) -> String {
+    return padEnd(s, targetlen, pad);
+}
+
+/// Counts total UTF-8 code points in String
+pub func charCount(String s) -> int {
+    let count = 0;
+    let i = 0;
+    while (i < s.len) {
+        let b = readbyte(s.ptr, i);
+        if ((b & 0xC0) != 0x80) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+pub func charcount(String s) -> int {
+    return charCount(s);
+}
+
+/// Retrieves UTF-8 code point at character index
+pub func charAt(String s, int index) -> int {
+    if (index < 0) {
+        return -1;
+    }
+    let curr = 0;
+    let i = 0;
+    while (i < s.len) {
+        let b0 = readbyte(s.ptr, i);
+        let cp = 0;
+        let cplen = 1;
+        if (b0 < 0x80) {
+            cp = b0;
+            cplen = 1;
+        } else if ((b0 & 0xE0) == 0xC0) {
+            if (i + 1 >= s.len) { return -1; }
+            let b1 = readbyte(s.ptr, i + 1);
+            cp = ((b0 & 0x1F) * 64) + (b1 & 0x3F);
+            cplen = 2;
+        } else if ((b0 & 0xF0) == 0xE0) {
+            if (i + 2 >= s.len) { return -1; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            cp = ((b0 & 0x0F) * 4096) + ((b1 & 0x3F) * 64) + (b2 & 0x3F);
+            cplen = 3;
+        } else if ((b0 & 0xF8) == 0xF0) {
+            if (i + 3 >= s.len) { return -1; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            let b3 = readbyte(s.ptr, i + 3);
+            cp = ((b0 & 0x07) * 262144) + ((b1 & 0x3F) * 4096) + ((b2 & 0x3F) * 64) + (b3 & 0x3F);
+            cplen = 4;
+        }
+        if (curr == index) {
+            return cp;
+        }
+        curr = curr + 1;
+        i = i + cplen;
+    }
+    return -1;
+}
+
+pub func charat(String s, int index) -> int {
+    return charAt(s, index);
+}
+
+/// Validates whether bytes form valid UTF-8
+pub func utf8valid(String s) -> bool {
+    let i = 0;
+    while (i < s.len) {
+        let b0 = readbyte(s.ptr, i);
+        let cplen = 1;
+        if (b0 < 0x80) {
+            cplen = 1;
+        } else if ((b0 & 0xE0) == 0xC0) {
+            if (b0 < 0xC2) { return false; } // Reject overlong 2-byte encodings
+            if (i + 1 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            if ((b1 & 0xC0) != 0x80) { return false; }
+            cplen = 2;
+        } else if ((b0 & 0xF0) == 0xE0) {
+            if (i + 2 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) { return false; }
+            // Strict bounds for 3-byte encodings (reject overlong and surrogates)
+            if (b0 == 0xE0 && b1 < 0xA0) { return false; }
+            if (b0 == 0xED && b1 >= 0xA0) { return false; }
+            cplen = 3;
+        } else if ((b0 & 0xF8) == 0xF0) {
+            if (b0 > 0xF4) { return false; } // Reject out of Unicode range
+            if (i + 3 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            let b3 = readbyte(s.ptr, i + 3);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) { return false; }
+            // Strict bounds for 4-byte encodings (reject overlong and out of range)
+            if (b0 == 0xF0 && b1 < 0x90) { return false; }
+            if (b0 == 0xF4 && b1 >= 0x90) { return false; }
+            cplen = 4;
+        } else {
+            return false;
+        }
+        i = i + cplen;
+    }
+    return true;
+}
+
+/// Validates whether a borrowed StrSlice forms valid UTF-8
+pub func sliceutf8valid(StrSlice s) -> bool {
+    let i = 0;
+    while (i < s.len) {
+        let b0 = readbyte(s.ptr, i);
+        let cplen = 1;
+        if (b0 < 0x80) {
+            cplen = 1;
+        } else if ((b0 & 0xE0) == 0xC0) {
+            if (b0 < 0xC2) { return false; }
+            if (i + 1 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            if ((b1 & 0xC0) != 0x80) { return false; }
+            cplen = 2;
+        } else if ((b0 & 0xF0) == 0xE0) {
+            if (i + 2 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) { return false; }
+            if (b0 == 0xE0 && b1 < 0xA0) { return false; }
+            if (b0 == 0xED && b1 >= 0xA0) { return false; }
+            cplen = 3;
+        } else if ((b0 & 0xF8) == 0xF0) {
+            if (b0 > 0xF4) { return false; }
+            if (i + 3 >= s.len) { return false; }
+            let b1 = readbyte(s.ptr, i + 1);
+            let b2 = readbyte(s.ptr, i + 2);
+            let b3 = readbyte(s.ptr, i + 3);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) { return false; }
+            if (b0 == 0xF0 && b1 < 0x90) { return false; }
+            if (b0 == 0xF4 && b1 >= 0x90) { return false; }
+            cplen = 4;
+        } else {
+            return false;
+        }
+        i = i + cplen;
+    }
+    return true;
+}
+
+/// Validates whether offset is a UTF-8 character boundary
+pub func utf8isboundary(String s, int offset) -> bool {
+    if (offset < 0 || offset > s.len) {
+        return false;
+    }
+    if (offset == s.len) {
+        return true;
+    }
+    let b = readbyte(s.ptr, offset);
+    return (b & 0xC0) != 0x80;
+}
+
+/// Formats String with debug quotes and escaping
+pub func debug(String s) -> String {
+    let est_cap = checkedAdd(checkedMul(s.len, 2), 2);
+    let mut out_str = stringWithCap(est_cap);
+    out_str = pushbyte(out_str, 34); // '"'
+
+    let mut i = 0;
+    while (i < s.len) {
+        let b = readbyte(s.ptr, i);
+        if (b == 34) { // '"'
+            out_str = pushbyte(out_str, 92); // '\'
+            out_str = pushbyte(out_str, 34); // '"'
+        } else if (b == 92) { // '\'
+            out_str = pushbyte(out_str, 92); // '\'
+            out_str = pushbyte(out_str, 92); // '\'
+        } else if (b == 10) { // '\n'
+            out_str = pushbyte(out_str, 92); // '\'
+            out_str = pushbyte(out_str, 110); // 'n'
+        } else if (b == 9) { // '\t'
+            out_str = pushbyte(out_str, 92); // '\'
+            out_str = pushbyte(out_str, 116); // 't'
+        } else if (b == 13) { // '\r'
+            out_str = pushbyte(out_str, 92); // '\'
+            out_str = pushbyte(out_str, 114); // 'r'
+        } else {
+            out_str = pushbyte(out_str, b);
+        }
+        i = i + 1;
+    }
+    out_str = pushbyte(out_str, 34); // '"'
+    return out_str;
+}
+
+impl Display for String {
+    pub func display(self) -> String {
+        return self;
+    }
+}
+
+impl Debug for String {
+    pub func debug(self) -> String {
+        return debug(self);
+    }
+}
+
+impl Display for StrSlice {
+    pub func display(self) -> String {
+        return fromstr(self);
+    }
+}
+
+impl Debug for StrSlice {
+    pub func debug(self) -> String {
+        let s = fromstr(self);
+        return debug(s);
+    }
+}
+
+

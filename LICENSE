@@ -1,0 +1,53 @@
+Business Source License 1.1
+
+Parameters
+
+Licensor:               Salivo Core Team / Sahil (@Serion89)
+Licensed Work:          The Salivo Programming Language, Compiler, Runtime, Standard Library, and Toolchain
+Change Date:            2030-01-01
+Change License:         Apache License, Version 2.0
+
+Additional Use Grant:
+You may make use of the Licensed Work free of charge for any of the following purposes:
+1. Personal, educational, research, evaluation, and non-commercial development.
+2. Developing, testing, and maintaining open-source software projects.
+3. Commercial use by individuals or organizations whose aggregate gross annual revenue does not exceed $100,000 USD and whose team size does not exceed 5 members.
+4. Compiling, linking, and distributing user application programs. All software, binaries, and libraries authored in Salivo belong 100% to their respective authors and may be distributed under any license without restriction or royalty.
+
+Commercial Restrictions (Commercial License Required):
+You may not, without obtaining a commercial license agreement from the Licensor:
+1. Use the Licensed Work in a commercial production environment if your organization exceeds the revenue or team size threshold set forth above ($100,000 USD gross annual revenue or more than 5 members).
+2. Offer the Licensed Work or any of its components (including compiler, runtime, or standard library) as a hosted cloud service, managed API, software-as-a-service (SaaS), or commercial development platform to third parties.
+
+For commercial licensing, enterprise support, or OEM distribution agreements, contact:
+Email:  sahildark789@gmail.com
+GitHub: https://github.com/Serion89/salivo
+
+----------------------------------------------------------------------
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor also grants you an Additional Use Grant to make production use of
+the Licensed Work, subject to the terms and conditions above.
+
+Your right to use the Licensed Work under this License is effective as of
+the date you accept it and will terminate automatically if you fail to comply
+with any of its terms and conditions.
+
+All copies of the Licensed Work (or derivative works) that you distribute must
+include this license file and all copyright notices.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Effective on the Change Date, the Licensor hereby permanently grants you a
+license to use, copy, modify, and distribute the Licensed Work under the terms
+of the Change License specified above.
+

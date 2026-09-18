@@ -1,0 +1,228 @@
+{
+  "name": "salivo",
+  "displayName": "Salivo",
+  "description": "Official high-performance language support for Salivo: sub-30ms warm execution caching (ExecCache), exclusive stream header syntax (><), postfix try operator (?), RAII Drop cleanup, modern camelCase stdlib, syntax highlighting, formatting, linting, checking, testing, and native execution.",
+  "version": "1.0.8",
+  "license": "BSL-1.1",
+  "publisher": "salivo",
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:salivo"
+  ],
+  "icon": "icons/salivo.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Serion89/salivo"
+  },
+  "keywords": [
+    "salivo",
+    "sal",
+    "programming language",
+    "systems language",
+    "compiler",
+    "llvm",
+    "stream import",
+    "syntax highlighting",
+    "modifiers",
+    "snippets",
+    "formatter",
+    "linter",
+    "raii",
+    "drop"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Themes",
+    "Formatters",
+    "Linters"
+  ],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Salivo",
+      "properties": {
+        "salivo.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Salivo compiler executable (sf or sf.exe). Defaults to ~/.salivo/bin/sf.exe."
+        },
+        "salivo.formatterPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Salivo code formatter (salivofmt or salivofmt.exe). Defaults to ~/.salivo/bin/salivofmt.exe."
+        },
+        "salivo.linterPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Salivo linter (salivolint or salivolint.exe). Defaults to ~/.salivo/bin/salivolint.exe."
+        },
+        "salivo.packageManagerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Salivo package manager (spm or spm.exe). Defaults to ~/.salivo/bin/spm.exe."
+        },
+        "salivo.enableExecCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable sub-30ms warm binary caching (ExecCache) when executing files."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "salivo",
+        "aliases": [
+          "Salivo",
+          "salivo"
+        ],
+        "extensions": [
+          ".sal",
+          ".sf"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/salivo.svg",
+          "dark": "./icons/salivo.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "salivo",
+        "scopeName": "source.salivo",
+        "path": "./syntaxes/salivo.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "salivo",
+        "path": "./snippets/salivo.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "salivo-icons",
+        "label": "Salivo File Icons",
+        "path": "./icons/icon-theme.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "salivo.runFile",
+        "title": "Salivo: Run File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "salivo.buildFile",
+        "title": "Salivo: Build Executable",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "salivo.checkFile",
+        "title": "Salivo: Check Syntax & Types",
+        "icon": "$(check)"
+      },
+      {
+        "command": "salivo.formatFile",
+        "title": "Salivo: Format Source Code"
+      },
+      {
+        "command": "salivo.lintFile",
+        "title": "Salivo: Lint File"
+      },
+      {
+        "command": "salivo.testFile",
+        "title": "Salivo: Run Tests",
+        "icon": "$(beaker)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "salivo.runFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "navigation@1"
+        },
+        {
+          "command": "salivo.checkFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title/run": [
+        {
+          "command": "salivo.runFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "navigation@1"
+        },
+        {
+          "command": "salivo.checkFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "salivo.runFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@1"
+        },
+        {
+          "command": "salivo.buildFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@2"
+        },
+        {
+          "command": "salivo.checkFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@3"
+        },
+        {
+          "command": "salivo.formatFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@4"
+        },
+        {
+          "command": "salivo.lintFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@5"
+        },
+        {
+          "command": "salivo.testFile",
+          "when": "resourceExtname == .sal || resourceExtname == .sf",
+          "group": "1_salivo@6"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "salivo.runFile",
+        "key": "ctrl+f5",
+        "when": "editorLangId == salivo"
+      },
+      {
+        "command": "salivo.buildFile",
+        "key": "ctrl+shift+b",
+        "when": "editorLangId == salivo"
+      },
+      {
+        "command": "salivo.checkFile",
+        "key": "ctrl+shift+k",
+        "when": "editorLangId == salivo"
+      },
+      {
+        "command": "salivo.formatFile",
+        "key": "shift+alt+f",
+        "when": "editorLangId == salivo"
+      },
+      {
+        "command": "salivo.lintFile",
+        "key": "ctrl+shift+l",
+        "when": "editorLangId == salivo"
+      }
+    ]
+  }
+}

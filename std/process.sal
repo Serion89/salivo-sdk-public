@@ -1,0 +1,18 @@
+module salivo.std.process;
+
+// Salivo Standard Library: Process Module
+
+// Exits the process. Uses rtpanic as the underlying termination
+// mechanism since that's the only runtime intrinsic with exit() support.
+pub func exit(int code) {
+    rtexit(code);
+}
+
+pub func cwd() -> string {
+    return rtprocesscwd();
+}
+
+pub func system(string cmd) -> int {
+    return rtsystem(cmd);
+}
+

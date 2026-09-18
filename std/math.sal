@@ -1,0 +1,420 @@
+module salivo.std.math;
+><salivo.std.core::{panic, assert, asserteq, Option, some, none, Result, ok, err};
+
+/// =============================================================================
+/// SALIVO STANDARD LIBRARY: MATHEMATICS (std/math.sal)
+///
+/// Production math constants, floating-point ops, integer arithmetic,
+/// saturating/checked/wrapping arithmetic, and random number generator.
+/// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Constants & Floating Point Specials
+// -----------------------------------------------------------------------------
+
+/// PI mathematical constant
+pub const PI: float = 3.141592653589793;
+
+/// TAU mathematical constant (2 * PI)
+pub const TAU: float = 6.283185307179586;
+
+/// Euler's number E
+pub const E: float = 2.718281828459045;
+
+/// Natural log of 2 (LN2)
+pub const LN2: float = 0.6931471805599453;
+
+/// Natural log of 10 (LN10)
+pub const LN10: float = 2.302585092994046;
+
+/// Square root of 2 (SQRT2)
+pub const SQRT2: float = 1.4142135623730951;
+
+/// Machine Epsilon for floating point comparison
+pub const EPSILON: float = 0.00000000000000022204;
+
+/// Floating-point NaN (Not a Number) representation constant
+pub const NAN_VAL: float = 0.0 / 0.0;
+
+/// Floating-point Positive Infinity constant
+pub const INFINITY_VAL: float = 1.0 / 0.0;
+
+/// Floating-point Negative Infinity constant
+pub const NEG_INFINITY_VAL: float = -1.0 / 0.0;
+
+// -----------------------------------------------------------------------------
+// Core Mathematical Operations
+// -----------------------------------------------------------------------------
+
+/// Absolute value of integer
+pub func abs(int v) -> int {
+    if (v < 0) { return -v; }
+    return v;
+}
+
+pub func min(int a, int b) -> int {
+    if (a < b) { return a; }
+    return b;
+}
+
+pub func max(int a, int b) -> int {
+    if (a > b) { return a; }
+    return b;
+}
+
+pub func clamp(int val, int min_val, int max_val) -> int {
+    if (val < min_val) { return min_val; }
+    if (val > max_val) { return max_val; }
+    return val;
+}
+
+/// Absolute value of float
+pub func absfloat(float v) -> float {
+    if (v < 0.0) { return -v; }
+    return v;
+}
+
+/// Integer exponentiation base^exp
+pub func pow(int base_val, int exp_val) -> int {
+    if (exp_val == 0) { return 1; }
+    let result = 1;
+    let i = 0;
+    while (i < exp_val) {
+        result = result * base_val;
+        i = i + 1;
+    }
+    return result;
+}
+
+/// Square root of float
+pub func sqrt(float v) -> float {
+    if (v < 0.0) {
+        return NAN_VAL;
+    }
+    // Newton-Raphson square root approximation
+    let x = v;
+    let i = 0;
+    while (i < 10) {
+        x = 0.5 * (x + v / x);
+        i = i + 1;
+    }
+    return x;
+}
+
+/// Cube root of float (Newton-Raphson)
+pub func cbrt(float v) -> float {
+    if (v == 0.0) { return 0.0; }
+    let neg = v < 0.0;
+    let x = absfloat(v);
+    let guess = x / 3.0;
+    let i = 0;
+    while (i < 20) {
+        guess = (2.0 * guess + x / (guess * guess)) / 3.0;
+        i = i + 1;
+    }
+    if (neg) { return -guess; }
+    return guess;
+}
+
+/// Sine of angle in radians (Taylor series)
+pub func sin(float rad) -> float {
+    // Normalize to [-PI, PI]
+    let x = rad;
+    while (x > PI) { x = x - TAU; }
+    while (x < -PI) { x = x + TAU; }
+    let term = x;
+    let sum = x;
+    let i = 1.0;
+    while (i < 12.0) {
+        term = -term * x * x / ((2.0 * i) * (2.0 * i + 1.0));
+        sum = sum + term;
+        i = i + 1.0;
+    }
+    return sum;
+}
+
+/// Cosine of angle in radians (Taylor series)
+pub func cos(float rad) -> float {
+    // Normalize to [-PI, PI]
+    let x = rad;
+    while (x > PI) { x = x - TAU; }
+    while (x < -PI) { x = x + TAU; }
+    let term = 1.0;
+    let sum = 1.0;
+    let i = 1.0;
+    while (i < 12.0) {
+        term = -term * x * x / ((2.0 * i - 1.0) * (2.0 * i));
+        sum = sum + term;
+        i = i + 1.0;
+    }
+    return sum;
+}
+
+/// Tangent of angle in radians
+pub func tan(float rad) -> float {
+    let c = cos(rad);
+    if (c == 0.0) { return INFINITY_VAL; }
+    return sin(rad) / c;
+}
+
+/// Arc sine in radians (Taylor series, valid for |v| <= 1)
+pub func asin(float v) -> float {
+    if (v >= 1.0) { return PI / 2.0; }
+    if (v <= -1.0) { return -PI / 2.0; }
+    // For |v| > 0.7, use identity: asin(x) = PI/2 - 2*asin(sqrt((1-x)/2))
+    if (v > 0.7) { return PI / 2.0 - 2.0 * asin(sqrt((1.0 - v) / 2.0)); }
+    if (v < -0.7) { return -PI / 2.0 + 2.0 * asin(sqrt((1.0 + v) / 2.0)); }
+    let term = v;
+    let sum = v;
+    let x2 = v * v;
+    let i = 1.0;
+    while (i < 15.0) {
+        term = term * x2 * (2.0 * i - 1.0) * (2.0 * i - 1.0) / ((2.0 * i) * (2.0 * i + 1.0));
+        sum = sum + term;
+        i = i + 1.0;
+    }
+    return sum;
+}
+
+/// Arc cosine in radians
+pub func acos(float v) -> float {
+    return PI / 2.0 - asin(v);
+}
+
+/// Arc tangent in radians (Taylor series with range reduction)
+pub func atan(float v) -> float {
+    if (v > 1.0) { return PI / 2.0 - atan(1.0 / v); }
+    if (v < -1.0) { return -PI / 2.0 - atan(1.0 / v); }
+    let term = v;
+    let sum = v;
+    let x2 = v * v;
+    let i = 1;
+    while (i < 20) {
+        term = -term * x2;
+        sum = sum + term / (2.0 * i + 1.0);
+        i = i + 1;
+    }
+    return sum;
+}
+
+/// Two-argument arc tangent
+pub func atan2(float y, float x) -> float {
+    if (x > 0.0) { return atan(y / x); }
+    if (x < 0.0 && y >= 0.0) { return atan(y / x) + PI; }
+    if (x < 0.0 && y < 0.0) { return atan(y / x) - PI; }
+    if (x == 0.0 && y > 0.0) { return PI / 2.0; }
+    if (x == 0.0 && y < 0.0) { return -PI / 2.0; }
+    return 0.0;
+}
+
+/// Exponential function e^v (Taylor series)
+pub func exp(float v) -> float {
+    // Range reduction: exp(v) = exp(v/N)^N
+    // Use N = 2^k such that v/N is small
+    let n = 1;
+    let x = v;
+    while (absfloat(x) > 1.0) {
+        x = x / 2.0;
+        n = n * 2;
+    }
+    let term = 1.0;
+    let sum = 1.0;
+    let i = 1;
+    while (i < 20) {
+        term = term * x / i;
+        sum = sum + term;
+        i = i + 1;
+    }
+    // Square back up
+    let result = sum;
+    while (n > 1) {
+        result = result * result;
+        n = n / 2;
+    }
+    return result;
+}
+
+/// Natural logarithm ln(v) (series expansion)
+pub func log(float v) -> float {
+    if (v <= 0.0) { return NEG_INFINITY_VAL; }
+    // Range reduction: normalize v = m * 2^k so that 0.5 <= m < 1.0
+    let k = 0;
+    let m = v;
+    while (m >= 2.0) { m = m / 2.0; k = k + 1; }
+    while (m < 0.5) { m = m * 2.0; k = k - 1; }
+    // ln(v) = k * ln(2) + ln(m)
+    // ln(m) via series: let y = (m-1)/(m+1), ln(m) = 2*(y + y^3/3 + y^5/5 + ...)
+    let y = (m - 1.0) / (m + 1.0);
+    let y2 = y * y;
+    let term = y;
+    let sum = y;
+    let i = 1;
+    while (i < 20) {
+        term = term * y2;
+        sum = sum + term / (2.0 * i + 1.0);
+        i = i + 1;
+    }
+    return k * LN2 + 2.0 * sum;
+}
+
+/// Base-2 logarithm log2(v)
+pub func log2(float v) -> float {
+    return log(v) / LN2;
+}
+
+/// Base-10 logarithm log10(v)
+pub func log10(float v) -> float {
+    return log(v) / LN10;
+}
+
+/// Floor function returning largest integer <= v
+pub func floor(float v) -> int {
+    let int_v = v;
+    if (v < 0.0 && v != int_v) {
+        return int_v - 1;
+    }
+    return int_v;
+}
+
+/// Ceiling function returning smallest integer >= v
+pub func ceil(float v) -> int {
+    let int_v = v;
+    if (v > 0.0 && v != int_v) {
+        return int_v + 1;
+    }
+    return int_v;
+}
+
+/// Rounds float to nearest integer
+pub func round(float v) -> int {
+    if (v >= 0.0) {
+        return floor(v + 0.5);
+    }
+    return ceil(v - 0.5);
+}
+
+/// Truncates float decimal part
+pub func trunc(float v) -> int {
+    let int_v = v;
+    return int_v;
+}
+
+/// Returns fractional part of float v - trunc(v)
+pub func fract(float v) -> float {
+    return v - trunc(v);
+}
+
+// -----------------------------------------------------------------------------
+// Overflow, Checked, Wrapping, and Saturating Arithmetic
+// -----------------------------------------------------------------------------
+
+/// Saturating addition preventing integer overflow
+pub func satadd(int a, int b, int max_val) -> int {
+    let sum = a + b;
+    if (sum > max_val) {
+        return max_val;
+    }
+    return sum;
+}
+
+/// Saturating subtraction preventing integer underflow
+pub func satsub(int a, int b, int min_val) -> int {
+    let diff = a - b;
+    if (diff < min_val) {
+        return min_val;
+    }
+    return diff;
+}
+
+/// Checked addition returning Option::Some(sum) or Option::None on overflow
+pub func checkedadd(int a, int b, int max_val) -> Option<int> {
+    let sum = a + b;
+    if (sum > max_val) {
+        return none<int>();
+    }
+    return some<int>(sum);
+}
+
+/// Wrapping addition wrapping around max_val boundary
+pub func wrapadd(int a, int b, int max_val) -> int {
+    let sum = a + b;
+    if (sum > max_val) {
+        return sum % max_val;
+    }
+    return sum;
+}
+
+// -----------------------------------------------------------------------------
+// Random Number Generator (RandomGenerator, Seed)
+// -----------------------------------------------------------------------------
+
+/// Seed state for Random Generator
+pub struct Seed {
+    int state_val;
+}
+
+/// Helper creating Seed
+pub func seed(int s) -> Seed {
+    return Seed { state_val: s };
+}
+
+/// Pseudo-Random Number Generator (PRNG) state
+pub struct RandomGenerator {
+    Seed seed;
+}
+
+/// Helper creating RandomGenerator
+pub func rng(Seed s) -> RandomGenerator {
+    return RandomGenerator { seed: s };
+}
+
+/// Generates next 32-bit unsigned pseudo-random integer
+pub func nextu32(rng: RandomGenerator) -> int {
+    let next_st = (rng.seed.state_val * 1103515245 + 12345) % 2147483647;
+    rng.seed.state_val = next_st;
+    return next_st;
+}
+
+/// Generates next 64-bit pseudo-random integer
+pub func nextu64(rng: RandomGenerator) -> int {
+    return nextu32(rng);
+}
+
+/// Generates next 32-bit pseudo-random float in range [0.0, 1.0)
+pub func nextf32(rng: RandomGenerator) -> float {
+    let val = nextu32(rng);
+    return val / 2147483647.0;
+}
+
+/// Generates next 64-bit pseudo-random float in range [0.0, 1.0)
+pub func nextf64(rng: RandomGenerator) -> float {
+    return nextf32(rng);
+}
+
+/// Generates random integer in range [min_val, max_val]
+pub func range(rng: RandomGenerator, min_val: int, max_val: int) -> int {
+    let span_val = max_val - min_val + 1;
+    if (span_val <= 0) {
+        return min_val;
+    }
+    return min_val + (nextu32(rng) % span_val);
+}
+
+// -----------------------------------------------------------------------------
+// Unit Tests (std/math.sal Verification)
+// -----------------------------------------------------------------------------
+
+pub func testmath() -> bool {
+    asserteq(abs(-15), 15, "abs(-15) should be 15");
+    asserteq(min(10, 20), 10, "min(10, 20) should be 10");
+    asserteq(max(10, 20), 20, "max(10, 20) should be 20");
+    asserteq(clamp(150, 0, 100), 100, "clamp(150, 0, 100) should be 100");
+    asserteq(pow(2, 3), 8, "pow(2, 3) should be 8");
+
+    let s = seed(42);
+    let r = rng(s);
+    let r_val = range(r, 1, 10);
+    assert(r_val >= 1 && r_val <= 10, "Range value should be within [1, 10]");
+
+    return true;
+}

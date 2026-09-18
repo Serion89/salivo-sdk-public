@@ -1,0 +1,324 @@
+// Salivo Standard Library: Asynchronous & Real Filesystem Module
+module salivo.std.fs;
+
+pub struct File {
+    int id;
+}
+
+pub struct Directory {
+    string path;
+}
+
+pub struct Path {
+    string rawpath;
+}
+
+pub struct FileMetadata {
+    int size;
+    // Platform ctime: creation time on Windows and metadata-change time on POSIX.
+    int creationtime;
+    int modificationtime;
+    int permissions;
+    int filetype;
+    int isdir;
+}
+
+pub enum FileState {
+    Closed,
+    Open,
+    Reading,
+    Writing,
+    Truncated,
+}
+
+pub enum FsError {
+    FileNotFound,
+    PermissionDenied,
+    AlreadyExists,
+    DirectoryNotEmpty,
+    InvalidPath,
+    InvalidHandle,
+    ReadFailure,
+    WriteFailure,
+    SeekFailure,
+    Timeout,
+}
+
+pub enum FsPollEvent {
+    ReadReady,
+    WriteReady,
+    Completed,
+    Error,
+    Cancelled,
+    Timeout,
+}
+
+// -----------------------------------------------------------------------------
+// Real String-Based Path Manipulation APIs
+// -----------------------------------------------------------------------------
+
+pub func path(string p) -> Path {
+    return Path { rawpath: p };
+}
+
+pub func normalize(string path) -> string {
+    if (path == "") { return ""; }
+    let path_len = len(path);
+    let res = "";
+    let i = 0;
+    while (i < path_len) {
+        let ch = charat(path, i);
+        if (ch == 92) {
+            res = res + "/";
+        } else {
+            let sub = slice(path, i, i + 1);
+            res = res + sub;
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+pub func pathJoin(string path1, string path2) -> string {
+    if (path1 == "") { return path2; }
+    if (path2 == "") { return path1; }
+    let norm1 = normalize(path1);
+    let norm2 = normalize(path2);
+    let l1 = len(norm1);
+    let last_ch = charat(norm1, l1 - 1);
+    let first_ch = charat(norm2, 0);
+
+    if (last_ch == 47 && first_ch == 47) {
+        let sub2 = slice(norm2, 1, len(norm2));
+        return norm1 + sub2;
+    }
+    if (last_ch == 47 || first_ch == 47) {
+        return norm1 + norm2;
+    }
+    return norm1 + "/" + norm2;
+}
+
+pub func pathjoin(string path1, string path2) -> string {
+    return pathJoin(path1, path2);
+}
+
+pub func parent(string path) -> string {
+    let norm = normalize(path);
+    let norm_len = len(norm);
+    if (norm_len <= 1) { return norm; }
+    let last_slash = -1;
+    let i = 0;
+    while (i < norm_len) {
+        let ch = charat(norm, i);
+        if (ch == 47) {
+            last_slash = i;
+        }
+        i = i + 1;
+    }
+    if (last_slash <= 0) { return "/"; }
+    return slice(norm, 0, last_slash);
+}
+
+pub func filename(string path) -> string {
+    let norm = normalize(path);
+    let norm_len = len(norm);
+    if (norm_len == 0) { return ""; }
+    let last_slash = -1;
+    let i = 0;
+    while (i < norm_len) {
+        let ch = charat(norm, i);
+        if (ch == 47) {
+            last_slash = i;
+        }
+        i = i + 1;
+    }
+    if (last_slash < 0) { return norm; }
+    return slice(norm, last_slash + 1, norm_len);
+}
+
+pub func ext(string path) -> string {
+    let norm = normalize(path);
+    let norm_len = len(norm);
+    let last_dot = -1;
+    let i = 0;
+    while (i < norm_len) {
+        let ch = charat(norm, i);
+        if (ch == 46) {
+            last_dot = i;
+        }
+        i = i + 1;
+    }
+    if (last_dot <= 0 || last_dot == norm_len - 1) { return ""; }
+    return slice(norm, last_dot + 1, norm_len);
+}
+
+pub func absolute(string path) -> string {
+    let norm = normalize(path);
+    if (len(norm) >= 1 && charat(norm, 0) == 47) {
+        return norm;
+    }
+    if (len(norm) >= 2 && charat(norm, 1) == 58) {
+        return norm;
+    }
+    let cur = rtprocesscwd();
+    return pathJoin(cur, norm);
+}
+
+pub func relative(string base, string target) -> string {
+    let norm_base = normalize(base);
+    let norm_tgt = normalize(target);
+    let len_b = len(norm_base);
+    let len_t = len(norm_tgt);
+    if (len_t >= len_b) {
+        let sub = slice(norm_tgt, 0, len_b);
+        if (sub == norm_base) {
+            if (len_t == len_b) { return "."; }
+            let next_ch = charat(norm_tgt, len_b);
+            if (next_ch == 47) {
+                return slice(norm_tgt, len_b + 1, len_t);
+            }
+        }
+    }
+    return norm_tgt;
+}
+
+pub func pathExists(string path) -> bool {
+    let norm = normalize(path);
+    let res = rtcfileexists(norm);
+    if (res == 1) { return true; }
+    return rtcdirexists(norm) == 1;
+}
+
+pub func pathexists(string path) -> bool {
+    return pathExists(path);
+}
+
+// -----------------------------------------------------------------------------
+// Real Operating System File & Directory Operations
+// -----------------------------------------------------------------------------
+
+pub func open(string path, string mode) -> File {
+    let fd = rtcfileopen(path, mode);
+    return File { id: fd };
+}
+
+pub func close(File file) {
+    rtcfileclose(file.id);
+}
+
+pub func flush(File file) {
+    rtcfileflush(file.id);
+}
+
+pub func sync(File file) {
+    rtcfilesync(file.id);
+}
+
+pub func meta(File file) -> FileMetadata {
+    return FileMetadata {
+        size: rtcfilemetadatasize(file.id),
+        creationtime: rtcfilemetadatactime(file.id),
+        modificationtime: rtcfilemetadatamtime(file.id),
+        permissions: rtcfilemetadatapermissions(file.id),
+        filetype: rtcfilemetadatatype(file.id),
+        isdir: rtcfilemetadataisdir(file.id)
+    };
+}
+
+pub func isOpen(File file) -> bool {
+    let res = rtcfileisopen(file.id);
+    return res != 0;
+}
+
+pub func isopen(File file) -> bool {
+    return isOpen(file);
+}
+
+pub func read(File file, int buffer, int maxbytes) -> int {
+    if (maxbytes <= 0) { return 0; }
+    return rtcfileread(file.id, buffer, maxbytes);
+}
+
+pub func readByte(File file) -> int {
+    return rtcfilereadbyte(file.id);
+}
+
+pub func readbyte(File file) -> int {
+    return readByte(file);
+}
+
+pub func seek(File file, int offset) -> int {
+    return rtcfileseek(file.id, offset, 0);
+}
+
+pub func tell(File file) -> int {
+    return rtcfiletell(file.id);
+}
+
+pub func eof(File file) -> bool {
+    return rtcfileeof(file.id) == 1;
+}
+
+pub func write(File file, int val) -> int {
+    return rtcfilewritebyte(file.id, val);
+}
+
+pub func writeBuf(File file, int buffer, int count) -> int {
+    if (count <= 0) { return 0; }
+    return rtcfilewritebuf(file.id, buffer, count);
+}
+
+pub func writebuf(File file, int buffer, int count) -> int {
+    return writeBuf(file, buffer, count);
+}
+
+pub func append(File file, int val) -> int {
+    rtcfileseek(file.id, 0, 2);
+    return write(file, val);
+}
+
+pub func mkdir(string path) -> Directory {
+    rtcdircreate(path);
+    return Directory { path: path };
+}
+
+pub func rmdir(string path) {
+    rtcdirremove(path);
+}
+
+pub func dirExists(string path) -> bool {
+    return rtcdirexists(path) == 1;
+}
+
+pub func direxists(string path) -> bool {
+    return dirExists(path);
+}
+
+pub func dirList(string path) -> int {
+    return rtcdirlist(path);
+}
+
+pub func dirlist(string path) -> int {
+    return dirList(path);
+}
+
+pub func pwd() -> string {
+    return rtprocesscwd();
+}
+
+pub func copyFile(string src, string dest) -> int {
+    return rtcfilecopy(src, dest);
+}
+
+pub func copyfile(string src, string dest) -> int {
+    return copyFile(src, dest);
+}
+
+pub func removeFile(string path) -> int {
+    return rtcfileremove(path);
+}
+
+pub func removefile(string path) -> int {
+    return removeFile(path);
+}
+

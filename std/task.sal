@@ -1,0 +1,265 @@
+module salivo.std.task;
+><salivo.std.time;
+
+pub enum Poll<T> {
+    Ready(T),
+    Pending,
+}
+
+pub struct Waker {
+    int taskId;
+}
+
+pub struct Context {
+    Waker waker;
+    int currentTaskId;
+    int currentExecutorId;
+    int pollingMetadata;
+}
+
+pub struct Task {
+    int statePtr;
+    int pollFn;
+}
+
+pub enum TaskState {
+    Created,
+    Ready,
+    Running,
+    Pending,
+    Completed,
+    Destroyed,
+}
+
+pub struct PendingTask {
+    int taskId;
+    TaskState currentState;
+    Task futureObj;
+    bool wakeStatus;
+    int pollingMetadata;
+}
+
+pub enum ExecutorDiagnostic {
+    InvalidPoll,
+    InvalidWake,
+    CompletedFuturePolled,
+    UnknownTask,
+    DuplicateSchedule,
+    CorruptedExecutorState,
+    InvalidStateTransition,
+}
+
+pub func enqueueready(taskId: int) {
+    rttaskenqueueready(taskId);
+}
+
+pub func dequeueready() -> int {
+    return rttaskdequeueready();
+}
+
+pub func destroytask(taskId: int) {
+    rttaskdestroy(taskId);
+}
+
+pub func iscancelled(taskId: int) -> bool {
+    return rttaskiscancelled(taskId) != 0;
+}
+
+pub func readyqueueempty() -> bool {
+    let emp = rttaskreadyqueueempty();
+    return emp != 0;
+}
+
+pub func readyqueuesize() -> int {
+    return rttaskreadyqueuesize();
+}
+
+pub func spawntask(rootTask: Task) -> int {
+    if (rootTask.pollFn != 0) {
+        return rttaskspawnfn(rootTask.pollFn, rootTask.statePtr);
+    }
+    return rttaskspawnval(rootTask.statePtr);
+}
+
+pub func spawnval(val: int) -> int {
+    return rttaskspawnval(val);
+}
+
+pub func fail(taskId: int, msg: string) {
+    rttaskfail(taskId, msg);
+}
+
+pub func failtask(taskId: int, msg: string) {
+    rttaskfail(taskId, msg);
+}
+
+pub func isfailed(taskId: int) -> bool {
+    let f = rttaskisfailed(taskId);
+    return f != 0;
+}
+
+pub func istaskfailed(taskId: int) -> bool {
+    return isfailed(taskId);
+}
+
+pub func spawntaskfn(fnPtr: int, argVal: int) -> int {
+    return rttaskspawnfn(fnPtr, argVal);
+}
+
+pub func iscompleted(taskId: int) -> bool {
+    let st = gettaskstate(taskId);
+    return match st {
+        TaskState::Completed => true,
+        _ => false,
+    };
+}
+
+pub func wake(taskId: int) {
+    let state = gettaskstate(taskId);
+    let isReadyState = match state {
+        TaskState::Ready => true,
+        _ => false,
+    };
+    
+    if (!isReadyState) {
+        settaskstate(taskId, TaskState::Ready);
+        enqueueready(taskId);
+    }
+}
+
+pub func polltask(t: Task) -> Poll<int> {
+    let taskId = t.statePtr;
+    let isCanc = iscancelled(taskId);
+    if (isCanc) {
+        return Poll::Pending;
+    }
+    let res = rttaskexecute(taskId);
+    return Poll::Ready(res);
+}
+
+pub func gettaskstate(taskId: int) -> TaskState {
+    let st = rttaskgetstate(taskId);
+    if (st == 1) { return TaskState::Ready; }
+    if (st == 2) { return TaskState::Running; }
+    if (st == 3) { return TaskState::Pending; }
+    if (st == 4) { return TaskState::Completed; }
+    if (st == 5) { return TaskState::Destroyed; }
+    return TaskState::Created;
+}
+
+pub func settaskstate(taskId: int, state: TaskState) {
+    let stInt = 0;
+    if (state == TaskState::Ready) { stInt = 1; }
+    else if (state == TaskState::Running) { stInt = 2; }
+    else if (state == TaskState::Pending) { stInt = 3; }
+    else if (state == TaskState::Completed) { stInt = 4; }
+    else if (state == TaskState::Destroyed) { stInt = 5; }
+    rttasksetstate(taskId, stInt);
+}
+
+pub func gettask(taskId: int) -> Task {
+    let res = rttaskgetresult(taskId);
+    return Task { statePtr: taskId, pollFn: res };
+}
+
+pub func isready(p: Poll<int>) -> bool {
+    return match p {
+        Poll::Ready(v) => true,
+        Poll::Pending => false,
+    };
+}
+
+pub func pollval(p: Poll<int>) -> int {
+    return match p {
+        Poll::Ready(v) => v,
+        Poll::Pending => 0,
+    };
+}
+
+pub func spawntaskval(val: int) -> int {
+    return spawnval(val);
+}
+
+pub func istaskcancelled(taskId: int) -> bool {
+    return iscancelled(taskId);
+}
+
+pub func block_on_int(t: Task) -> int {
+    return blockon(t);
+}
+
+pub func blockon(rootTask: Task) -> int {
+    if (rootTask.pollFn != 0) {
+        let taskId = rttaskspawnfn(rootTask.pollFn, rootTask.statePtr);
+        return rttaskexecute(taskId);
+    }
+    return rootTask.statePtr;
+}
+
+pub struct TaskScope {
+    int id;
+}
+
+pub struct CancellationToken {
+    int id;
+}
+
+pub enum ScopeState {
+    Active,
+    Cancelling,
+    Cancelled,
+    Completed,
+    Destroyed,
+}
+
+pub func scope() -> TaskScope {
+    let sId = rtscopecreate();
+    return TaskScope { id: sId };
+}
+
+pub func scopespawn(sc: TaskScope, task: Task) -> int {
+    return rtscopespawn(sc.id, task.statePtr);
+}
+
+pub func scopejoin(sc: TaskScope, taskId: int) -> int {
+    return rtscopejoin(sc.id, taskId);
+}
+
+pub func scopecancel(sc: TaskScope) {
+    rtscopecancel(sc.id);
+}
+
+pub func scopewait(sc: TaskScope) -> int {
+    return rtscopewait(sc.id);
+}
+
+pub func joinall(sc: TaskScope) -> int {
+    return rtscopejoinall(sc.id);
+}
+
+pub func waitany(sc: TaskScope) -> int {
+    return rtscopewaitany(sc.id);
+}
+
+pub func waitall(sc: TaskScope) -> int {
+    return rtscopewaitall(sc.id);
+}
+
+pub func token() -> CancellationToken {
+    let tId = rttokencreate();
+    return CancellationToken { id: tId };
+}
+
+pub func canceltoken(tok: CancellationToken) {
+    rttokencancel(tok.id);
+}
+
+pub func istokenactive(tok: CancellationToken) -> bool {
+    let res = rttokeniscancelled(tok.id);
+    return res == 0;
+}
+
+pub func canceltask(taskId: int) {
+    rttaskcancel(taskId);
+}
+

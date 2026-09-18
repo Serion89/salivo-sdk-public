@@ -1,0 +1,248 @@
+// Salivo Synchronization Primitives
+// Backed by OS-level Critical Sections, SRWLock, Condition Variables, and Atomic primitives.
+module salivo.std.sync;
+><salivo.std.core::{assert, asserteq, Option, some, none};
+
+// ─────────────────────────── Mutex ───────────────────────────
+
+pub struct Mutex {
+    int id;
+}
+
+pub struct MutexGuard {
+    int mutex_id;
+}
+
+pub func mutex() -> Mutex {
+    let id = rtmutexcreate();
+    return Mutex { id: id };
+}
+
+pub func lock(Mutex m) -> MutexGuard {
+    rtmutexlock(m.id);
+    return MutexGuard { mutex_id: m.id };
+}
+
+pub func trylock(Mutex m) -> bool {
+    let res = rtmutextrylock(m.id);
+    return res == 1;
+}
+
+pub func unlock(MutexGuard g) {
+    rtmutexunlock(g.mutex_id);
+}
+
+pub func islocked(Mutex m) -> bool {
+    let res = rtmutexislocked(m.id);
+    return res == 1;
+}
+
+pub func owner(Mutex m) -> int {
+    return rtmutexowner(m.id);
+}
+
+// ─────────────────────────── RwLock ───────────────────────────
+
+pub struct RwLock {
+    int id;
+}
+
+pub struct ReadGuard {
+    int rwlock_id;
+}
+
+pub struct WriteGuard {
+    int rwlock_id;
+}
+
+pub func rwlock() -> RwLock {
+    let id = rtrwlockcreate();
+    return RwLock { id: id };
+}
+
+pub func readlock(RwLock rw) -> ReadGuard {
+    rtrwlockread(rw.id);
+    return ReadGuard { rwlock_id: rw.id };
+}
+
+pub func tryread(RwLock rw) -> bool {
+    let res = rtrwlocktryread(rw.id);
+    return res == 1;
+}
+
+pub func writelock(RwLock rw) -> WriteGuard {
+    rtrwlockwrite(rw.id);
+    return WriteGuard { rwlock_id: rw.id };
+}
+
+pub func trywrite(RwLock rw) -> bool {
+    let res = rtrwlocktrywrite(rw.id);
+    return res == 1;
+}
+
+pub func unlockread(ReadGuard g) {
+    rtrwlockunlockread(g.rwlock_id);
+}
+
+pub func unlockwrite(WriteGuard g) {
+    rtrwlockunlockwrite(g.rwlock_id);
+}
+
+pub func readcount(RwLock rw) -> int {
+    return rtrwlockreadercount(rw.id);
+}
+
+pub func iswritelocked(RwLock rw) -> bool {
+    let res = rtrwlockiswritelocked(rw.id);
+    return res == 1;
+}
+
+// ─────────────────────────── Condvar ───────────────────────────
+
+pub struct Condvar {
+    int id;
+}
+
+pub func condvar() -> Condvar {
+    let id = rtcondvarcreate();
+    return Condvar { id: id };
+}
+
+pub func wait(Condvar cv, Mutex m) {
+    rtcondvarwait(cv.id, m.id);
+}
+
+pub func notify(Condvar cv) -> bool {
+    let res = rtcondvarnotifyone(cv.id);
+    return res == 0;
+}
+
+pub func signal(Condvar cv) -> bool {
+    let res = rtcondvarnotifyall(cv.id);
+    return res == 0;
+}
+
+pub func waitercount(Condvar cv) -> int {
+    return rtcondvarwaitercount(cv.id);
+}
+
+// ─────────────────────────── Channel ───────────────────────────
+
+pub struct Channel {
+    int id;
+}
+
+pub struct Sender {
+    int channel_id;
+}
+
+pub struct Receiver {
+    int channel_id;
+}
+
+pub func channel() -> Channel {
+    let id = rtchannelcreate();
+    return Channel { id: id };
+}
+
+pub func sender(Channel ch) -> Sender {
+    return Sender { channel_id: ch.id };
+}
+
+pub func receiver(Channel ch) -> Receiver {
+    return Receiver { channel_id: ch.id };
+}
+
+pub func send(Sender s, int value) -> bool {
+    let result = rtchannelsendi64(s.channel_id, value);
+    return result == 0;
+}
+
+pub func recv(Receiver r) -> int {
+    return rtchannelrecvi64(r.channel_id);
+}
+
+pub func tryrecv(Receiver r) -> Option<int> {
+    if (rtchannelisclosed(r.channel_id)) {
+        return none<int>();
+    }
+    if (rtchannelsize(r.channel_id) <= 0) {
+        return none<int>();
+    }
+    return some<int>(rtchannelrecvi64(r.channel_id));
+}
+
+pub func close(Channel ch) {
+    rtchannelclose(ch.id);
+}
+
+pub func isclosed(Channel ch) -> bool {
+    return rtchannelisclosed(ch.id);
+}
+
+pub func size(Channel ch) -> int {
+    return rtchannelsize(ch.id);
+}
+
+// ─────────────────────────── Atomics ───────────────────────────
+
+pub struct AtomicInt {
+    int id;
+}
+
+pub struct AtomicBool {
+    int id;
+}
+
+pub func atomic(int initial) -> AtomicInt {
+    let id = rtatomicintcreate(initial);
+    return AtomicInt { id: id };
+}
+
+pub func load(AtomicInt a) -> int {
+    return rtatomicintload(a.id);
+}
+
+pub func store(AtomicInt a, int value) {
+    rtatomicintstore(a.id, value);
+}
+
+pub func swap(AtomicInt a, int value) -> int {
+    return rtatomicintswap(a.id, value);
+}
+
+pub func cas(AtomicInt a, int expected, int desired) -> bool {
+    let result = rtatomicintcompareexchange(a.id, expected, desired);
+    return result == 1;
+}
+
+pub func fetchadd(AtomicInt a, int value) -> int {
+    return rtatomicintfetchadd(a.id, value);
+}
+
+pub func fetchsub(AtomicInt a, int value) -> int {
+    return rtatomicintfetchsub(a.id, value);
+}
+
+pub func atomicbool(bool initial) -> AtomicBool {
+    let id = rtatomicboolcreate(initial);
+    return AtomicBool { id: id };
+}
+
+pub func loadbool(AtomicBool a) -> bool {
+    return rtatomicboolload(a.id);
+}
+
+pub func storebool(AtomicBool a, bool value) {
+    rtatomicboolstore(a.id, value);
+}
+
+pub func swapbool(AtomicBool a, bool value) -> bool {
+    return rtatomicboolswap(a.id, value);
+}
+
+pub func testsync() -> bool {
+    let a = atomic(42);
+    let v = load(a);
+    return v == 42;
+}

@@ -1,0 +1,16 @@
+{
+  "title": "Salivo Quick Reference & Language Specifications",
+  "summary": "Authoritative reference for Salivo programming language syntax, data types, stream headers (><), RAII Drop trait, loops, collections, error propagation (?), and standard library APIs.",
+  "created_at": "2026-09-13T22:20:00Z",
+  "updated_at": "2026-09-13T22:20:00Z",
+  "tags": [
+    "salivo",
+    "quick-reference",
+    "language-spec",
+    "syntax",
+    "cheat-sheet"
+  ],
+  "artifacts": [
+    "artifacts/salivo_quick_reference.md"
+  ]
+}

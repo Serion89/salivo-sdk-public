@@ -1,0 +1,235 @@
+// Salivo Standard Library: Prelude
+// This file is automatically loaded into every Salivo source file.
+module salivo.std.prelude;
+
+// Standard panic function
+pub func panic(string msg) {
+    rtpanic(msg);
+}
+
+pub func str(int v) -> string {
+    return intstr(v);
+}
+
+pub func intstr(int v) -> string {
+    return rtintstr(v);
+}
+
+pub func strint(string s) -> int {
+    return rtstrint(s);
+}
+
+pub func floatstr(float f) -> string {
+    return rtfloatstr(f);
+}
+
+pub func strfloat(string s) -> float {
+    return rtstrfloat(s);
+}
+
+// Builtin string utilities (Zero Underscores)
+pub func len(string s) -> int {
+    return rtstrlen(s);
+}
+
+pub func trim(string s) -> string {
+    return rttrim(s);
+}
+
+pub func upper(string s) -> string {
+    return rtupper(s);
+}
+
+pub func lower(string s) -> string {
+    return rtlower(s);
+}
+
+pub func slice(string s, int start, int end) -> string {
+    let slen = rtstrlen(s);
+    if (start < 0) { start = 0; }
+    if (end > slen) { end = slen; }
+    if (start >= end) { return ""; }
+    return rtsubstr(s, start, end - start);
+}
+
+
+pub func charat(string s, int idx) -> int {
+    return rtcharat(s, idx);
+}
+
+pub func find(string s, string sub) -> int {
+    let s_len = rtstrlen(s);
+    let sub_len = rtstrlen(sub);
+    if (sub_len == 0) { return 0; }
+    if (sub_len > s_len) { return -1; }
+    let limit = s_len - sub_len;
+    let i = 0;
+    while (i <= limit) {
+        let match_found = true;
+        let j = 0;
+        while (j < sub_len) {
+            if (rtcharat(s, i + j) != rtcharat(sub, j)) {
+                match_found = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if (match_found) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub func contains(string s, string sub) -> bool {
+    return find(s, sub) >= 0;
+}
+
+pub func startswith(string s, string prefix) -> bool {
+    let s_len = rtstrlen(s);
+    let p_len = rtstrlen(prefix);
+    if (p_len > s_len) { return false; }
+    let j = 0;
+    while (j < p_len) {
+        if (rtcharat(s, j) != rtcharat(prefix, j)) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+pub func endswith(string s, string suffix) -> bool {
+    let s_len = rtstrlen(s);
+    let p_len = rtstrlen(suffix);
+    if (p_len > s_len) { return false; }
+    let offset = s_len - p_len;
+    let j = 0;
+    while (j < p_len) {
+        if (rtcharat(s, offset + j) != rtcharat(suffix, j)) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+pub func replace(string s, string target, string repl) -> string {
+    let s_len = rtstrlen(s);
+    let target_len = rtstrlen(target);
+    if (target_len == 0) { return s; }
+    let pos = find(s, target);
+    if (pos < 0) { return s; }
+    let res = "";
+    let curr = 0;
+    while (curr <= s_len - target_len) {
+        let match_found = true;
+        let j = 0;
+        while (j < target_len) {
+            if (rtcharat(s, curr + j) != rtcharat(target, j)) {
+                match_found = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if (match_found) {
+            res = res + repl;
+            curr = curr + target_len;
+        } else {
+            res = res + rtsubstr(s, curr, 1);
+            curr = curr + 1;
+        }
+    }
+    while (curr < s_len) {
+        res = res + rtsubstr(s, curr, 1);
+        curr = curr + 1;
+    }
+    return res;
+}
+
+pub func repeat(string s, int count) -> string {
+    if (count <= 0) { return ""; }
+    let res = "";
+    let i = 0;
+    while (i < count) {
+        res = res + s;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub func padstart(string s, int targetlen, string pad) -> string {
+    let slen = rtstrlen(s);
+    if (slen >= targetlen) { return s; }
+    let pad_needed = targetlen - slen;
+    let pad_unit = rtstrlen(pad);
+    if (pad_unit == 0) { return s; }
+    let prefix = "";
+    let i = 0;
+    while (i < pad_needed) {
+        prefix = prefix + rtsubstr(pad, i % pad_unit, 1);
+        i = i + 1;
+    }
+    return prefix + s;
+}
+
+pub func padend(string s, int targetlen, string pad) -> string {
+    let slen = rtstrlen(s);
+    if (slen >= targetlen) { return s; }
+    let pad_needed = targetlen - slen;
+    let pad_unit = rtstrlen(pad);
+    if (pad_unit == 0) { return s; }
+    let suffix = "";
+    let i = 0;
+    while (i < pad_needed) {
+        suffix = suffix + rtsubstr(pad, i % pad_unit, 1);
+        i = i + 1;
+    }
+    return s + suffix;
+}
+
+// Builtin terminal input
+pub func input() -> string {
+    return rtreadline();
+}
+
+pub func in() -> string {
+    return rtreadline();
+}
+
+// Builtin env lookup
+pub func env(string key, string fallback) -> string {
+    let val = rtgetenv(key);
+    if (val == "") {
+        return fallback;
+    }
+    return val;
+}
+
+// Builtin string debug formatting with escaping
+pub func debug(string s) -> string {
+    let slen = rtstrlen(s);
+    let res = "\"";
+    let i = 0;
+    while (i < slen) {
+        let ch = rtcharat(s, i);
+        if (ch == 10) {
+            res = res + "\\n";
+        } else if (ch == 13) {
+            res = res + "\\r";
+        } else if (ch == 9) {
+            res = res + "\\t";
+        } else if (ch == 34) {
+            res = res + "\\\"";
+        } else if (ch == 92) {
+            res = res + "\\\\";
+        } else {
+            res = res + rtsubstr(s, i, 1);
+        }
+        i = i + 1;
+    }
+    return res + "\"";
+}
+
+><salivo.std.core;
