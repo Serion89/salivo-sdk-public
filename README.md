@@ -5,7 +5,7 @@
 # Salivo Native SDK & Toolchain
 
 **High-Performance, Memory-Safe Systems Programming Language**  
-*Stream Imports (`><`) • Deterministic RAII • Native LLVM Codegen • Zero-Cost Collections • Universal AI-Ready*
+*Stream Imports (><) | Deterministic RAII | Native LLVM Codegen | Zero-Cost Collections | Universal AI-Ready*
 
 [![Version](https://img.shields.io/badge/version-v0.1.0-blue.svg)](https://github.com/Serion89/salivo-sdk-public)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-brightgreen.svg)](https://github.com/Serion89/salivo-sdk-public)
@@ -17,7 +17,7 @@
 
 ---
 
-## 🚀 Overview
+## Overview
 
 **Salivo** is a compiled, statically-typed systems programming language engineered for high throughput, predictable microsecond latencies, and modern developer ergonomics. It compiles directly to bare-metal native machine code via LLVM while featuring a clean, readable syntax.
 
@@ -25,7 +25,7 @@ This repository provides the official standalone **Salivo SDK & Toolchain for Wi
 
 ---
 
-## ⚡ Quick Start (1-Click Install)
+## Quick Start (1-Click Install)
 
 ### Option 1: Automated 1-Click Installer (Recommended)
 
@@ -53,7 +53,7 @@ This repository provides the official standalone **Salivo SDK & Toolchain for Wi
 
 ---
 
-## 📦 What's in the Box?
+## Toolchain & Package Contents
 
 | Tool | Executable | Description |
 | :--- | :--- | :--- |
@@ -64,14 +64,14 @@ This repository provides the official standalone **Salivo SDK & Toolchain for Wi
 | **Formatter** | `bin/salivofmt.exe` | Canonical AST-aware code formatting |
 | **Documentation** | `bin/salivodoc.exe` | Automated markdown & HTML documentation generator |
 | **Standard Library** | `std/` | Production standard library (Collections, IO, Net, Concurrency, etc.) |
-| **VS Code Extension** | `vscode-extension/` | Official syntax highlighting, snippets, and 1-click execution |
+| **VS Code Extension** | `vscode-extension/` | Official syntax highlighting, snippets, and execution integration |
 | **AI Rulebooks** | `.cursorrules`, `CLAUDE.md`, `AGENTS.md` | Pre-trained guidelines for any AI pair-programmer |
 
 ---
 
-## 💻 Language Tour & Code Examples
+## Language Tour & Code Examples
 
-### 1. Hello World with Stream Imports (`><`)
+### 1. Hello World with Stream Imports (><)
 
 Salivo uses explicit stream headers (`><`) for importing modules and binding specific items into scope:
 
@@ -154,7 +154,7 @@ func main() -> int {
 
 ---
 
-### 4. Zero-Cost Collections (`Vec`, `HashMap`, `Deque`)
+### 4. Zero-Cost Collections (Vec, HashMap, Deque)
 
 ```salivo
 module demo.collections;
@@ -179,11 +179,11 @@ func main() -> int {
 
 ---
 
-## 🤖 Universal AI Integration
+## Universal AI Integration
 
-Salivo is the first programming language designed from day one to be **100% understood by all modern AI pair programmers**. This repository includes dedicated context rules for every major AI coding tool:
+Salivo is designed from day one to be directly understood by all modern AI pair programmers. This repository includes dedicated context rules for every major AI coding tool:
 
-* **Cursor IDE**: Pre-configured `.cursorrules` teaches Claude 3.7 / GPT-4o Salivo syntax rules.
+* **Cursor IDE**: Pre-configured `.cursorrules` teaches Claude 3.7 and GPT-4o Salivo syntax rules.
 * **Claude Code (CLI)**: Native `CLAUDE.md` provides build commands and API conventions.
 * **GitHub Copilot**: `.github/copilot-instructions.md` provides instruction rules for VS Code.
 * **Windsurf**: `.windsurfrules` guides Cascade on idiomatic Salivo code.
@@ -193,9 +193,9 @@ Salivo is the first programming language designed from day one to be **100% unde
 
 ---
 
-## 🛠️ CLI Reference
+## CLI Reference
 
-### `sf` (Compiler Driver)
+### sf (Compiler Driver)
 
 ```bash
 # Build a native executable
@@ -216,7 +216,7 @@ sf ssa main.sal       # Single Static Assignment IR
 sf ir main.sal        # LLVM IR
 ```
 
-### `spm` (Package Manager)
+### spm (Package Manager)
 
 ```bash
 # Create a new Salivo project
@@ -229,7 +229,7 @@ spm build
 spm test
 ```
 
-### `salivofmt` & `salivolint` (Code Quality)
+### salivofmt & salivolint (Code Quality)
 
 ```bash
 # Format source files in-place
@@ -241,50 +241,76 @@ salivolint src/
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 
 ```
 salivo-sdk-public/
-├── .github/              # GitHub workflows & Copilot rules
-├── assets/               # Official brand graphics & icons
-├── bin/                  # Precompiled 64-bit Windows executables
-│   ├── sf.exe            # Compiler driver & JIT runner
-│   ├── spm.exe           # Package manager
-│   ├── salivofmt.exe     # Canonical code formatter
-│   ├── salivolint.exe    # Linter and static analyzer
-│   ├── salivodoc.exe     # Documentation generator
-│   └── salivo-lsp.exe    # Language Server Protocol engine
-├── commands/             # Universal agent slash commands
-├── docs/                 # Language guides, references & manuals
-│   ├── SALIVO_GUIDE.pdf  # Comprehensive language book (PDF)
-│   ├── SALIVO_GUIDE.html # Interactive web guide
-│   └── salivo_quick_reference.md # Complete syntax cheat sheet
-├── mcp/                  # Model Context Protocol server
-├── skills/               # Reusable AI agent skills
-├── std/                  # Official Salivo Standard Library
-│   ├── core.sal          # Primitives, formatting, exit, assertions
-│   ├── collections.sal   # Vec, HashMap, Deque, HashSet
-│   ├── fs.sal            # File system, directories, paths
-│   ├── io.sal            # Console I/O, buffered readers
-│   ├── net.sal           # TCP/UDP sockets, client/server
-│   ├── sync.sal          # Mutex, RWLock, Channels, Atomics
-│   ├── crypto.sal        # SHA-256, hashing routines
-│   └── time.sal          # High-resolution timers and sleep
-├── vscode-extension/     # Official VS Code extension package
-├── .cursorrules          # Cursor AI configuration
-├── .windsurfrules        # Windsurf configuration
-├── AGENTS.md             # Autonomous agent instruction set
-├── CLAUDE.md             # Anthropic Claude Code configuration
-├── install.bat           # 1-click Windows automated installer
-├── salivo_logo.png       # Official emblem
-└── README.md             # This document
+|-- .github/              # GitHub workflows & Copilot rules
+|-- assets/               # Official brand graphics & icons
+|-- bin/                  # Precompiled 64-bit Windows executables
+|   |-- sf.exe            # Compiler driver & JIT runner
+|   |-- spm.exe           # Package manager
+|   |-- salivofmt.exe     # Canonical code formatter
+|   |-- salivolint.exe    # Linter and static analyzer
+|   |-- salivodoc.exe     # Documentation generator
+|   `-- salivo-lsp.exe    # Language Server Protocol engine
+|-- commands/             # Universal agent slash commands
+|-- docs/                 # Language guides, references & manuals
+|   |-- SALIVO_GUIDE.pdf  # Comprehensive language book (PDF)
+|   |-- SALIVO_GUIDE.html # Interactive web guide
+|   `-- salivo_quick_reference.md # Complete syntax cheat sheet
+|-- mcp/                  # Model Context Protocol server
+|-- skills/               # Reusable AI agent skills
+|-- std/                  # Official Salivo Standard Library
+|   |-- core.sal          # Primitives, formatting, exit, assertions
+|   |-- collections.sal   # Vec, HashMap, Deque, HashSet
+|   |-- fs.sal            # File system, directories, paths
+|   |-- io.sal            # Console I/O, buffered readers
+|   |-- net.sal           # TCP/UDP sockets, client/server
+|   |-- sync.sal          # Mutex, RWLock, Channels, Atomics
+|   |-- crypto.sal        # SHA-256, hashing routines
+|   `-- time.sal          # High-resolution timers and sleep
+|-- vscode-extension/     # Official VS Code extension package
+|-- .cursorrules          # Cursor AI configuration
+|-- .windsurfrules        # Windsurf configuration
+|-- AGENTS.md             # Autonomous agent instruction set
+|-- CLAUDE.md             # Anthropic Claude Code configuration
+|-- install.bat           # 1-click Windows automated installer
+|-- salivo_logo.png       # Official emblem
+`-- README.md             # This document
 ```
 
 ---
 
-## 📜 License
+## License
 
 The Salivo SDK and Standard Library are distributed under the open-source **MIT License**.  
 See the [LICENSE](LICENSE) file for details.
 
-Developed with ❤️ by **Sahil Bhatt** ([@Serion89](https://github.com/Serion89)).
+---
+
+## Author & Maintainer
+
+<table border="0">
+  <tr>
+    <td width="100" align="center" valign="middle">
+      <a href="https://github.com/Serion89">
+        <img src="https://avatars.githubusercontent.com/u/205588838?v=4" width="85" height="85" style="border-radius: 50%;" alt="Sahil Bhatt" />
+      </a>
+    </td>
+    <td valign="middle">
+      <h3>Sahil Bhatt</h3>
+      <p>Software Developer | Compiler & Systems Engineer | AI</p>
+      <p>Founder, <strong>Salivo Enterprises Pvt, Ltd.</strong></p>
+      <p>
+        <a href="https://github.com/Serion89">
+          <img src="https://img.shields.io/badge/GitHub-Serion89-181717?style=for-the-badge&logo=github" alt="GitHub Profile" />
+        </a>
+        &nbsp;
+        <a href="https://github.com/Serion89">
+          <img src="https://img.shields.io/github/followers/Serion89?label=Follow&style=for-the-badge&logo=github&color=24292e" alt="Followers" />
+        </a>
+      </p>
+    </td>
+  </tr>
+</table>
