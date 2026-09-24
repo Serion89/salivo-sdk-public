@@ -1,0 +1,24 @@
+module tasks;
+
+><salivo.std.core::{outln};
+><salivo.std.runtime::{runtimeCreate, runtimeRun, runtimeShutdown, runtimeJoin, runtimeDestroy, spawn, join};
+
+func square(x: int) -> int {
+    return x * x;
+}
+
+func root(n: int) -> int {
+    let a = spawn(square, n).value;
+    let b = spawn(square, n + 1).value;
+    return join(a).value + join(b).value;
+}
+
+func main() -> int {
+    let rt = runtimeCreate(0).value;
+    let total = runtimeRun(rt, root, 6).value;
+    let s = runtimeShutdown(rt);
+    let j = runtimeJoin(rt, 5000);
+    let d = runtimeDestroy(rt);
+    outln($"6*6 + 7*7 = {total}");
+    return 0;
+}

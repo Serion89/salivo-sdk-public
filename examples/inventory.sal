@@ -1,0 +1,33 @@
+module inventory;
+
+><salivo.std.core::{outln};
+><salivo.std.collections::{vecNew, push, get, veclen, mapNew, put, lookupOr};
+
+func describe(count: int) -> string {
+    return match count {
+        0 => "out of stock",
+        1 => "last one",
+        _ => "in stock",
+    };
+}
+
+func main() -> int {
+    let mut items = vecNew<string>();
+    items = push<string>(items, "apple");
+    items = push<string>(items, "pear");
+    items = push<string>(items, "plum");
+
+    let mut stock = mapNew<string, int>();
+    stock = put<string, int>(stock, "apple", 12);
+    stock = put<string, int>(stock, "pear", 1);
+
+    let mut i = 0;
+    while (i < veclen<string>(items)) {
+        let name = get<string>(items, i);
+        let count = lookupOr<string, int>(stock, name, 0);
+        let state = describe(count);
+        outln($"{name}: {state}");
+        i = i + 1;
+    }
+    return 0;
+}

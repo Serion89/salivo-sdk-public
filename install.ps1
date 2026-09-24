@@ -9,11 +9,13 @@
 #   -Quiet             answer yes to every question (unattended install)
 #   -TargetHome <dir>  install below <dir> instead of %USERPROFILE% (testing)
 #   -NoSystemChanges   skip PATH, VS Code, file association and prerequisite installs (testing)
+#   -RepairFileIcons   only restore the .sal icon and association (if another program took them over)
 
 param(
     [switch]$Quiet,
     [string]$TargetHome = $env:USERPROFILE,
-    [switch]$NoSystemChanges
+    [switch]$NoSystemChanges,
+    [switch]$RepairFileIcons
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,13 +46,50 @@ function Find-VcTools {
     if ($path) { return $path }
     return $null
 }
-function Winget-Install([string]$id, [string[]]$extra) {
+function Install-WithWinget([string]$id, [string[]]$extra) {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Warn "winget is not available; install $id manually."
         return
     }
     $wingetArgs = @('install', '-e', '--id', $id, '--accept-package-agreements', '--accept-source-agreements') + $extra
     & winget @wingetArgs
+}
+
+# Points .sal files at Salivo.File: the official Salivo icon, opening in VS Code. Keys are only created
+# when missing (New-Item -Force would recreate an existing key and wipe other programs' values), and a
+# handler another program had installed for .sal is reported and left in place for "Open with".
+function Register-SalivoFiles {
+    $ico = Join-Path $root 'salivo.ico'
+    $shippedIco = Join-Path $src 'assets\salivo.ico'
+    if (Test-Path $shippedIco) { Copy-Item -Force $shippedIco $ico }
+    $classes = 'Registry::HKEY_CURRENT_USER\Software\Classes'
+    foreach ($key in @("$classes\.sal", "$classes\.sal\OpenWithProgids", "$classes\Salivo.File",
+                       "$classes\Salivo.File\DefaultIcon", "$classes\Salivo.File\shell\open\command")) {
+        if (-not (Test-Path $key)) { New-Item -Path $key | Out-Null }
+    }
+    $previous = (Get-ItemProperty -Path "$classes\.sal" -ErrorAction SilentlyContinue).'(default)'
+    Set-ItemProperty -Path "$classes\.sal" -Name '(default)' -Value 'Salivo.File'
+    Set-ItemProperty -Path "$classes\.sal\OpenWithProgids" -Name 'Salivo.File' -Value ([byte[]]@())
+    Set-ItemProperty -Path "$classes\Salivo.File" -Name '(default)' -Value 'Salivo Source File'
+    Set-ItemProperty -Path "$classes\Salivo.File\DefaultIcon" -Name '(default)' -Value "$ico,0"
+    $codeExe = Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\Code.exe'
+    if (-not (Test-Path $codeExe)) { $codeExe = Join-Path $env:ProgramFiles 'Microsoft VS Code\Code.exe' }
+    if (Test-Path $codeExe) {
+        Set-ItemProperty -Path "$classes\Salivo.File\shell\open\command" -Name '(default)' -Value "`"$codeExe`" `"%1`""
+    }
+    if (-not ('SalivoSetup.Shell' -as [type])) {
+        Add-Type -Namespace SalivoSetup -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, System.IntPtr a, System.IntPtr b);'
+    }
+    [SalivoSetup.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($previous -and $previous -ne 'Salivo.File') {
+        Warn "another program ('$previous') had taken over .sal files; restored the Salivo icon"
+    }
+    Ok '.sal files use the official Salivo icon and open in VS Code'
+}
+
+if ($RepairFileIcons) {
+    Register-SalivoFiles
+    exit 0
 }
 
 Write-Host ''
@@ -74,11 +113,11 @@ if ($clang) { Ok "clang: $clang" } else { Warn 'clang (LLVM) was not found.' }
 if ($vc) { Ok "C++ build tools: $vc" } else { Warn 'Visual Studio C++ build tools were not found.' }
 if (-not $NoSystemChanges) {
     if (-not $clang -and (Ask 'Install LLVM (clang) now with winget?')) {
-        Winget-Install 'LLVM.LLVM' @()
+        Install-WithWinget 'LLVM.LLVM' @()
         $clang = Find-Clang
     }
     if (-not $vc -and (Ask 'Install the Visual Studio 2022 C++ build tools now with winget? (large download)')) {
-        Winget-Install 'Microsoft.VisualStudio.2022.BuildTools' @('--override', '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
+        Install-WithWinget 'Microsoft.VisualStudio.2022.BuildTools' @('--override', '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
         $vc = Find-VcTools
     }
 }
@@ -107,6 +146,10 @@ foreach ($stdDir in @((Join-Path $root 'lib\salivo\std'), (Join-Path $root 'std'
     Copy-Item -Recurse -Force -Path (Join-Path $src 'std\*') -Destination $stdDir
 }
 Ok "$((Get-ChildItem (Join-Path $root 'std') -Filter *.sal).Count) modules"
+# Runtime objects for sf's Rust pipeline (packages and fallback builds)
+$rt = Join-Path $root 'lib\salivo\rt'
+if (Test-Path $rt) { Remove-Item -Recurse -Force $rt }
+Copy-Item -Recurse -Force -Path (Join-Path $src 'lib\salivo\rt') -Destination $rt
 
 # 4. Stage 3 runtime ---------------------------------------------------------------------------
 Step 4 'Installing the Stage 3 compiler runtime'
@@ -157,23 +200,7 @@ Step 7 'Giving .sal files the Salivo icon'
 if ($NoSystemChanges) {
     Ok 'skipped (-NoSystemChanges)'
 } else {
-    Copy-Item -Force (Join-Path $src 'assets\salivo.ico') (Join-Path $root 'salivo.ico')
-    $classes = 'Registry::HKEY_CURRENT_USER\Software\Classes'
-    New-Item -Force -Path "$classes\.sal" | Out-Null
-    Set-ItemProperty -Path "$classes\.sal" -Name '(default)' -Value 'Salivo.File'
-    New-Item -Force -Path "$classes\Salivo.File" | Out-Null
-    Set-ItemProperty -Path "$classes\Salivo.File" -Name '(default)' -Value 'Salivo Source File'
-    New-Item -Force -Path "$classes\Salivo.File\DefaultIcon" | Out-Null
-    Set-ItemProperty -Path "$classes\Salivo.File\DefaultIcon" -Name '(default)' -Value "$root\salivo.ico,0"
-    $codeExe = Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\Code.exe'
-    if (-not (Test-Path $codeExe)) { $codeExe = Join-Path $env:ProgramFiles 'Microsoft VS Code\Code.exe' }
-    if (Test-Path $codeExe) {
-        New-Item -Force -Path "$classes\Salivo.File\shell\open\command" | Out-Null
-        Set-ItemProperty -Path "$classes\Salivo.File\shell\open\command" -Name '(default)' -Value "`"$codeExe`" `"%1`""
-    }
-    Add-Type -Namespace SalivoSetup -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, System.IntPtr a, System.IntPtr b);'
-    [SalivoSetup.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
-    Ok '.sal files use the Salivo icon and open in VS Code'
+    Register-SalivoFiles
 }
 
 # 8. Self-test ---------------------------------------------------------------------------------

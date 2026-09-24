@@ -15,8 +15,13 @@ if ($userPath) {
 $code = Get-Command code -ErrorAction SilentlyContinue
 if ($code) { & $code.Source --uninstall-extension salivo.salivo | Out-Null }
 
-Remove-Item -Recurse -Force 'Registry::HKEY_CURRENT_USER\Software\Classes\.sal' -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force 'Registry::HKEY_CURRENT_USER\Software\Classes\Salivo.File' -ErrorAction SilentlyContinue
+# Undo only Salivo's own association; other programs' .sal handlers are left intact
+$classes = 'Registry::HKEY_CURRENT_USER\Software\Classes'
+if ((Get-ItemProperty -Path "$classes\.sal" -ErrorAction SilentlyContinue).'(default)' -eq 'Salivo.File') {
+    Set-ItemProperty -Path "$classes\.sal" -Name '(default)' -Value ''
+}
+Remove-ItemProperty -Path "$classes\.sal\OpenWithProgids" -Name 'Salivo.File' -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$classes\Salivo.File" -ErrorAction SilentlyContinue
 
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 Write-Host 'Salivo has been removed.' -ForegroundColor Green

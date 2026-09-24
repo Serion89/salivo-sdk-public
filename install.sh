@@ -32,18 +32,33 @@ if [ ! -x "$SRC/bin/sf" ]; then
 fi
 
 # 1. Prerequisites ----------------------------------------------------------------------------
-step 1 'Checking prerequisites (clang)'
-CLANG=$(command -v clang || true)
+# Salivo emits LLVM 16 IR, which clang 15 or newer reads. Distributions whose default clang is older
+# (Debian 12, Ubuntu 22.04) ship newer ones as clang-15, clang-16, ...; the newest one found is used.
+step 1 'Checking prerequisites (clang; 15 or newer recommended)'
+clang_major() { "$1" --version 2>/dev/null | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -n 1; }
+CLANG=''
+for candidate in clang-20 clang-19 clang-18 clang-17 clang-16 clang-15 clang; do
+    path=$(command -v "$candidate" || true)
+    if [ -n "$path" ]; then
+        major=$(clang_major "$path")
+        if [ -n "$major" ] && [ "$major" -ge 15 ]; then
+            CLANG=$path
+            break
+        fi
+    fi
+done
 if [ -n "$CLANG" ]; then
-    ok "clang: $CLANG"
+    ok "clang: $CLANG (version $(clang_major "$CLANG"))"
 else
-    warn 'clang was not found. Salivo needs it to build programs:'
+    OLD=$(command -v clang || true)
+    if [ -n "$OLD" ]; then warn "clang $(clang_major "$OLD") is older than the tested clang 15+; it usually works, but a newer one is recommended:"; else warn 'clang was not found. Salivo needs clang (15 or newer recommended):'; fi
     if [ "$OS" = "Darwin" ]; then
         warn '  xcode-select --install'
     else
-        warn '  Debian/Ubuntu: sudo apt install clang lld build-essential'
-        warn '  Fedora:        sudo dnf install clang lld'
-        warn '  Arch:          sudo pacman -S clang lld'
+        warn '  Debian 12 / Ubuntu 22.04: sudo apt install clang-16'
+        warn '  Ubuntu 24.04 and newer:   sudo apt install clang'
+        warn '  Fedora:                   sudo dnf install clang'
+        warn '  Arch:                     sudo pacman -S clang'
     fi
 fi
 
@@ -52,6 +67,12 @@ step 2 'Installing the compiler and tools (sf, Stage 3 compiler, spm, formatter,
 mkdir -p "$BIN"
 cp -f "$SRC"/bin/* "$BIN"/
 chmod +x "$BIN"/*
+# A versioned clang (clang-16, ...) becomes plain `clang` for Salivo; ~/.salivo/bin comes first on PATH
+rm -f "$BIN/clang"
+case "$CLANG" in
+    */clang) ;;
+    ?*) ln -s "$CLANG" "$BIN/clang" ;;
+esac
 ok "$(ls "$BIN" | wc -l | tr -d ' ') files in $BIN"
 
 # 3. Standard library -------------------------------------------------------------------------
@@ -62,6 +83,9 @@ for dir in "$ROOT/lib/salivo/std" "$ROOT/std"; do
     cp -R "$SRC"/std/. "$dir"/
 done
 ok "$(ls "$ROOT/std"/*.sal | wc -l | tr -d ' ') modules"
+# Runtime objects for sf's Rust pipeline (packages and fallback builds)
+rm -rf "$ROOT/lib/salivo/rt"
+cp -R "$SRC/lib/salivo/rt" "$ROOT/lib/salivo/rt"
 
 # 4. Stage 3 runtime --------------------------------------------------------------------------
 step 4 'Installing the Stage 3 compiler runtime'

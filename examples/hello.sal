@@ -1,8 +1,10 @@
-module app.ci;
+module hello;
 
 ><salivo.std.core::{outln};
 
 func main() -> int {
-    outln("Hello from Salivo CI!");
+    let name = "  salivo  ";
+    let stage = 3;
+    outln($"Hello from {name:trim:upper}, stage {stage}!");
     return 0;
 }

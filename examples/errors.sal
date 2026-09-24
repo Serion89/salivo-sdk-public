@@ -1,0 +1,31 @@
+module errors;
+
+><salivo.std.core::{outln, Result, ok, err};
+
+func parseAge(age: int) -> Result<int, string> {
+    if (age < 0) {
+        return err<int, string>("age cannot be negative");
+    }
+    if (age > 150) {
+        return err<int, string>("age is not realistic");
+    }
+    return ok<int, string>(age);
+}
+
+func report(age: int) -> int {
+    let r = parseAge(age);
+    if (r.is_ok) {
+        let next = r.value + 1;
+        outln($"valid, next birthday: {next}");
+        return 0;
+    }
+    let reason = r.error;
+    outln($"rejected: {reason}");
+    return 1;
+}
+
+func main() -> int {
+    report(29);
+    report(-4);
+    return 0;
+}

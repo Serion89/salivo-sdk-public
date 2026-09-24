@@ -1,0 +1,37 @@
+module shapes;
+
+><salivo.std.core::{outln, Drop};
+
+pub struct Rect {
+    int w;
+    int h;
+}
+
+pub struct Connection {
+    int id;
+}
+
+impl Drop for Connection {
+    func drop(self) {
+        outln($"closing connection {self.id}");
+    }
+}
+
+func area(r: Rect) -> int {
+    return r.w * r.h;
+}
+
+func serve() -> int {
+    let conn = Connection { id: 7 };
+    outln($"serving on connection {conn.id}");
+    return 0;
+}
+
+func main() -> int {
+    let r = Rect { w: 3, h: 4 };
+    let a = area(r);
+    outln($"area = {a}");
+    serve();
+    outln("done");
+    return 0;
+}
