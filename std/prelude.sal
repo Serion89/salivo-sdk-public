@@ -48,7 +48,7 @@ pub func slice(string s, int start, int end) -> string {
     let slen = rtstrlen(s);
     if (start < 0) { start = 0; }
     if (end > slen) { end = slen; }
-    if (start >= end) { return ""; }
+    if (start >= end) { return rtsubstr(s, slen, 0); }
     return rtsubstr(s, start, end - start);
 }
 

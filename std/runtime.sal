@@ -1,0 +1,585 @@
+module salivo.std.runtime;
+
+// Salivo Stage 36.1 - multi-threaded async I/O runtime.
+//
+// Tasks run on a pool of worker threads. An operation that has to wait (a timer, a socket, a file,
+// a channel, another task) suspends only the calling task: its worker immediately runs other
+// tasks, and the runtime resumes the task on any worker once the operation completes.
+//
+// Every fallible operation returns Result<_, AioError>. Handles (Task, Channel, TcpStream, ...)
+// are generation-checked: using one after it was closed or released yields InvalidHandle instead
+// of touching freed memory.
+//
+// Backends: Windows (IOCP) and POSIX (epoll on Linux, poll(2) on macOS/BSD).
+// Design and guarantees: docs/STAGE_36_1_RUNTIME.md.
+
+><salivo.std.core::{Result, ok, err, Drop};
+
+pub enum AioError {
+    WouldBlock,
+    Eof,
+    ConnectionReset,
+    Timeout,
+    Cancelled,
+    Closed,
+    InvalidArgument,
+    Os,
+    Shutdown,
+    InvalidHandle,
+    Full,
+    Unsupported,
+    NotInTask,
+    ConnectionRefused,
+    AddressInUse,
+    Truncated,
+    TaskFailed,
+    Unknown,
+}
+
+pub struct Runtime { int handle; }
+pub struct Task { int handle; }
+pub struct Channel { int handle; }
+pub struct TcpListener { int handle; }
+pub struct TcpStream { int handle; }
+pub struct UdpSocket { int handle; }
+pub struct AsyncFile { int handle; }
+pub struct Buffer { int addr; int cap; }
+pub struct Datagram { int len; int peerIp; int peerPort; string peerHost; }
+pub struct TextChannel { int handle; }
+
+// Task states reported by taskState()
+pub func stateCreated() -> int { return 0; }
+pub func stateRunnable() -> int { return 1; }
+pub func stateRunning() -> int { return 2; }
+pub func stateWaiting() -> int { return 3; }
+pub func stateCompleted() -> int { return 4; }
+pub func stateCancelled() -> int { return 5; }
+pub func stateFailed() -> int { return 6; }
+
+pub func errorFromCode(code: int) -> AioError {
+    if (code == -1) { return AioError::WouldBlock; }
+    if (code == -2) { return AioError::Eof; }
+    if (code == -3) { return AioError::ConnectionReset; }
+    if (code == -4) { return AioError::Timeout; }
+    if (code == -5) { return AioError::Cancelled; }
+    if (code == -6) { return AioError::Closed; }
+    if (code == -7) { return AioError::InvalidArgument; }
+    if (code == -8) { return AioError::Os; }
+    if (code == -9) { return AioError::Shutdown; }
+    if (code == -10) { return AioError::InvalidHandle; }
+    if (code == -11) { return AioError::Full; }
+    if (code == -12) { return AioError::Unsupported; }
+    if (code == -13) { return AioError::NotInTask; }
+    if (code == -14) { return AioError::ConnectionRefused; }
+    if (code == -15) { return AioError::AddressInUse; }
+    if (code == -16) { return AioError::Truncated; }
+    if (code == -17) { return AioError::TaskFailed; }
+    return AioError::Unknown;
+}
+
+/// Name of a raw runtime result code ("Timeout", "Closed", ...).
+pub func errorText(code: int) -> string {
+    return rtaioerrorname(code);
+}
+
+/// OS error code behind the calling task's most recent Os error.
+pub func lastOsError() -> int {
+    return rtaiolastoserror();
+}
+
+func intResult(code: int) -> Result<int, AioError> {
+    if (code < 0) { return err<int, AioError>(errorFromCode(code)); }
+    return ok<int, AioError>(code);
+}
+
+func valueResult(code: int) -> Result<int, AioError> {
+    if (code < 0) { return err<int, AioError>(errorFromCode(code)); }
+    return ok<int, AioError>(rtaiolastvalue());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Runtime lifecycle: create -> start -> run -> shutdown -> join -> destroy
+// ---------------------------------------------------------------------------------------------
+
+/// Creates the runtime. workers = 0 uses one worker per logical CPU.
+pub func runtimeCreate(workers: int) -> Result<Runtime, AioError> {
+    let h = rtaiocreate(workers);
+    if (h < 0) { return err<Runtime, AioError>(errorFromCode(h)); }
+    return ok<Runtime, AioError>(Runtime { handle: h });
+}
+
+/// Starts the worker threads, the I/O reactor and the blocking pool.
+pub func runtimeStart(rt: Runtime) -> Result<int, AioError> {
+    return intResult(rtaiostart(rt.handle));
+}
+
+/// Runs entry(arg) as the root task and waits for it; returns its result. Starts the runtime if needed.
+pub func runtimeRun(rt: Runtime, entry: int, arg: int) -> Result<int, AioError> {
+    return valueResult(rtaiorun(rt.handle, entry, arg));
+}
+
+/// Cancels every live task and refuses new spawns. Tasks observe the cancellation at their next
+/// suspension point (or isCancelled()).
+pub func runtimeShutdown(rt: Runtime) -> Result<int, AioError> {
+    return intResult(rtaioshutdown(rt.handle));
+}
+
+/// Waits until every task has finished, then stops and joins all runtime threads.
+/// timeoutMs = -1 waits forever; on Timeout the runtime keeps running and join can be retried.
+pub func runtimeJoin(rt: Runtime, timeoutMs: int) -> Result<int, AioError> {
+    return intResult(rtaiojoin(rt.handle, timeoutMs));
+}
+
+/// Frees every runtime-owned object. Fails with Os if anything leaked.
+pub func runtimeDestroy(rt: Runtime) -> Result<int, AioError> {
+    return intResult(rtaiodestroy(rt.handle));
+}
+
+/// Live diagnostic counter (see docs/STAGE_36_1_RUNTIME.md, "Observability").
+pub func runtimeStat(rt: Runtime, key: int) -> int {
+    return rtaiostat(rt.handle, key);
+}
+
+/// Monotonic clock in microseconds.
+pub func nowMicros() -> int {
+    return rtaiostat(0, 26);
+}
+
+/// CPU time consumed by the whole process, in microseconds.
+pub func processCpuMicros() -> int {
+    return rtaiostat(0, 25);
+}
+
+/// Makes rt the runtime that handle-less calls (spawn, sleep, channel, tcpListen, ...) made from this
+/// OS thread use. Needed only when several runtimes are alive; tasks always use their own runtime.
+pub func runtimeUse(rt: Runtime) -> Result<int, AioError> {
+    return intResult(rtaiouse(rt.handle));
+}
+
+/// Index of the worker running the caller, or -1 outside the worker pool.
+pub func workerId() -> int {
+    return rtaioworkerid();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------------------------
+
+/// Spawns entry(arg) as a new task. entry is a function `func f(arg: int) -> int`.
+pub func spawn(entry: int, arg: int) -> Result<Task, AioError> {
+    let h = rtaiospawn(entry, arg);
+    if (h < 0) { return err<Task, AioError>(errorFromCode(h)); }
+    return ok<Task, AioError>(Task { handle: h });
+}
+
+/// Spawns entry(arg) on an explicit runtime.
+pub func spawnOn(rt: Runtime, entry: int, arg: int) -> Result<Task, AioError> {
+    let h = rtaiospawnon(rt.handle, entry, arg);
+    if (h < 0) { return err<Task, AioError>(errorFromCode(h)); }
+    return ok<Task, AioError>(Task { handle: h });
+}
+
+/// Suspends the caller until t finishes and returns its result. Keeps the handle.
+pub func awaitTask(t: Task) -> Result<int, AioError> {
+    return valueResult(rtaioawait(t.handle));
+}
+
+/// awaitTask, then releases the handle.
+pub func join(t: Task) -> Result<int, AioError> {
+    let r = valueResult(rtaioawait(t.handle));
+    rtaiorelease(t.handle);
+    return r;
+}
+
+/// Waits at most ms for t. On Timeout t is cancelled. Always releases the handle.
+pub func timeout(t: Task, ms: int) -> Result<int, AioError> {
+    let r = valueResult(rtaioawaittimeout(t.handle, ms));
+    rtaiorelease(t.handle);
+    return r;
+}
+
+/// Gives up the handle without waiting; the task keeps running (detached).
+pub func release(t: Task) -> Result<int, AioError> {
+    return intResult(rtaiorelease(t.handle));
+}
+
+/// Requests cooperative cancellation of t. InvalidArgument if t already finished.
+pub func cancel(t: Task) -> Result<int, AioError> {
+    return intResult(rtaiocancel(t.handle));
+}
+
+/// True when the calling task has been asked to stop.
+pub func isCancelled() -> bool {
+    return rtaioiscancelled(0) == 1;
+}
+
+pub func taskIsCancelled(t: Task) -> bool {
+    return rtaioiscancelled(t.handle) == 1;
+}
+
+/// Current state of t (stateCompleted(), ...), or a negative error code for a stale handle.
+pub func taskState(t: Task) -> int {
+    return rtaiotaskstate(t.handle);
+}
+
+/// Lets other runnable tasks run. Err(Cancelled) once the task has been cancelled.
+pub func yieldNow() -> Result<int, AioError> {
+    return intResult(rtaioyield());
+}
+
+pub func currentTask() -> Task {
+    return Task { handle: rtaiocurrent() };
+}
+
+/// Marks the calling task Failed with code; awaiting it yields Err(TaskFailed).
+pub func failTask(code: int) -> Result<int, AioError> {
+    return intResult(rtaiofail(code));
+}
+
+/// Suspends the calling task for ms milliseconds on a runtime timer.
+pub func sleep(ms: int) -> Result<int, AioError> {
+    return intResult(rtaiosleep(ms));
+}
+
+pub func delay(ms: int) -> Result<int, AioError> {
+    return intResult(rtaiosleep(ms));
+}
+
+/// Runs entry(arg) on the bounded blocking pool, off the async workers, and returns its result.
+pub func blocking(entry: int, arg: int) -> Result<int, AioError> {
+    return valueResult(rtaioblocking(entry, arg));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Channels of int values. capacity > 0: bounded (senders wait while full); 0: unbounded.
+// ---------------------------------------------------------------------------------------------
+
+pub func channel(capacity: int) -> Result<Channel, AioError> {
+    let h = rtaiochannew(capacity);
+    if (h < 0) { return err<Channel, AioError>(errorFromCode(h)); }
+    return ok<Channel, AioError>(Channel { handle: h });
+}
+
+/// Sends v, waiting while a bounded channel is full. Err(Closed) if the channel closes first.
+pub func send(ch: Channel, v: int) -> Result<int, AioError> {
+    return intResult(rtaiochansend(ch.handle, v));
+}
+
+/// Sends v without waiting: Err(Full) when a bounded channel has no room.
+pub func trySend(ch: Channel, v: int) -> Result<int, AioError> {
+    return intResult(rtaiochantrysend(ch.handle, v));
+}
+
+/// Receives the next value, waiting while empty. Err(Closed) once closed and drained.
+pub func recv(ch: Channel) -> Result<int, AioError> {
+    return valueResult(rtaiochanrecv(ch.handle));
+}
+
+/// Receives without waiting: Err(WouldBlock) when empty.
+pub func tryRecv(ch: Channel) -> Result<int, AioError> {
+    return valueResult(rtaiochantryrecv(ch.handle));
+}
+
+/// Closes for sending; values already buffered can still be received. Err(Closed) if already closed.
+pub func closeChannel(ch: Channel) -> Result<int, AioError> {
+    return intResult(rtaiochanclose(ch.handle));
+}
+
+pub func channelLen(ch: Channel) -> int {
+    return rtaiochanlen(ch.handle);
+}
+
+/// Closes (if still open) and releases the channel handle.
+pub func freeChannel(ch: Channel) -> Result<int, AioError> {
+    return intResult(rtaioclose(ch.handle));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Text channels: each message is an owned copy of a string. Same capacity/backpressure/close
+// rules as int channels.
+// ---------------------------------------------------------------------------------------------
+
+pub func textChannel(capacity: int) -> Result<TextChannel, AioError> {
+    let h = rtaiochannewtext(capacity);
+    if (h < 0) { return err<TextChannel, AioError>(errorFromCode(h)); }
+    return ok<TextChannel, AioError>(TextChannel { handle: h });
+}
+
+pub func sendText(ch: TextChannel, text: string) -> Result<int, AioError> {
+    return intResult(rtaiochansendtext(ch.handle, text));
+}
+
+pub func trySendText(ch: TextChannel, text: string) -> Result<int, AioError> {
+    return intResult(rtaiochantrysendtext(ch.handle, text));
+}
+
+pub func recvText(ch: TextChannel) -> Result<string, AioError> {
+    let r = rtaiochanrecvtext(ch.handle);
+    if (r < 0) { return err<string, AioError>(errorFromCode(r)); }
+    return ok<string, AioError>(rtaiolasttext());
+}
+
+pub func tryRecvText(ch: TextChannel) -> Result<string, AioError> {
+    let r = rtaiochantryrecvtext(ch.handle);
+    if (r < 0) { return err<string, AioError>(errorFromCode(r)); }
+    return ok<string, AioError>(rtaiolasttext());
+}
+
+pub func closeTextChannel(ch: TextChannel) -> Result<int, AioError> {
+    return intResult(rtaiochanclose(ch.handle));
+}
+
+pub func textChannelLen(ch: TextChannel) -> int {
+    return rtaiochanlen(ch.handle);
+}
+
+pub func freeTextChannel(ch: TextChannel) -> Result<int, AioError> {
+    return intResult(rtaioclose(ch.handle));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Byte buffers for I/O (bounds-checked, caller-owned)
+// ---------------------------------------------------------------------------------------------
+
+pub func bufferNew(cap: int) -> Result<Buffer, AioError> {
+    let a = rtaiobufnew(cap);
+    if (a < 0) { return err<Buffer, AioError>(errorFromCode(a)); }
+    return ok<Buffer, AioError>(Buffer { addr: a, cap: cap });
+}
+
+pub func bufferFree(b: Buffer) -> Result<int, AioError> {
+    return intResult(rtaiobuffree(b.addr));
+}
+
+pub func bufferGet(b: Buffer, i: int) -> int {
+    return rtaiobufget(b.addr, i);
+}
+
+pub func bufferSet(b: Buffer, i: int, v: int) -> Result<int, AioError> {
+    return intResult(rtaiobufset(b.addr, i, v));
+}
+
+/// Copies text into the buffer (truncated to its capacity); returns the byte count.
+pub func bufferPutText(b: Buffer, text: string) -> int {
+    return rtaiobufputtext(b.addr, b.cap, text);
+}
+
+/// First len bytes of the buffer as a string.
+pub func bufferText(b: Buffer, len: int) -> string {
+    return rtaiobufstr(b.addr, len);
+}
+
+func clampLen(b: Buffer, n: int) -> int {
+    if (n > b.cap) { return b.cap; }
+    return n;
+}
+
+// ---------------------------------------------------------------------------------------------
+// TCP
+// ---------------------------------------------------------------------------------------------
+
+/// Binds and listens. port 0 picks a free port (see listenerPort). backlog 0 = system default.
+pub func tcpListen(host: string, port: int, backlog: int) -> Result<TcpListener, AioError> {
+    let h = rtaiotcplisten(host, port, backlog);
+    if (h < 0) { return err<TcpListener, AioError>(errorFromCode(h)); }
+    return ok<TcpListener, AioError>(TcpListener { handle: h });
+}
+
+pub func listenerPort(l: TcpListener) -> int {
+    return rtaiolocalport(l.handle);
+}
+
+/// Waits for the next connection. Err(Closed) once the listener is closed.
+pub func tcpAccept(l: TcpListener) -> Result<TcpStream, AioError> {
+    let h = rtaiotcpaccept(l.handle);
+    if (h < 0) { return err<TcpStream, AioError>(errorFromCode(h)); }
+    return ok<TcpStream, AioError>(TcpStream { handle: h });
+}
+
+pub func listenerClose(l: TcpListener) -> Result<int, AioError> {
+    return intResult(rtaioclose(l.handle));
+}
+
+pub func tcpConnect(host: string, port: int) -> Result<TcpStream, AioError> {
+    let h = rtaiotcpconnect(host, port);
+    if (h < 0) { return err<TcpStream, AioError>(errorFromCode(h)); }
+    return ok<TcpStream, AioError>(TcpStream { handle: h });
+}
+
+/// Reads at most max bytes (1..max). Err(Eof) when the peer closed its side.
+pub func tcpRead(s: TcpStream, b: Buffer, max: int) -> Result<int, AioError> {
+    return intResult(rtaioread(s.handle, b.addr, clampLen(b, max)));
+}
+
+/// Reads exactly n bytes, looping over partial reads. Err(Eof) if the stream ends first.
+pub func tcpReadExact(s: TcpStream, b: Buffer, n: int) -> Result<int, AioError> {
+    if (n < 0 || n > b.cap) { return err<int, AioError>(AioError::InvalidArgument); }
+    let mut got = 0;
+    while (got < n) {
+        let r = rtaioread(s.handle, b.addr + got, n - got);
+        if (r < 0) { return err<int, AioError>(errorFromCode(r)); }
+        got = got + r;
+    }
+    return ok<int, AioError>(got);
+}
+
+/// Writes all len bytes (partial OS writes are continued internally).
+pub func tcpWrite(s: TcpStream, b: Buffer, len: int) -> Result<int, AioError> {
+    return intResult(rtaiowrite(s.handle, b.addr, clampLen(b, len)));
+}
+
+pub func tcpWriteText(s: TcpStream, text: string) -> Result<int, AioError> {
+    return intResult(rtaiowritetext(s.handle, text));
+}
+
+/// Half-closes: the peer reads Eof, this side can still read.
+pub func tcpShutdown(s: TcpStream) -> Result<int, AioError> {
+    return intResult(rtaiotcpshutdown(s.handle));
+}
+
+pub func tcpClose(s: TcpStream) -> Result<int, AioError> {
+    return intResult(rtaioclose(s.handle));
+}
+
+pub func streamPort(s: TcpStream) -> int {
+    return rtaiolocalport(s.handle);
+}
+
+// ---------------------------------------------------------------------------------------------
+// UDP (IPv4)
+// ---------------------------------------------------------------------------------------------
+
+pub func udpBind(host: string, port: int) -> Result<UdpSocket, AioError> {
+    let h = rtaioudpbind(host, port);
+    if (h < 0) { return err<UdpSocket, AioError>(errorFromCode(h)); }
+    return ok<UdpSocket, AioError>(UdpSocket { handle: h });
+}
+
+pub func udpPort(u: UdpSocket) -> int {
+    return rtaiolocalport(u.handle);
+}
+
+pub func udpSendTo(u: UdpSocket, b: Buffer, len: int, host: string, port: int) -> Result<int, AioError> {
+    return intResult(rtaioudpsendto(u.handle, b.addr, clampLen(b, len), host, port));
+}
+
+/// Receives one datagram into b. Err(Truncated) when it was larger than max.
+pub func udpRecvFrom(u: UdpSocket, b: Buffer, max: int) -> Result<Datagram, AioError> {
+    let n = rtaioudprecvfrom(u.handle, b.addr, clampLen(b, max));
+    if (n < 0) { return err<Datagram, AioError>(errorFromCode(n)); }
+    let ep = rtaiolastvalue();
+    return ok<Datagram, AioError>(Datagram { len: n, peerIp: ep / 65536, peerPort: ep % 65536, peerHost: rtaiolastpeer() });
+}
+
+pub func udpClose(u: UdpSocket) -> Result<int, AioError> {
+    return intResult(rtaioclose(u.handle));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Files. Reads and writes are native overlapped I/O; open, flush and close run on the bounded
+// blocking pool. One task uses a file handle's position at a time.
+// ---------------------------------------------------------------------------------------------
+
+pub func modeRead() -> int { return 0; }
+pub func modeCreate() -> int { return 1; }
+pub func modeAppend() -> int { return 2; }
+pub func modeReadWrite() -> int { return 3; }
+
+pub func fileOpen(path: string, mode: int) -> Result<AsyncFile, AioError> {
+    let h = rtaiofileopen(path, mode);
+    if (h < 0) { return err<AsyncFile, AioError>(errorFromCode(h)); }
+    return ok<AsyncFile, AioError>(AsyncFile { handle: h });
+}
+
+/// Reads at most max bytes at the current position. Err(Eof) at end of file.
+pub func fileRead(f: AsyncFile, b: Buffer, max: int) -> Result<int, AioError> {
+    return intResult(rtaioread(f.handle, b.addr, clampLen(b, max)));
+}
+
+pub func fileWrite(f: AsyncFile, b: Buffer, len: int) -> Result<int, AioError> {
+    return intResult(rtaiowrite(f.handle, b.addr, clampLen(b, len)));
+}
+
+pub func fileWriteText(f: AsyncFile, text: string) -> Result<int, AioError> {
+    return intResult(rtaiowritetext(f.handle, text));
+}
+
+/// whence: 0 from start, 1 from current position, 2 from end. Returns the new position.
+pub func fileSeek(f: AsyncFile, offset: int, whence: int) -> Result<int, AioError> {
+    return intResult(rtaiofileseek(f.handle, offset, whence));
+}
+
+pub func fileFlush(f: AsyncFile) -> Result<int, AioError> {
+    return intResult(rtaioflush(f.handle));
+}
+
+pub func fileClose(f: AsyncFile) -> Result<int, AioError> {
+    return intResult(rtaioclose(f.handle));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Owning guards (RAII). The plain handle structs above are non-owning views: copies can be made
+// freely and nothing closes behind your back. A guard owns its object and releases it when the
+// guard goes out of scope (Drop): streams, listeners, sockets, files and channels are closed, and
+// a scoped task is cancelled and released (structured concurrency). Closing explicitly first is
+// fine - the runtime's generation-checked handles make the guard's later close a no-op.
+// Take a borrowed view with streamOf/listenerOf/udpOf/fileOf/channelOf/taskOf.
+// ---------------------------------------------------------------------------------------------
+
+pub struct OwnedStream { int handle; }
+pub struct OwnedListener { int handle; }
+pub struct OwnedUdp { int handle; }
+pub struct OwnedFile { int handle; }
+pub struct OwnedChannel { int handle; }
+pub struct ScopedTask { int handle; }
+
+impl Drop for OwnedStream {
+    func drop(self) {
+        rtaioclose(self.handle);
+    }
+}
+
+impl Drop for OwnedListener {
+    func drop(self) {
+        rtaioclose(self.handle);
+    }
+}
+
+impl Drop for OwnedUdp {
+    func drop(self) {
+        rtaioclose(self.handle);
+    }
+}
+
+impl Drop for OwnedFile {
+    func drop(self) {
+        rtaioclose(self.handle);
+    }
+}
+
+impl Drop for OwnedChannel {
+    func drop(self) {
+        rtaioclose(self.handle);
+    }
+}
+
+impl Drop for ScopedTask {
+    func drop(self) {
+        rtaiocancel(self.handle);
+        rtaiorelease(self.handle);
+    }
+}
+
+pub func ownStream(s: TcpStream) -> OwnedStream { return OwnedStream { handle: s.handle }; }
+pub func ownListener(l: TcpListener) -> OwnedListener { return OwnedListener { handle: l.handle }; }
+pub func ownUdp(u: UdpSocket) -> OwnedUdp { return OwnedUdp { handle: u.handle }; }
+pub func ownFile(f: AsyncFile) -> OwnedFile { return OwnedFile { handle: f.handle }; }
+pub func ownChannel(c: Channel) -> OwnedChannel { return OwnedChannel { handle: c.handle }; }
+pub func scoped(t: Task) -> ScopedTask { return ScopedTask { handle: t.handle }; }
+
+pub func streamOf(g: OwnedStream) -> TcpStream { return TcpStream { handle: g.handle }; }
+pub func listenerOf(g: OwnedListener) -> TcpListener { return TcpListener { handle: g.handle }; }
+pub func udpOf(g: OwnedUdp) -> UdpSocket { return UdpSocket { handle: g.handle }; }
+pub func fileOf(g: OwnedFile) -> AsyncFile { return AsyncFile { handle: g.handle }; }
+pub func channelOf(g: OwnedChannel) -> Channel { return Channel { handle: g.handle }; }
+pub func taskOf(g: ScopedTask) -> Task { return Task { handle: g.handle }; }

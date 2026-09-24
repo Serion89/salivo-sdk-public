@@ -1,0 +1,79 @@
+# Salivo Stage 36.1 async runtime ABI - the single canonical definition.
+#
+# Consumers (none of them keep a second copy of this table):
+#   crates/salivo_semantic   declares every intrinsic from it (include_str!)
+#   crates/salivo_backend    maps intrinsic -> C symbol from it (include_str!)
+#   compiler/stage3          reads it at compile time (runtimeIntrinsic)
+#   scripts/stage36_1.py     verifies the C definitions against it and emits the ABI manifest
+#
+# Backends: Windows (IOCP + fibers), POSIX (epoll on Linux / poll(2) elsewhere + ucontext fibers).
+#
+# Every parameter and return value is a 64-bit integer (`int`) or a NUL-terminated UTF-8 pointer
+# (`string`). Runtime objects cross the boundary only as opaque generation-tagged handles, so no
+# aggregate layout crosses it. Negative `int` results are error codes (see AIO_ERRORS).
+#
+# Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
+@abi_version 36102
+@errors 0:Ok,-1:WouldBlock,-2:Eof,-3:ConnectionReset,-4:Timeout,-5:Cancelled,-6:Closed,-7:InvalidArgument,-8:Os,-9:Shutdown,-10:InvalidHandle,-11:Full,-12:Unsupported,-13:NotInTask,-14:ConnectionRefused,-15:AddressInUse,-16:Truncated,-17:TaskFailed
+rtaioabiversion|salivo_aio_abi_version|int||never|any thread|none
+rtaiocreate|salivo_aio_create|int|int|never|any thread; up to 32 live runtimes|caller owns the runtime handle until rtaiodestroy
+rtaiouse|salivo_aio_use|int|int|never|calling OS thread|selects the runtime handle-less calls from this thread use (0 clears); tasks always use their own runtime
+rtaiostart|salivo_aio_start|int|int|never|any thread|starts runtime-owned workers, reactor and blocking pool
+rtaiorun|salivo_aio_run|int|int,int,int|parks the calling OS thread (never a worker)|non-worker threads|root task owned by the runtime; result via rtaiolastvalue
+rtaioshutdown|salivo_aio_shutdown|int|int|never|any thread|cancels every live task; later spawns fail with Shutdown
+rtaiojoin|salivo_aio_join|int|int,int|parks the calling OS thread|non-worker threads|joins every runtime-owned OS thread; timeout -1 waits forever
+rtaiodestroy|salivo_aio_destroy|int|int|never|any thread after rtaiojoin|frees all runtime-owned objects; the handle becomes invalid
+rtaiostat|salivo_aio_stat|int|int,int|never|any thread|read-only counters derived from live runtime state
+rtaiolastvalue|salivo_aio_last_value|int||never|task-local (fiber) or thread-local|value produced by the caller's previous successful operation
+rtaiolasttext|salivo_aio_last_text_str|string||never|task-local or thread-local|hands the last received text to the caller (once)
+rtaiolastpeer|salivo_aio_last_peer_str|string||never|task-local or thread-local|textual address of the last datagram sender; new string owned by the caller
+rtaiolastoserror|salivo_aio_last_os_error|int||never|task-local or thread-local|OS error code behind the caller's previous Os error
+rtaioworkerid|salivo_aio_worker_id|int||never|any thread|none
+rtaiospawn|salivo_aio_spawn|int|int,int|never|any thread|caller owns the task handle; release with rtaiorelease
+rtaiospawnon|salivo_aio_spawn_on|int|int,int,int|never|any thread|spawns on an explicit runtime; caller owns the task handle
+rtaioawait|salivo_aio_await|int|int|suspends the task; parks a non-worker thread|any thread|borrows the handle; result via rtaiolastvalue
+rtaioawaittimeout|salivo_aio_await_timeout|int|int,int|suspends the task; parks a non-worker thread|any thread|borrows the handle; on Timeout the target task is cancelled
+rtaiorelease|salivo_aio_release|int|int|never|any thread|consumes the handle; the task is freed once it is also terminal
+rtaiocancel|salivo_aio_cancel|int|int|never|any thread|borrows the handle
+rtaioiscancelled|salivo_aio_is_cancelled|int|int|never|any thread|0 means the calling task; observing true marks the task Cancelled
+rtaiotaskstate|salivo_aio_task_state|int|int|never|any thread|borrows the handle
+rtaioyield|salivo_aio_yield|int||suspends the task until rescheduled|task only|none
+rtaiosafepoint|salivo_aio_safepoint|int||yields only when the time slice expired|task only|inserted by the compiler at loop back-edges of programs that import salivo.std.runtime
+rtaiocurrent|salivo_aio_current|int||never|any thread|returns a borrowed handle of the calling task (0 outside tasks)
+rtaiofail|salivo_aio_fail|int|int|never|task only|marks the calling task Failed with the code when it returns
+rtaiosleep|salivo_aio_sleep|int|int|suspends the task on a runtime timer; parks a non-worker thread|any thread|timer node lives in the caller frame and is unlinked before return
+rtaioblocking|salivo_aio_blocking|int|int,int|runs on the bounded blocking pool; suspends the task|any thread|result via rtaiolastvalue
+rtaiochannew|salivo_aio_chan_new|int|int|never|any thread|caller owns the channel handle; capacity 0 means unbounded
+rtaiochansend|salivo_aio_chan_send|int|int,int|suspends while a bounded channel is full|any thread|borrows the handle
+rtaiochantrysend|salivo_aio_chan_try_send|int|int,int|never|any thread|borrows the handle
+rtaiochanrecv|salivo_aio_chan_recv|int|int|suspends while the channel is empty|any thread|value via rtaiolastvalue
+rtaiochantryrecv|salivo_aio_chan_try_recv|int|int|never|any thread|value via rtaiolastvalue
+rtaiochanclose|salivo_aio_chan_close|int|int|never|any thread|closes for sending; buffered values stay receivable
+rtaiochanlen|salivo_aio_chan_len|int|int|never|any thread|borrows the handle
+rtaiochannewtext|salivo_aio_chan_new_text|int|int|never|any thread|caller owns the text channel handle; the channel owns buffered strings (copies)
+rtaiochansendtext|salivo_aio_chan_send_text|int|int,string|suspends while a bounded channel is full|any thread|copies the text; an undelivered copy is freed
+rtaiochantrysendtext|salivo_aio_chan_try_send_text|int|int,string|never|any thread|copies the text; an undelivered copy is freed
+rtaiochanrecvtext|salivo_aio_chan_recv_text|int|int|suspends while the channel is empty|any thread|received text via rtaiolasttext
+rtaiochantryrecvtext|salivo_aio_chan_try_recv_text|int|int|never|any thread|received text via rtaiolasttext
+rtaiotcplisten|salivo_aio_tcp_listen|int|string,int,int|never (numeric hosts); name lookup runs on the blocking pool|any thread|caller owns the listener handle
+rtaiotcpaccept|salivo_aio_tcp_accept|int|int|suspends until a connection arrives|any thread|caller owns the returned stream handle
+rtaiotcpconnect|salivo_aio_tcp_connect|int|string,int|suspends until connected|any thread|caller owns the returned stream handle
+rtaioread|salivo_aio_read|int|int,int,int|suspends until data, EOF or error|one reader per handle at a time|reads at most cap bytes into caller-owned memory
+rtaiowrite|salivo_aio_write|int|int,int,int|suspends until every byte is written|one writer per handle at a time|writes len bytes from caller-owned memory
+rtaiowritetext|salivo_aio_write_text|int|int,string|suspends until every byte is written|one writer per handle at a time|writes the UTF-8 bytes of text (without the NUL)
+rtaiotcpshutdown|salivo_aio_tcp_shutdown|int|int|never|any thread|half-closes the sending direction
+rtaioclose|salivo_aio_close|int|int|never for sockets; file close runs on the blocking pool|any thread|consumes the handle; a second close returns InvalidHandle
+rtaiolocalport|salivo_aio_local_port|int|int|never|any thread|borrows the handle
+rtaioudpbind|salivo_aio_udp_bind|int|string,int|never|any thread|caller owns the socket handle
+rtaioudpsendto|salivo_aio_udp_send_to|int|int,int,int,string,int|suspends until the datagram is queued|any thread|reads len bytes from caller-owned memory
+rtaioudprecvfrom|salivo_aio_udp_recv_from|int|int,int,int|suspends until a datagram arrives|any thread|peer endpoint (ipv4 * 65536 + port) via rtaiolastvalue
+rtaiofileopen|salivo_aio_file_open|int|string,int|runs on the blocking pool; suspends the task|any thread|caller owns the file handle
+rtaiofileseek|salivo_aio_file_seek|int|int,int,int|never|one user per handle at a time|borrows the handle
+rtaioflush|salivo_aio_flush|int|int|runs on the blocking pool; suspends the task|any thread|borrows the handle
+rtaiobufnew|salivo_aio_buf_new|int|int|never|any thread|caller owns the buffer; free with rtaiobuffree
+rtaiobuffree|salivo_aio_buf_free|int|int|never|any thread|consumes the buffer
+rtaiobufget|salivo_aio_buf_get|int|int,int|never|any thread|borrows the buffer
+rtaiobufset|salivo_aio_buf_set|int|int,int,int|never|any thread|borrows the buffer
+rtaiobufputtext|salivo_aio_buf_put_text|int|int,int,string|never|any thread|copies at most cap bytes of text into the buffer
+rtaiobufstr|salivo_aio_buf_str|string|int,int|never|any thread|returns a new heap string owned by the caller
+rtaioerrorname|salivo_aio_error_name_str|string|int|never|any thread|returns a static string

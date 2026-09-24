@@ -1,0 +1,8 @@
+module app.ci;
+
+><salivo.std.core::{outln};
+
+func main() -> int {
+    outln("Hello from Salivo CI!");
+    return 0;
+}

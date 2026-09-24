@@ -7,10 +7,10 @@
 **High-Performance, Memory-Safe Systems Programming Language**  
 *Stream Imports (><) | Deterministic RAII | Native LLVM Codegen | Zero-Cost Collections | Universal AI-Ready*
 
-[![Version](https://img.shields.io/badge/version-v0.1.0-blue.svg)](https://github.com/Serion89/salivo-sdk-public)
+[![Version](https://img.shields.io/badge/version-v1.0.9-blue.svg)](https://github.com/Serion89/salivo-sdk-public)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-brightgreen.svg)](https://github.com/Serion89/salivo-sdk-public)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
-[![LLVM](https://img.shields.io/badge/backend-LLVM%2018-red.svg)](https://llvm.org)
+[![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
 [![AI-Ready](https://img.shields.io/badge/AI-Universal%20Ready-orange.svg)](#universal-ai-integration)
 
 </div>
@@ -27,29 +27,29 @@ This repository provides the official standalone **Salivo SDK & Toolchain for Wi
 
 ## Quick Start (1-Click Install)
 
-### Option 1: Automated 1-Click Installer (Recommended)
+1. Download **`salivo-sdk-1.0.9-windows-x64.zip`** from the
+   [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
+2. Double-click **`Salivo Setup.exe`** (it carries the Salivo logo). Windows may say "Windows protected
+   your PC" because the installer is not code-signed: click **More info > Run anyway**.
+3. Open a new terminal or restart VS Code, then run `sf run examples/hello.sal`.
 
-1. Clone or download this repository.
-2. Double-click **`install.bat`**.
-3. Reopen your terminal or VS Code.
+Setup (no admin rights needed):
+- Installs the toolchain into `%USERPROFILE%\.salivo` and adds `sf` to your user `PATH`.
+- Installs the **self-hosted Stage 3 compiler** that `sf` uses by default, with its runtime.
+- Installs the **VS Code extension** (syntax highlighting, snippets, file icons, Ctrl+F5 run, Ctrl+Shift+B build).
+- Gives `.sal` files the Salivo icon in File Explorer.
+- Finishes by compiling and running a test program.
 
-`install.bat` automatically:
-- Installs the Salivo toolchain to `%USERPROFILE%\.salivo\bin\`.
-- Adds Salivo permanently to your Windows User `PATH`.
-- Deploys the official standard library to `%USERPROFILE%\.salivo\lib\salivo\std\`.
-- Installs the official Salivo VS Code extension into `%USERPROFILE%\.vscode\extensions\`.
-- Globally trains your local AI coding assistants (Antigravity, Cursor, Copilot, Windsurf, Claude Code).
+**Prerequisites.** Salivo produces native executables with clang and the Microsoft C++ libraries.
+Setup detects both and offers to install whichever is missing:
+- LLVM (clang): `winget install -e --id LLVM.LLVM`
+- Visual Studio 2022 C++ build tools:
+  `winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`
 
-### Option 2: Manual Installation (30 Seconds)
+Cloning this repository also works (`install.bat` runs the same installer), but the release zip is the
+complete SDK: it also contains `bin/LLVM-C.dll`, which is too large to keep in git.
 
-1. Add the `bin/` directory from this repository to your system `PATH`:
-   ```powershell
-   [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\path\to\salivo-sdk-public\bin", "User")
-   ```
-2. Verify the installation:
-   ```bash
-   sf version
-   ```
+To uninstall: `powershell -ExecutionPolicy Bypass -File uninstall.ps1`.
 
 ---
 
@@ -57,14 +57,16 @@ This repository provides the official standalone **Salivo SDK & Toolchain for Wi
 
 | Tool | Executable | Description |
 | :--- | :--- | :--- |
-| **Compiler Driver** | `bin/sf.exe` | Multi-stage optimizing compiler, JIT runner, and LLVM codegen |
+| **Compiler Driver** | `bin/sf.exe` | Builds and runs programs; checks them and hands code generation to Stage 3 |
+| **Stage 3 Compiler** | `bin/salivoc.exe` | The self-hosted Salivo compiler (written in Salivo) that generates native code |
 | **Package Manager** | `bin/spm.exe` | Dependency resolver, workspace coordinator, and project scaffold |
 | **Language Server** | `bin/salivo-lsp.exe` | Real-time diagnostics, autocomplete, definitions, and hover docs |
 | **Linter** | `bin/salivolint.exe` | Static safety checks, dead code analysis, and style enforcement |
 | **Formatter** | `bin/salivofmt.exe` | Canonical AST-aware code formatting |
 | **Documentation** | `bin/salivodoc.exe` | Automated markdown & HTML documentation generator |
 | **Standard Library** | `std/` | Production standard library (Collections, IO, Net, Concurrency, etc.) |
-| **VS Code Extension** | `vscode-extension/` | Official syntax highlighting, snippets, and execution integration |
+| **Stage 3 Runtime** | `stage3/` | Runtime sources and prebuilt objects linked into every program |
+| **VS Code Extension** | `vscode/salivo-1.0.9.vsix` | Syntax highlighting, snippets, file icons, and run/build/check commands |
 | **AI Rulebooks** | `.cursorrules`, `CLAUDE.md`, `AGENTS.md` | Pre-trained guidelines for any AI pair-programmer |
 
 ---
@@ -245,10 +247,11 @@ salivolint src/
 
 ```
 salivo-sdk-public/
-|-- .github/              # GitHub workflows & Copilot rules
+|-- .github/              # Copilot rules
 |-- assets/               # Official brand graphics & icons
 |-- bin/                  # Precompiled 64-bit Windows executables
-|   |-- sf.exe            # Compiler driver & JIT runner
+|   |-- sf.exe            # Compiler driver
+|   |-- salivoc.exe       # Self-hosted Stage 3 compiler
 |   |-- spm.exe           # Package manager
 |   |-- salivofmt.exe     # Canonical code formatter
 |   |-- salivolint.exe    # Linter and static analyzer
@@ -256,26 +259,20 @@ salivo-sdk-public/
 |   `-- salivo-lsp.exe    # Language Server Protocol engine
 |-- commands/             # Universal agent slash commands
 |-- docs/                 # Language guides, references & manuals
-|   |-- SALIVO_GUIDE.pdf  # Comprehensive language book (PDF)
-|   |-- SALIVO_GUIDE.html # Interactive web guide
-|   `-- salivo_quick_reference.md # Complete syntax cheat sheet
+|-- examples/             # hello.sal
 |-- mcp/                  # Model Context Protocol server
 |-- skills/               # Reusable AI agent skills
+|-- stage3/               # Stage 3 runtime sources and prebuilt objects
 |-- std/                  # Official Salivo Standard Library
-|   |-- core.sal          # Primitives, formatting, exit, assertions
-|   |-- collections.sal   # Vec, HashMap, Deque, HashSet
-|   |-- fs.sal            # File system, directories, paths
-|   |-- io.sal            # Console I/O, buffered readers
-|   |-- net.sal           # TCP/UDP sockets, client/server
-|   |-- sync.sal          # Mutex, RWLock, Channels, Atomics
-|   |-- crypto.sal        # SHA-256, hashing routines
-|   `-- time.sal          # High-resolution timers and sleep
-|-- vscode-extension/     # Official VS Code extension package
+|-- vscode/               # VS Code extension (.vsix)
 |-- .cursorrules          # Cursor AI configuration
 |-- .windsurfrules        # Windsurf configuration
 |-- AGENTS.md             # Autonomous agent instruction set
 |-- CLAUDE.md             # Anthropic Claude Code configuration
-|-- install.bat           # 1-click Windows automated installer
+|-- Salivo Setup.exe      # 1-click installer (runs install.ps1)
+|-- install.ps1           # Installer
+|-- install.bat           # Runs install.ps1
+|-- uninstall.ps1         # Uninstaller
 |-- salivo_logo.png       # Official emblem
 `-- README.md             # This document
 ```

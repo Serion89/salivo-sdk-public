@@ -240,7 +240,8 @@ pub func get<T>(Vec<T> v, int index) -> T {
     }
     let elemsize = strideof<T>();
     let elemoffset = 32 + (index * elemsize);
-    return cloneval<T>(v.buffer_address, elemoffset);
+    // A borrowed view of the element (no copy): the Vec keeps ownership, as with `&v[i]`
+    return readval<T>(v.buffer_address, elemoffset);
 }
 
 pub func getRef<T>(Vec<T> v, int index) -> int {
@@ -1310,6 +1311,15 @@ pub func mapPut<K, V>(map: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> {
     return put<K, V>(map, key, val);
 }
 
+/// Value stored under key, or fallback when the key is absent. Unlike lookup it builds no Option.
+pub func lookupOr<K, V>(map: HashMap<K, V>, key: K, fallback: V) -> V {
+    let found = lookup<K, V>(map, key);
+    if (found.is_some) {
+        return found.value;
+    }
+    return fallback;
+}
+
 pub func lookup<K, V>(map: HashMap<K, V>, key: K) -> Option<V> {
     if (map.length == 0 || map.bucket_count == 0) {
         return none<V>();
@@ -1510,11 +1520,35 @@ pub func mapRemove<K, V>(map: HashMap<K, V>, key: K) -> HashMap<K, V> {
 }
 
 pub func maplen<K, V>(map: HashMap<K, V>) -> int {
-    return map.length;
+    if (map.length == 0 || map.bucket_count == 0 || map.buckets_address == 0) {
+        return 0;
+    }
+    let kstride = strideof<K>();
+    let vstride = strideof<V>();
+    let kalign = alignof<K>();
+    let valign = alignof<V>();
+    let mut balign = 8;
+    if (kalign > balign) { balign = kalign; }
+    if (valign > balign) { balign = valign; }
+    let key_offset = (16 + kalign - 1) / kalign * kalign;
+    let val_offset = (key_offset + kstride + valign - 1) / valign * valign;
+    let rawstride = val_offset + vstride;
+    let bucket_stride = (rawstride + balign - 1) / balign * balign;
+
+    let mut count = 0;
+    let mut i = 0;
+    while (i < map.bucket_count) {
+        let occ = readi64(map.buckets_address, i * bucket_stride);
+        if (occ == 1) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
 }
 
 pub func mapIsEmpty<K, V>(map: HashMap<K, V>) -> bool {
-    return map.length == 0;
+    return maplen<K, V>(map) == 0;
 }
 
 pub func mapClear<K, V>(map: HashMap<K, V>) -> HashMap<K, V> {

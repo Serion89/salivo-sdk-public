@@ -57,6 +57,30 @@ pub func active_allocations() -> int {
     return activeAllocations();
 }
 
+/// Marks the string arena; arenaReset(mark) reclaims every string this thread allocated since the mark.
+/// Only safe when none of those strings are used after the reset. No-op on runtimes without an arena.
+pub func arenaMark() -> int {
+    return 0;
+}
+
+pub func arenaReset(mark: int) -> int {
+    return mark - mark;
+}
+
+/// Process-wide string memo table for compiler passes. scratchCacheGet returns "" on a miss;
+/// runtimes without the table always miss, so callers must treat it purely as a cache.
+pub func scratchCacheClear() -> int {
+    return 0;
+}
+
+pub func scratchCacheGet(key: string) -> string {
+    return "";
+}
+
+pub func scratchCachePut(key: string, value: string) -> int {
+    return 0;
+}
+
 // -----------------------------------------------------------------------------
 // Pointer & Memory Primitive Representations
 // -----------------------------------------------------------------------------

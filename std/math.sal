@@ -88,17 +88,7 @@ pub func pow(int base_val, int exp_val) -> int {
 
 /// Square root of float
 pub func sqrt(float v) -> float {
-    if (v < 0.0) {
-        return NAN_VAL;
-    }
-    // Newton-Raphson square root approximation
-    let x = v;
-    let i = 0;
-    while (i < 10) {
-        x = 0.5 * (x + v / x);
-        i = i + 1;
-    }
-    return x;
+    return rtsqrt(v);
 }
 
 /// Cube root of float (Newton-Raphson)

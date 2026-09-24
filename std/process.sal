@@ -16,3 +16,16 @@ pub func system(string cmd) -> int {
     return rtsystem(cmd);
 }
 
+/// Splits an LLVM IR file into per-core parts (<path>.p<k>.ll) for parallel compilation.
+/// Returns the part count (one per CPU when parts <= 0), or 0 when the file could not be split.
+/// A module too small to split becomes a single part (count 1) in which every function but main
+/// is internal, for whole-program optimization.
+pub func splitIrModule(path: string, parts: int) -> int {
+    return rtsplitirmodule(path, parts);
+}
+
+/// Runs newline-separated shell commands concurrently; returns 0 when all succeed, else the first failing exit code.
+pub func runParallel(cmds: string) -> int {
+    return rtrunparallel(cmds);
+}
+
