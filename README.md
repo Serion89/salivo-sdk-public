@@ -550,24 +550,23 @@ Salivo is distributed under the **Business Source License 1.1**. See [LICENSE](L
 
 ## Author & Maintainer
 
-<table border="0">
+<table>
   <tr>
-    <td width="100" align="center" valign="middle">
+    <td width="90" align="center" valign="middle">
       <a href="https://github.com/Serion89">
-        <img src="https://avatars.githubusercontent.com/u/205588838?v=4" width="85" height="85" style="border-radius: 50%;" alt="Sahil Bhatt" />
+        <img src="https://avatars.githubusercontent.com/u/205588838?v=4" width="80" height="80" style="border-radius: 50%;" alt="Sahil Bhatt" />
       </a>
     </td>
     <td valign="middle">
       <h3>Sahil Bhatt</h3>
-      <p>Software Developer | Compiler & Systems Engineer | AI</p>
-      <p>Founder, <strong>Salivo Enterprises Pvt, Ltd.</strong></p>
+      <p>Software Developer &bull; Compiler &amp; Systems Engineer &bull; AI</p>
       <p>
         <a href="https://github.com/Serion89">
-          <img src="https://img.shields.io/badge/GitHub-Serion89-181717?style=for-the-badge&logo=github" alt="GitHub Profile" />
+          <img src="https://img.shields.io/badge/GitHub-Serion89-181717?style=flat-square&logo=github" alt="GitHub Profile" />
         </a>
         &nbsp;
         <a href="https://github.com/Serion89">
-          <img src="https://img.shields.io/github/followers/Serion89?label=Follow&style=for-the-badge&logo=github&color=24292e" alt="Followers" />
+          <img src="https://img.shields.io/github/followers/Serion89?label=Followers&style=flat-square&logo=github&color=24292e" alt="Followers" />
         </a>
       </p>
     </td>
