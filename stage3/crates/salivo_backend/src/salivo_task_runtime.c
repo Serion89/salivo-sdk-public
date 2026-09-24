@@ -75,8 +75,9 @@ void (*salivo_aio_blocking_hook)(const char* what) = 0;
 
 void rtpanic(const char* msg) {
     printf("panic: %s\n", msg ? msg : "Assertion failed");
-    fflush(stdout);
-    exit(1);
+    fflush(NULL);
+    /* _Exit, not exit: async worker threads may still be running; CRT teardown would race them */
+    _Exit(1);
 }
 
 #ifdef _WIN32

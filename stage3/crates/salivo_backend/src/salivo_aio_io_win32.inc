@@ -15,6 +15,10 @@
  * An operation that completed despite the cancellation returns its real result (no data loss).
  */
 
+#ifndef SO_REUSE_UNICASTPORT
+#define SO_REUSE_UNICASTPORT 0x3007
+#endif
+
 #define SA_KEY_IO 1
 #define SA_KEY_WAKE 2
 
@@ -350,6 +354,12 @@ int64_t salivo_aio_tcp_connect(const char* host, int64_t port) {
     int fam = addr.ss.ss_family;
     SOCKET s = sa_socket(fam, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return sa_map_err(WSAGetLastError(), 0);
+    /* ConnectEx needs a bound socket, and bind(port 0) would reserve an ephemeral port for every
+     * destination. SO_REUSE_UNICASTPORT defers the choice to connect time so ports are shared
+     * across destinations; without it, bursts of short connections exhaust the ephemeral range
+     * while closed connections sit in TIME_WAIT. */
+    DWORD reuse = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSE_UNICASTPORT, (const char*)&reuse, sizeof(reuse));
     memset(&any, 0, sizeof(any));
     any.ss.ss_family = (ADDRESS_FAMILY)fam;
     any.len = fam == AF_INET6 ? (int)sizeof(struct sockaddr_in6) : (int)sizeof(struct sockaddr_in);

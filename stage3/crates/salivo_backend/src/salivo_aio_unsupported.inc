@@ -1,6 +1,6 @@
 /* Salivo Stage 36.1 async runtime - platforms without a backend.
  *
- * Stage 36.1 ships only the Windows (IOCP) backend. Every entry point here fails with
+ * Platforms without a Stage 36.1 backend (Windows IOCP, POSIX epoll/poll). Every entry point here fails with
  * Unsupported (-12) so a program on another platform fails clearly instead of silently
  * running a fake runtime. Generated from salivo_aio_abi.def (scripts/stage36_1.py --gen-stubs).
  */
@@ -10,7 +10,7 @@ static int64_t sa_unsupported(void) {
     static int warned;
     if (!warned) {
         warned = 1;
-        fprintf(stderr, "[salivo-aio] async runtime backend not available on this platform (Stage 36.1: Windows only)\n");
+        fprintf(stderr, "[salivo-aio] async runtime backend not available on this platform (Stage 36.1 backends: Windows, Linux, macOS)\n");
     }
     return -12;
 }
@@ -76,4 +76,10 @@ int64_t salivo_aio_buf_get(int64_t a0, int64_t a1) { (void)a0; (void)a1; return 
 int64_t salivo_aio_buf_set(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
 int64_t salivo_aio_buf_put_text(int64_t a0, int64_t a1, const char* a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
 char* salivo_aio_buf_str(int64_t a0, int64_t a1) { (void)a0; (void)a1; sa_unsupported(); return (char*)"Unsupported"; }
+int64_t salivo_aio_arg_new(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_arg_set_int(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_arg_set_text(int64_t a0, int64_t a1, const char* a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_arg_int(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+char* salivo_aio_arg_get_str(int64_t a0, int64_t a1) { (void)a0; (void)a1; sa_unsupported(); return (char*)"Unsupported"; }
+int64_t salivo_aio_arg_free(int64_t a0) { (void)a0; return sa_unsupported(); }
 char* salivo_aio_error_name_str(int64_t a0) { (void)a0; sa_unsupported(); return (char*)"Unsupported"; }

@@ -1,0 +1,3110 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Salivo Programming Language Manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+    --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', Consolas, monospace;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 16px;
+    --transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-theme="dark"] {
+    --bg-base: #090d16;
+    --bg-surface: #0f172a;
+    --bg-card: #131d33;
+    --bg-code: #0b1120;
+    --border: #1e293b;
+    --border-light: #334155;
+    --text-main: #f1f5f9;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --primary: #38bdf8;
+    --primary-glow: rgba(56, 189, 248, 0.15);
+    --accent: #a855f7;
+    --success: #34d399;
+    --shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+    --badge-bg: rgba(56, 189, 248, 0.12);
+    --badge-text: #38bdf8;
+
+    /* Inline Code Tokens - Glowing translucent pill, crisp cyan text, NO heavy dark box */
+    --code-inline-bg: rgba(56, 189, 248, 0.10);
+    --code-inline-border: rgba(56, 189, 248, 0.28);
+    --code-inline-text: #7dd3fc;
+
+    /* Table Tokens */
+    --table-bg: #0f172a;
+    --table-th-bg: #131d33;
+    --table-border: #1e293b;
+    --table-td-text: #cbd5e1;
+    --table-row-hover: rgba(56, 189, 248, 0.04);
+}
+
+[data-theme="light"] {
+    --bg-base: #f8fafc;
+    --bg-surface: #ffffff;
+    --bg-card: #f1f5f9;
+    --bg-code: #f8fafc;
+    --border: #e2e8f0;
+    --border-light: #cbd5e1;
+    --text-main: #0f172a;
+    --text-muted: #475569;
+    --text-dim: #94a3b8;
+    --primary: #0284c7;
+    --primary-glow: rgba(2, 132, 199, 0.12);
+    --accent: #9333ea;
+    --success: #059669;
+    --shadow: 0 10px 30px -10px rgba(0,0,0,0.06);
+    --badge-bg: #e0f2fe;
+    --badge-text: #0369a1;
+
+    /* Inline Code Tokens - Elegant light slate pill with sharp, high-contrast dark blue text */
+    --code-inline-bg: #f1f5f9;
+    --code-inline-border: #cbd5e1;
+    --code-inline-text: #0369a1;
+
+    /* Table Tokens */
+    --table-bg: #ffffff;
+    --table-th-bg: #f8fafc;
+    --table-border: #e2e8f0;
+    --table-td-text: #334155;
+    --table-row-hover: #f8fafc;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html {
+    scroll-behavior: smooth;
+    font-size: 16px;
+}
+
+body {
+    font-family: var(--font-main);
+    background-color: var(--bg-base);
+    color: var(--text-main);
+    line-height: 1.7;
+    overflow-x: hidden;
+    transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.navbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 64px;
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 28px;
+    z-index: 1000;
+}
+
+[data-theme="light"] .navbar {
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-decoration: none;
+    color: var(--text-main);
+    font-weight: 800;
+    font-size: 1.25rem;
+    letter-spacing: -0.02em;
+}
+
+.nav-brand-logo {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #38bdf8, #a855f7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 900;
+    font-size: 1rem;
+    box-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+}
+
+.nav-version-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: var(--badge-bg);
+    color: var(--badge-text);
+    padding: 2px 8px;
+    border-radius: 20px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.nav-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.search-trigger {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 7px 14px;
+    border-radius: var(--radius-md);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.search-trigger:hover {
+    border-color: var(--primary);
+    color: var(--text-main);
+}
+
+.search-trigger kbd {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+}
+
+.icon-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.icon-btn:hover {
+    border-color: var(--primary);
+    transform: translateY(-1px);
+}
+
+.app-layout {
+    display: flex;
+    margin-top: 64px;
+    min-height: calc(100vh - 64px);
+}
+
+.sidebar {
+    width: 300px;
+    position: fixed;
+    top: 64px;
+    bottom: 0;
+    left: 0;
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 24px 18px;
+    z-index: 100;
+}
+
+.sidebar::-webkit-scrollbar {
+    width: 5px;
+}
+.sidebar::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 10px;
+}
+
+.nav-group {
+    margin-bottom: 22px;
+}
+
+.nav-group-title {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--primary);
+    margin-bottom: 8px;
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    transition: var(--transition);
+}
+
+.nav-group-title:hover {
+    background: var(--primary-glow);
+}
+
+.nav-sublist {
+    list-style: none;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
+    margin-left: 8px;
+}
+
+.nav-link {
+    display: block;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: var(--radius-sm);
+    transition: var(--transition);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.nav-link:hover {
+    color: var(--text-main);
+    background: var(--primary-glow);
+    padding-left: 14px;
+}
+
+.single-link {
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.main-wrapper {
+    margin-left: 300px;
+    flex: 1;
+    padding: 40px 60px 100px 60px;
+    max-width: 1200px;
+}
+
+@media (max-width: 1024px) {
+    .sidebar {
+        display: none;
+    }
+    .main-wrapper {
+        margin-left: 0;
+        padding: 30px 20px;
+    }
+}
+
+.content-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 48px;
+    box-shadow: var(--shadow);
+}
+
+@media (max-width: 768px) {
+    .content-card {
+        padding: 24px;
+    }
+}
+
+.doc-h1 {
+    font-size: 2.3rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--text-main);
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, var(--text-main), var(--primary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.doc-h2 {
+    font-size: 1.55rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-main);
+    margin-top: 36px;
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.doc-h3 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--primary);
+    margin-top: 24px;
+    margin-bottom: 10px;
+}
+
+.doc-h4 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text-main);
+    margin-top: 18px;
+    margin-bottom: 8px;
+}
+
+.doc-p {
+    margin-bottom: 16px;
+    color: var(--text-muted);
+    font-size: 1.02rem;
+}
+
+.doc-p strong, .doc-list strong {
+    color: var(--text-main);
+}
+
+.doc-list {
+    margin-bottom: 20px;
+    padding-left: 24px;
+    color: var(--text-muted);
+}
+
+.doc-list li {
+    margin-bottom: 8px;
+}
+
+.doc-hr {
+    border: 0;
+    height: 1px;
+    background: var(--border);
+    margin: 36px 0;
+}
+
+.doc-spacer {
+    height: 8px;
+}
+
+code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--code-inline-bg);
+    border: 1px solid var(--code-inline-border);
+    padding: 2px 7px;
+    border-radius: 5px;
+    color: var(--code-inline-text);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+
+.table-container {
+    overflow-x: auto;
+    margin: 24px 0;
+    border: 1px solid var(--table-border);
+    border-radius: var(--radius-md);
+    background: var(--table-bg);
+    box-shadow: var(--shadow);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    text-align: left;
+}
+
+th {
+    background: var(--table-th-bg);
+    padding: 13px 18px;
+    font-weight: 700;
+    color: var(--text-main);
+    border-bottom: 2px solid var(--table-border);
+    border-right: 1px solid var(--table-border);
+}
+
+th:last-child {
+    border-right: none;
+}
+
+td {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--table-border);
+    border-right: 1px solid var(--table-border);
+    color: var(--table-td-text);
+    vertical-align: top;
+    line-height: 1.6;
+}
+
+td:last-child {
+    border-right: none;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr:hover {
+    background: var(--table-row-hover);
+}
+
+td strong {
+    color: var(--text-main);
+}
+
+.code-wrapper {
+    position: relative;
+    margin: 20px 0;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-code);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+}
+
+.code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: rgba(15, 23, 42, 0.6);
+    border-bottom: 1px solid var(--border);
+}
+
+.code-lang-tag {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.copy-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: var(--transition);
+}
+
+.copy-btn:hover {
+    color: var(--text-main);
+    border-color: var(--primary);
+}
+
+.code-block {
+    padding: 16px 20px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    line-height: 1.65;
+    color: #e2e8f0;
+}
+
+.code-block code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font-size: inherit;
+}
+
+/* Diagrams & Flowcharts */
+.diagram-wrapper {
+    background: radial-gradient(circle at top left, #0e172e, #070b14);
+    border: 1px solid #1e3a8a;
+    border-radius: var(--radius-md);
+    margin: 24px 0;
+    overflow: hidden;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,0.6), inset 0 0 20px rgba(56, 189, 248, 0.05);
+}
+[data-theme="light"] .diagram-wrapper {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    box-shadow: 0 8px 24px -6px rgba(0,0,0,0.08);
+}
+.diagram-header {
+    background: rgba(15, 23, 42, 0.85);
+    padding: 10px 16px;
+    border-bottom: 1px solid #1e3a8a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+[data-theme="light"] .diagram-header {
+    background: #f1f5f9;
+    border-bottom-color: #cbd5e1;
+}
+.diagram-tag {
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: #38bdf8;
+    text-transform: uppercase;
+}
+[data-theme="light"] .diagram-tag {
+    color: #0284c7;
+}
+.diagram-block {
+    padding: 20px;
+    font-family: var(--font-mono);
+    font-size: 0.84rem;
+    line-height: 1.42;
+    color: #7dd3fc;
+    overflow-x: auto;
+    white-space: pre;
+}
+[data-theme="light"] .diagram-block {
+    color: #0369a1;
+}
+
+/* Image Containers */
+.doc-image-box {
+    margin: 24px 0;
+    text-align: center;
+}
+.doc-img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+}
+.doc-img-caption {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    margin-top: 8px;
+    font-style: italic;
+}
+
+/* Syntax Highlighting */
+.c-kw { color: #f472b6; font-weight: 600; }
+.c-type { color: #38bdf8; }
+.c-string { color: #a3e635; }
+.c-comment { color: #64748b; font-style: italic; }
+.c-mod { color: #fb923c; font-weight: 600; }
+
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    z-index: 2000;
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 100px;
+}
+
+.modal-overlay.active {
+    display: flex;
+}
+
+.search-modal {
+    width: 100%;
+    max-width: 600px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    overflow: hidden;
+}
+
+.search-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+}
+
+.search-input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    color: var(--text-main);
+    font-size: 1.05rem;
+    font-family: var(--font-main);
+}
+
+.search-results {
+    max-height: 380px;
+    overflow-y: auto;
+    padding: 10px;
+}
+
+.search-result-item {
+    display: block;
+    padding: 12px 14px;
+    color: var(--text-main);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    margin-bottom: 4px;
+    transition: var(--transition);
+}
+
+.search-result-item:hover {
+    background: var(--primary-glow);
+}
+
+.toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 10px 18px;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow);
+    font-size: 0.88rem;
+    transform: translateY(100px);
+    opacity: 0;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 3000;
+}
+
+.toast.show {
+    transform: translateY(0);
+    opacity: 1;
+}
+
+/* Code header window dots */
+.code-dots {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.code-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.dot-red { background: #ef4444; }
+.dot-amber { background: #f59e0b; }
+.dot-green { background: #10b981; }
+
+.code-dots .code-lang-tag {
+    margin-left: 8px;
+}
+
+/* Book Cover Page (Screen) */
+.book-cover-page {
+    padding: 50px 40px;
+    background: linear-gradient(145deg, rgba(56, 189, 248, 0.06), rgba(168, 85, 247, 0.06));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    margin-bottom: 40px;
+    box-shadow: var(--shadow);
+}
+
+.cover-top-badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--primary);
+    background: var(--badge-bg);
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-bottom: 24px;
+}
+
+.cover-hero {
+    margin-bottom: 30px;
+}
+
+.cover-logo-img {
+    width: 80px;
+    height: 80px;
+    border-radius: 18px;
+    box-shadow: 0 10px 30px rgba(56, 189, 248, 0.4);
+    margin-bottom: 16px;
+    display: inline-block;
+    object-fit: contain;
+}
+
+.cover-timestamp-tag {
+    display: inline-block;
+    font-size: 0.76rem;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 700;
+    margin-top: 8px;
+    letter-spacing: 0.04em;
+}
+
+.cover-logo-mark {
+    font-family: var(--font-mono);
+    font-size: 2.5rem;
+    font-weight: 900;
+    color: #ffffff;
+    background: linear-gradient(135deg, #38bdf8, #a855f7);
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 20px;
+    box-shadow: 0 10px 25px rgba(56, 189, 248, 0.35);
+}
+
+.cover-main-title {
+    font-size: 2.6rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+    color: var(--text-main);
+    margin-bottom: 12px;
+}
+
+.cover-subtitle {
+    font-size: 1.2rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.cover-ver-tag {
+    font-size: 0.9rem;
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.cover-pillars-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    margin: 30px 0;
+}
+
+@media (max-width: 768px) {
+    .cover-pillars-grid { grid-template-columns: 1fr; }
+}
+
+.pillar-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 18px 20px;
+    transition: var(--transition);
+}
+
+.pillar-card:hover {
+    border-color: var(--primary);
+    transform: translateY(-2px);
+}
+
+.pillar-num {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 800;
+    color: var(--primary);
+    margin-bottom: 4px;
+}
+
+.pillar-title {
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: var(--text-main);
+    margin-bottom: 4px;
+}
+
+.pillar-desc {
+    font-size: 0.86rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+}
+
+.cover-meta-footer {
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.84rem;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+/* Table of Contents (Screen) */
+.book-toc-section {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 34px 38px;
+    margin-bottom: 40px;
+    box-shadow: var(--shadow);
+}
+
+.toc-header-banner {
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+}
+
+.toc-header-pill {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--primary);
+    background: var(--badge-bg);
+    padding: 3px 10px;
+    border-radius: 20px;
+    text-transform: uppercase;
+}
+
+.toc-main-title {
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: var(--text-main);
+    margin: 8px 0 6px 0;
+}
+
+.toc-main-desc {
+    font-size: 0.92rem;
+    color: var(--text-muted);
+}
+
+.toc-grid-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+}
+
+@media (max-width: 850px) {
+    .toc-grid-container { grid-template-columns: 1fr; }
+}
+
+.toc-part-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px 18px;
+}
+
+.toc-part-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.toc-part-pill {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 800;
+    color: #ffffff;
+    background: var(--primary);
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+[data-theme="light"] .toc-part-pill {
+    background: #0284c7;
+}
+
+.toc-part-title-link {
+    font-weight: 700;
+    font-size: 0.92rem;
+    color: var(--text-main);
+    text-decoration: none;
+    transition: var(--transition);
+}
+
+.toc-part-title-link:hover {
+    color: var(--primary);
+}
+
+.toc-sub-list {
+    list-style: none;
+    padding-left: 0;
+}
+
+.toc-sub-list li {
+    margin-bottom: 5px;
+}
+
+.toc-sub-link {
+    font-size: 0.84rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: var(--transition);
+    display: inline-block;
+}
+
+.toc-sub-link:hover {
+    color: var(--primary);
+    padding-left: 4px;
+}
+
+/* Part Header Banner */
+.part-banner {
+    margin-top: 50px;
+    margin-bottom: 24px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid var(--primary);
+}
+
+.part-banner-tag {
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--primary);
+    margin-bottom: 6px;
+}
+
+.part-h1 {
+    font-size: 2.1rem;
+    font-weight: 800;
+    color: var(--text-main);
+    letter-spacing: -0.02em;
+    margin: 0;
+}
+
+/* Callout Cards */
+.callout-card {
+    border-radius: var(--radius-md);
+    padding: 16px 20px;
+    margin: 20px 0;
+    border-left: 4px solid var(--primary);
+    background: rgba(56, 189, 248, 0.06);
+    border-top: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+[data-theme="light"] .callout-card {
+    background: #f0f9ff;
+    border-left-color: #0284c7;
+}
+
+.callout-card.callout-tip {
+    border-left-color: #10b981;
+    background: rgba(16, 185, 129, 0.06);
+}
+[data-theme="light"] .callout-card.callout-tip {
+    background: #f0fdf4;
+    border-left-color: #059669;
+}
+
+.callout-card.callout-important {
+    border-left-color: #a855f7;
+    background: rgba(168, 85, 247, 0.06);
+}
+
+.callout-card.callout-warning {
+    border-left-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.06);
+}
+
+.callout-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: var(--primary);
+    margin-bottom: 8px;
+}
+
+.callout-card.callout-tip .callout-badge { color: #10b981; }
+.callout-card.callout-important .callout-badge { color: #a855f7; }
+.callout-card.callout-warning .callout-badge { color: #f59e0b; }
+
+.callout-body {
+    font-size: 0.95rem;
+    color: var(--text-main);
+    line-height: 1.65;
+}
+
+@media print {
+    @page {
+        margin: 18mm 16mm;
+        size: A4 portrait;
+    }
+
+    *, *::before, *::after {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .navbar, .sidebar, .modal-overlay, .toast, .copy-btn {
+        display: none !important;
+    }
+    .app-layout {
+        margin-top: 0 !important;
+        display: block !important;
+    }
+    .main-wrapper {
+        margin: 0 !important;
+        padding: 0 !important;
+        max-width: 100% !important;
+        width: 100% !important;
+    }
+    .content-card {
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+        background: #ffffff !important;
+    }
+    body {
+        background: #ffffff !important;
+        color: #0f172a !important;
+        font-size: 9.5pt !important;
+        line-height: 1.55 !important;
+    }
+
+    /* COVER PAGE IN PRINT - DEDICATED ARCHITECTURAL COVER PAGE */
+    .book-cover-page {
+        page-break-after: always !important;
+        break-after: page !important;
+        page-break-before: avoid !important;
+        break-before: avoid !important;
+        height: 240mm !important;
+        max-height: 240mm !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: space-between !important;
+        padding: 14mm 12mm 10mm 12mm !important;
+        background: #ffffff !important;
+        border: 2px solid #0284c7 !important;
+        border-radius: 8px !important;
+        box-sizing: border-box !important;
+        margin-bottom: 0 !important;
+    }
+
+    .cover-top-badge {
+        font-size: 7.5pt !important;
+        color: #0284c7 !important;
+        background: #e0f2fe !important;
+        border: 1px solid #bae6fd !important;
+        padding: 3pt 8pt !important;
+        border-radius: 4px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.1em !important;
+    }
+
+    .cover-logo-img {
+        width: 44pt !important;
+        height: 44pt !important;
+        border-radius: 8pt !important;
+        margin-bottom: 8pt !important;
+        display: block !important;
+        object-fit: contain !important;
+    }
+
+    .cover-timestamp-tag {
+        font-size: 7pt !important;
+        font-family: 'JetBrains Mono', Consolas, monospace !important;
+        color: #9333ea !important;
+        margin-top: 4pt !important;
+        font-weight: 700 !important;
+    }
+
+    .cover-logo-mark {
+        font-size: 26pt !important;
+        width: 48pt !important;
+        height: 48pt !important;
+        background: #0284c7 !important;
+        color: #ffffff !important;
+        border-radius: 8pt !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-bottom: 12pt !important;
+    }
+
+    .cover-main-title {
+        font-size: 28pt !important;
+        color: #0f172a !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        margin-bottom: 8pt !important;
+    }
+
+    .cover-subtitle {
+        font-size: 11.5pt !important;
+        color: #475569 !important;
+        margin-bottom: 6pt !important;
+    }
+
+    .cover-ver-tag {
+        font-size: 9pt !important;
+        color: #0284c7 !important;
+        font-weight: 700 !important;
+    }
+
+    .cover-pillars-grid {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 10pt !important;
+        margin: 16pt 0 !important;
+    }
+
+    .pillar-card {
+        background: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 6px !important;
+        padding: 9pt 11pt !important;
+    }
+
+    .pillar-num {
+        color: #0284c7 !important;
+        font-weight: 800 !important;
+        font-size: 7.5pt !important;
+    }
+
+    .pillar-title {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+        font-size: 9pt !important;
+    }
+
+    .pillar-desc {
+        color: #475569 !important;
+        font-size: 8pt !important;
+        line-height: 1.4 !important;
+    }
+
+    .cover-meta-footer {
+        border-top: 1px solid #cbd5e1 !important;
+        padding-top: 8pt !important;
+        color: #64748b !important;
+        font-size: 7.8pt !important;
+        display: flex !important;
+        justify-content: space-between !important;
+    }
+
+    /* TABLE OF CONTENTS IN PRINT - DEDICATED SINGLE TOC PAGE */
+    .book-toc-section {
+        page-break-before: avoid !important;
+        break-before: avoid !important;
+        page-break-after: always !important;
+        break-after: page !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        padding-top: 0 !important;
+        background: #ffffff !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+
+    .toc-header-banner {
+        border-bottom: 1.5px solid #0284c7 !important;
+        padding-bottom: 4pt !important;
+        margin-bottom: 8pt !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+    }
+
+    .toc-header-pill {
+        font-size: 6.8pt !important;
+        color: #0284c7 !important;
+        background: #e0f2fe !important;
+        padding: 1.5pt 5pt !important;
+        border-radius: 3px !important;
+        font-weight: 700 !important;
+    }
+
+    .toc-main-title {
+        font-size: 15pt !important;
+        color: #0f172a !important;
+        font-weight: 800 !important;
+        margin: 3pt 0 2pt 0 !important;
+        background: none !important;
+        -webkit-text-fill-color: #0f172a !important;
+    }
+
+    .toc-main-desc {
+        font-size: 7.5pt !important;
+        color: #475569 !important;
+        margin-bottom: 0 !important;
+    }
+
+    .toc-grid-container {
+        columns: 2 !important;
+        column-gap: 12pt !important;
+        display: block !important;
+    }
+
+    .toc-part-box {
+        background: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 5px !important;
+        padding: 5pt 7pt !important;
+        margin-bottom: 6pt !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        display: inline-block !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .toc-part-header {
+        display: flex !important;
+        align-items: center !important;
+        gap: 4pt !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        padding-bottom: 2.5pt !important;
+        margin-bottom: 3.5pt !important;
+    }
+
+    .toc-part-pill {
+        background: #0284c7 !important;
+        color: #ffffff !important;
+        font-size: 5.8pt !important;
+        font-weight: 800 !important;
+        padding: 1pt 3pt !important;
+        border-radius: 2px !important;
+    }
+
+    .toc-part-title-link {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+        font-size: 7.6pt !important;
+        text-decoration: none !important;
+    }
+
+    .toc-sub-list {
+        list-style: none !important;
+        padding-left: 0 !important;
+        margin: 0 !important;
+    }
+
+    .toc-sub-list li {
+        margin-bottom: 1.8pt !important;
+        line-height: 1.22 !important;
+    }
+
+    .toc-sub-link {
+        color: #475569 !important;
+        font-size: 7pt !important;
+        text-decoration: none !important;
+    }
+
+    .toc-sub-link code {
+        font-size: 6.8pt !important;
+        padding: 0.5pt 2.5pt !important;
+    }
+
+    /* PART HEADERS IN PRINT - FRESH PAGE FOR EACH PART */
+    .part-banner {
+        page-break-before: always !important;
+        break-before: page !important;
+        padding-top: 10mm !important;
+        margin-bottom: 14pt !important;
+        border-bottom: 2px solid #0284c7 !important;
+        padding-bottom: 6pt !important;
+    }
+
+    .part-banner-tag {
+        font-size: 7.2pt !important;
+        font-weight: 800 !important;
+        color: #0284c7 !important;
+        letter-spacing: 0.1em !important;
+        margin-bottom: 3pt !important;
+    }
+
+    .doc-h1, .part-h1 {
+        font-size: 19pt !important;
+        color: #0f172a !important;
+        font-weight: 800 !important;
+        margin: 0 !important;
+        background: none !important;
+        -webkit-background-clip: initial !important;
+        -webkit-text-fill-color: #0f172a !important;
+    }
+
+    .doc-h2 {
+        font-size: 13pt !important;
+        color: #0f172a !important;
+        font-weight: 700 !important;
+        border-bottom: 1.5px solid #cbd5e1 !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+        margin-top: 14pt !important;
+        margin-bottom: 6pt !important;
+        padding-bottom: 3pt !important;
+        background: none !important;
+        -webkit-text-fill-color: #0f172a !important;
+    }
+
+    .doc-h3 {
+        font-size: 10.5pt !important;
+        color: #0369a1 !important;
+        font-weight: 700 !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+        margin-top: 10pt !important;
+        margin-bottom: 4pt !important;
+        background: none !important;
+        -webkit-text-fill-color: #0369a1 !important;
+    }
+
+    .doc-h4 {
+        font-size: 9.2pt !important;
+        color: #0f172a !important;
+        font-weight: 700 !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+        margin-top: 9pt !important;
+        margin-bottom: 4pt !important;
+        background: none !important;
+        -webkit-text-fill-color: #0f172a !important;
+    }
+
+    .doc-p, .doc-list {
+        color: #334155 !important;
+        margin-bottom: 6pt !important;
+        font-size: 9pt !important;
+    }
+
+    .doc-p strong, .doc-list strong {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+
+    .doc-hr {
+        border: none !important;
+        border-top: 1px solid #e2e8f0 !important;
+        margin: 10pt 0 !important;
+    }
+
+    /* INLINE CODE IN PRINT */
+    code {
+        background: #f1f5f9 !important;
+        border: 1px solid #cbd5e1 !important;
+        color: #0369a1 !important;
+        font-weight: 600 !important;
+        padding: 1px 4.5px !important;
+        border-radius: 3px !important;
+        font-size: 8pt !important;
+        font-family: 'JetBrains Mono', Consolas, monospace !important;
+        page-break-inside: avoid !important;
+    }
+
+    /* CALLOUT CARDS IN PRINT */
+    .callout-card {
+        background: #f0f9ff !important;
+        border: 1px solid #bae6fd !important;
+        border-left: 4px solid #0284c7 !important;
+        border-radius: 4px !important;
+        padding: 7pt 10pt !important;
+        margin: 8pt 0 !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+
+    .callout-card.callout-tip {
+        background: #f0fdf4 !important;
+        border-color: #bbf7d0 !important;
+        border-left-color: #059669 !important;
+    }
+
+    .callout-card.callout-important {
+        background: #faf5ff !important;
+        border-color: #e9d5ff !important;
+        border-left-color: #9333ea !important;
+    }
+
+    .callout-card.callout-warning {
+        background: #fffbeb !important;
+        border-color: #fde68a !important;
+        border-left-color: #d97706 !important;
+    }
+
+    .callout-badge {
+        font-size: 6.8pt !important;
+        font-weight: 800 !important;
+        color: #0284c7 !important;
+        margin-bottom: 3pt !important;
+    }
+
+    .callout-card.callout-tip .callout-badge { color: #059669 !important; }
+    .callout-card.callout-important .callout-badge { color: #9333ea !important; }
+    .callout-card.callout-warning .callout-badge { color: #d97706 !important; }
+
+    .callout-body {
+        font-size: 8.2pt !important;
+        color: #0f172a !important;
+        line-height: 1.4 !important;
+    }
+
+    /* TABLES IN PRINT */
+    .table-container {
+        background: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 5px !important;
+        box-shadow: none !important;
+        margin: 9pt 0 !important;
+        overflow: visible !important;
+    }
+
+    table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+    }
+
+    thead {
+        display: table-header-group !important;
+    }
+
+    tr {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+
+    tbody tr:nth-child(even) {
+        background: #f8fafc !important;
+    }
+
+    th {
+        background: #f1f5f9 !important;
+        color: #0f172a !important;
+        font-weight: 700 !important;
+        border-bottom: 2px solid #cbd5e1 !important;
+        border-right: 1px solid #e2e8f0 !important;
+        padding: 5pt 8pt !important;
+        font-size: 8pt !important;
+    }
+
+    th:last-child { border-right: none !important; }
+
+    td {
+        color: #1e293b !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        border-right: 1px solid #e2e8f0 !important;
+        padding: 5pt 8pt !important;
+        font-size: 7.8pt !important;
+        vertical-align: top !important;
+        line-height: 1.38 !important;
+    }
+
+    td:last-child { border-right: none !important; }
+    tr:last-child td { border-bottom: none !important; }
+
+    td strong { color: #0f172a !important; }
+
+    td code {
+        background: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        color: #0284c7 !important;
+        font-weight: 600 !important;
+    }
+
+    /* CODE BLOCKS IN PRINT */
+    .code-wrapper {
+        background: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 5px !important;
+        box-shadow: none !important;
+        margin: 9pt 0 !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+
+    .code-header {
+        background: #f1f5f9 !important;
+        border-bottom: 1px solid #cbd5e1 !important;
+        padding: 3pt 8pt !important;
+    }
+
+    .code-lang-tag {
+        color: #0369a1 !important;
+        font-weight: 700 !important;
+        font-size: 7pt !important;
+    }
+
+    .code-block {
+        background: #f8fafc !important;
+        color: #0f172a !important;
+        padding: 6pt 9pt !important;
+        font-size: 7.8pt !important;
+        line-height: 1.4 !important;
+    }
+
+    .code-block code {
+        background: none !important;
+        border: none !important;
+        color: inherit !important;
+        padding: 0 !important;
+        font-size: inherit !important;
+        font-weight: normal !important;
+    }
+
+    .c-kw { color: #b91c1c !important; font-weight: 700 !important; }
+    .c-type { color: #0369a1 !important; font-weight: 600 !important; }
+    .c-string { color: #15803d !important; }
+    .c-comment { color: #64748b !important; font-style: italic !important; }
+    .c-mod { color: #c2410c !important; font-weight: 600 !important; }
+
+    /* DIAGRAMS & FLOWCHARTS IN PRINT */
+    .diagram-wrapper {
+        background: #f8fafc !important;
+        border: 1px solid #0284c7 !important;
+        border-radius: 5px !important;
+        margin: 10pt 0 !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+
+    .diagram-header {
+        background: #f1f5f9 !important;
+        border-bottom: 1px solid #bae6fd !important;
+        padding: 4pt 8pt !important;
+    }
+
+    .diagram-tag {
+        font-size: 7pt !important;
+        color: #0284c7 !important;
+        font-weight: 800 !important;
+    }
+
+    .diagram-block {
+        padding: 8pt 10pt !important;
+        font-size: 7.2pt !important;
+        line-height: 1.28 !important;
+        color: #0f172a !important;
+        background: #ffffff !important;
+        white-space: pre !important;
+    }
+
+    .doc-image-box {
+        margin: 10pt 0 !important;
+        text-align: center !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+
+    .doc-img {
+        max-width: 90% !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 4px !important;
+    }
+
+    .doc-img-caption {
+        font-size: 7pt !important;
+        color: #64748b !important;
+        margin-top: 4pt !important;
+    }
+}
+</style>
+</head>
+<body>
+
+<header class="navbar">
+    <a href="#" class="nav-brand">
+        <img src="salivo_logo.png" style="width:28px;height:28px;border-radius:6px;object-fit:contain;box-shadow:0 0 12px rgba(56,189,248,0.4);" alt="Salivo Logo" />
+        <span>Salivo</span>
+        <span class="nav-version-badge">v1.0 Zero-_</span>
+    </a>
+    <div class="nav-actions">
+        <button class="search-trigger" onclick="openSearch()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <span>Search docs...</span>
+            <kbd>Ctrl K</kbd>
+        </button>
+        <button class="icon-btn" onclick="toggleTheme()" title="Toggle Dark/Light Mode">
+            <svg id="theme-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+        </button>
+        <button class="icon-btn" onclick="window.print()" title="Print / Export PDF">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+        </button>
+    </div>
+</header>
+
+<div class="app-layout">
+    <aside class="sidebar">
+        <div class="nav-group"><a href="#book-cover" class="nav-link single-link">Overview &amp; Cover</a></div><div class="nav-group"><a href="#table-of-contents" class="nav-link single-link">Table of Contents</a></div><div class="nav-group"><a href="#quick-reference-syntax-cheat-sheet" class="nav-link single-link">Quick Reference &amp; Syntax Cheat Sheet</a></div><div class="nav-group"><a href="#part-i-language-fundamentals-core-syntax" class="nav-group-title">Part I: Language Fundamentals &amp; Core Syntax</a><ul class="nav-sublist"><li><a href="#11-lexical-structure-clean-language-design" class="nav-link">1.1 Lexical Structure &amp; Clean Language Design</a></li><li><a href="#12-modules-stream-import-directives" class="nav-link">1.2 Modules &amp; Stream Import Directives</a></li><li><a href="#13-variables-mutability-scope" class="nav-link">1.3 Variables, Mutability, &amp; Scope</a></li><li><a href="#14-data-types-literals" class="nav-link">1.4 Data Types &amp; Literals</a></li><li><a href="#15-operators-expressions" class="nav-link">1.5 Operators &amp; Expressions</a></li><li><a href="#16-control-flow" class="nav-link">1.6 Control Flow</a></li><li><a href="#17-functions-procedures" class="nav-link">1.7 Functions &amp; Procedures</a></li></ul></div><div class="nav-group"><a href="#part-ii-type-system-structs-enums-traits" class="nav-group-title">Part II: Type System, Structs, Enums &amp; Traits</a><ul class="nav-sublist"><li><a href="#21-structs-generic-types" class="nav-link">2.1 Structs &amp; Generic Types</a></li><li><a href="#22-enums-algebraic-data-types" class="nav-link">2.2 Enums &amp; Algebraic Data Types</a></li><li><a href="#23-pattern-matching-match" class="nav-link">2.3 Pattern Matching (`match`)</a></li><li><a href="#24-traits-method-implementations" class="nav-link">2.4 Traits &amp; Method Implementations</a></li></ul></div><div class="nav-group"><a href="#part-iii-postfix-modifiers-string-interpolation" class="nav-group-title">Part III: Postfix Modifiers &amp; String Interpolation</a><ul class="nav-sublist"><li><a href="#31-postfix-modifiers-reference" class="nav-link">3.1 Postfix Modifiers Reference</a></li><li><a href="#32-modifier-chaining" class="nav-link">3.2 Modifier Chaining</a></li><li><a href="#33-formatted-string-interpolation" class="nav-link">3.3 Formatted String Interpolation (`$&quot;...&quot;`)</a></li><li><a href="#34-string-literal-auto-coercion" class="nav-link">3.4 String Literal Auto-Coercion</a></li><li><a href="#35-the-format-macro-trait-formatting" class="nav-link">3.5 The `format!` Macro &amp; Trait Formatting</a></li></ul></div><div class="nav-group"><a href="#part-iv-low-level-memory-engine-smart-pointers" class="nav-group-title">Part IV: Low-Level Memory Engine &amp; Smart Pointers</a><ul class="nav-sublist"><li><a href="#41-heap-allocation-engine" class="nav-link">4.1 Heap Allocation Engine</a></li><li><a href="#42-raw-memory-operations-intrinsics" class="nav-link">4.2 Raw Memory Operations &amp; Intrinsics</a></li><li><a href="#43-slices-spans" class="nav-link">4.3 Slices &amp; Spans</a></li><li><a href="#44-smart-pointers-box-arc-weak-arena" class="nav-link">4.4 Smart Pointers: Box&lt;T&gt;, Arc&lt;T&gt;, Weak&lt;T&gt;, Arena</a></li></ul></div><div class="nav-group"><a href="#part-v-complete-standard-library-reference" class="nav-group-title">Part V: Complete Standard Library Reference</a><ul class="nav-sublist"><li><a href="#51-salivostdprelude-salivostdcore" class="nav-link">5.1 `salivo.std.prelude` &amp; `salivo.std.core`</a></li><li><a href="#52-salivostdstrings" class="nav-link">5.2 `salivo.std.strings`</a></li><li><a href="#53-salivostdcollections" class="nav-link">5.3 `salivo.std.collections`</a></li><li><a href="#54-salivostdmath" class="nav-link">5.4 `salivo.std.math`</a></li><li><a href="#55-salivostdio" class="nav-link">5.5 `salivo.std.io`</a></li><li><a href="#56-salivostdfs" class="nav-link">5.6 `salivo.std.fs`</a></li><li><a href="#57-salivostdcrypto" class="nav-link">5.7 `salivo.std.crypto`</a></li><li><a href="#58-salivostdsync" class="nav-link">5.8 `salivo.std.sync`</a></li><li><a href="#59-salivostdtime" class="nav-link">5.9 `salivo.std.time`</a></li><li><a href="#510-salivostdnet" class="nav-link">5.10 `salivo.std.net`</a></li><li><a href="#511-salivostdtask" class="nav-link">5.11 `salivo.std.task`</a></li><li><a href="#512-auxiliary-modules" class="nav-link">5.12 Auxiliary Modules</a></li></ul></div><div class="nav-group"><a href="#part-vi-tooling-compiler-cli-project-ecosystem" class="nav-group-title">Part VI: Tooling, Compiler CLI &amp; Project Ecosystem</a><ul class="nav-sublist"><li><a href="#61-compiler-commands-sf" class="nav-link">6.1 Compiler Commands (`sf`)</a></li><li><a href="#62-compiler-optimization-pipeline-performance-tuning" class="nav-link">6.2 Compiler Optimization Pipeline &amp; Performance Tuning</a></li><li><a href="#63-package-manager-spm" class="nav-link">6.3 Package Manager (`spm`)</a></li><li><a href="#64-code-quality-tooling" class="nav-link">6.4 Code Quality &amp; Tooling</a></li></ul></div><div class="nav-group"><a href="#part-vii-complete-working-examples" class="nav-group-title">Part VII: Complete Working Examples</a><ul class="nav-sublist"><li><a href="#example-1-high-performance-data-pipeline-with-collections-hashing" class="nav-link">Example 1: High-Performance Data Pipeline with Collections &amp; Hashing</a></li><li><a href="#example-2-thread-safe-state-atomic-concurrency" class="nav-link">Example 2: Thread-Safe State &amp; Atomic Concurrency</a></li><li><a href="#example-3-file-system-inspector-path-manipulation" class="nav-link">Example 3: File System Inspector &amp; Path Manipulation</a></li></ul></div>
+    </aside>
+
+    <main class="main-wrapper">
+        <article class="content-card">
+            
+<div class="book-cover-page" id="book-cover">
+    <div class="cover-top-badge">OFFICIAL ARCHITECTURAL SPECIFICATION &amp; REFERENCE MANUAL</div>
+    <div class="cover-hero">
+        <img src="salivo_logo.png" class="cover-logo-img" alt="Salivo Official Logo" />
+        <div class="cover-logo-mark">&gt;&lt;</div>
+        <h1 class="cover-main-title">The Salivo<br/>Programming Language</h1>
+        <div class="cover-subtitle">Master Architecture Manual, Compiler Subsystems &amp; Runtime Specification</div>
+        <div class="cover-ver-tag">Language Version 1.0 · Fixed-Point Self-Hosting Stage 35.4 · Co-Founder Master Edition</div>
+        <div class="cover-timestamp-tag">BUILD TIMESTAMP: SEPTEMBER 12, 2026 · ANTIGRAVITY IDE ENGINE · ZERO-UNDERSCORE LAW</div>
+    </div>
+
+    <div class="cover-pillars-grid">
+        <div class="pillar-card">
+            <div class="pillar-num">01</div>
+            <div class="pillar-title">Type Integrity</div>
+            <div class="pillar-desc">Clean PascalCase types with the zero-underscore standard, coupled with flexible naming for functions, variables, and struct fields.</div>
+        </div>
+        <div class="pillar-card">
+            <div class="pillar-num">02</div>
+            <div class="pillar-title">Stream Architecture</div>
+            <div class="pillar-desc">Standardized <code>&gt;&lt;</code> stream imports providing expressive, visual dependency declarations and zero syntax fragmentation.</div>
+        </div>
+        <div class="pillar-card">
+            <div class="pillar-num">03</div>
+            <div class="pillar-title">Deterministic RAII</div>
+            <div class="pillar-desc">First-class <code>pub trait Drop</code> with automated ARC memory management and deterministic destruction upon scope exit.</div>
+        </div>
+        <div class="pillar-card">
+            <div class="pillar-num">04</div>
+            <div class="pillar-title">Multi-Stage Bootstrap</div>
+            <div class="pillar-desc">Authentic mathematical fixed-point self-hosting verification: <code>SHA256(C2) == SHA256(C3)</code> with zero synthetic copying.</div>
+        </div>
+    </div>
+
+    <div class="cover-meta-footer">
+        <div><strong>Salivo Language &amp; Architecture Group</strong> · 2026 Master Edition</div>
+        <div>LLVM 16 Native &amp; JIT Compiler Infrastructure · Static BSS Zero-Allocation Async Runtime</div>
+    </div>
+</div>
+
+<div class="book-toc-section" id="table-of-contents">
+    <div class="toc-header-banner">
+        <span class="toc-header-pill">REFERENCE INDEX</span>
+        <h2 class="toc-main-title">Table of Contents</h2>
+        <p class="toc-main-desc">Systematic roadmap of core language syntax, type semantics, runtime engine, and standard library modules.</p>
+    </div>
+    <div class="toc-grid-container">
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 1</span>
+                <a href="#part-i-language-fundamentals-core-syntax" class="toc-part-title-link">Part I: Language Fundamentals &amp; Core Syntax</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#11-lexical-structure-clean-language-design" class="toc-sub-link">1.1 Lexical Structure &amp; Clean Language Design</a></li><li><a href="#12-modules-stream-import-directives" class="toc-sub-link">1.2 Modules &amp; Stream Import Directives</a></li><li><a href="#13-variables-mutability-scope" class="toc-sub-link">1.3 Variables, Mutability, &amp; Scope</a></li><li><a href="#14-data-types-literals" class="toc-sub-link">1.4 Data Types &amp; Literals</a></li><li><a href="#15-operators-expressions" class="toc-sub-link">1.5 Operators &amp; Expressions</a></li><li><a href="#16-control-flow" class="toc-sub-link">1.6 Control Flow</a></li><li><a href="#17-functions-procedures" class="toc-sub-link">1.7 Functions &amp; Procedures</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 2</span>
+                <a href="#part-ii-type-system-structs-enums-traits" class="toc-part-title-link">Part II: Type System, Structs, Enums &amp; Traits</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#21-structs-generic-types" class="toc-sub-link">2.1 Structs &amp; Generic Types</a></li><li><a href="#22-enums-algebraic-data-types" class="toc-sub-link">2.2 Enums &amp; Algebraic Data Types</a></li><li><a href="#23-pattern-matching-match" class="toc-sub-link">2.3 Pattern Matching (<code>match</code>)</a></li><li><a href="#24-traits-method-implementations" class="toc-sub-link">2.4 Traits &amp; Method Implementations</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 3</span>
+                <a href="#part-iii-postfix-modifiers-string-interpolation" class="toc-part-title-link">Part III: Postfix Modifiers &amp; String Interpolation</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#31-postfix-modifiers-reference" class="toc-sub-link">3.1 Postfix Modifiers Reference</a></li><li><a href="#32-modifier-chaining" class="toc-sub-link">3.2 Modifier Chaining</a></li><li><a href="#33-formatted-string-interpolation" class="toc-sub-link">3.3 Formatted String Interpolation (<code>$&quot;...&quot;</code>)</a></li><li><a href="#34-string-literal-auto-coercion" class="toc-sub-link">3.4 String Literal Auto-Coercion</a></li><li><a href="#35-the-format-macro-trait-formatting" class="toc-sub-link">3.5 The <code>format!</code> Macro &amp; Trait Formatting</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 4</span>
+                <a href="#part-iv-low-level-memory-engine-smart-pointers" class="toc-part-title-link">Part IV: Low-Level Memory Engine &amp; Smart Pointers</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#41-heap-allocation-engine" class="toc-sub-link">4.1 Heap Allocation Engine</a></li><li><a href="#42-raw-memory-operations-intrinsics" class="toc-sub-link">4.2 Raw Memory Operations &amp; Intrinsics</a></li><li><a href="#43-slices-spans" class="toc-sub-link">4.3 Slices &amp; Spans</a></li><li><a href="#44-smart-pointers-box-arc-weak-arena" class="toc-sub-link">4.4 Smart Pointers: Box&lt;T&gt;, Arc&lt;T&gt;, Weak&lt;T&gt;, Arena</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 5</span>
+                <a href="#part-v-complete-standard-library-reference" class="toc-part-title-link">Part V: Complete Standard Library Reference</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#51-salivostdprelude-salivostdcore" class="toc-sub-link">5.1 <code>salivo.std.prelude</code> &amp; <code>salivo.std.core</code></a></li><li><a href="#52-salivostdstrings" class="toc-sub-link">5.2 <code>salivo.std.strings</code></a></li><li><a href="#53-salivostdcollections" class="toc-sub-link">5.3 <code>salivo.std.collections</code></a></li><li><a href="#54-salivostdmath" class="toc-sub-link">5.4 <code>salivo.std.math</code></a></li><li><a href="#55-salivostdio" class="toc-sub-link">5.5 <code>salivo.std.io</code></a></li><li><a href="#56-salivostdfs" class="toc-sub-link">5.6 <code>salivo.std.fs</code></a></li><li><a href="#57-salivostdcrypto" class="toc-sub-link">5.7 <code>salivo.std.crypto</code></a></li><li><a href="#58-salivostdsync" class="toc-sub-link">5.8 <code>salivo.std.sync</code></a></li><li><a href="#59-salivostdtime" class="toc-sub-link">5.9 <code>salivo.std.time</code></a></li><li><a href="#510-salivostdnet" class="toc-sub-link">5.10 <code>salivo.std.net</code></a></li><li><a href="#511-salivostdtask" class="toc-sub-link">5.11 <code>salivo.std.task</code></a></li><li><a href="#512-auxiliary-modules" class="toc-sub-link">5.12 Auxiliary Modules</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 6</span>
+                <a href="#part-vi-tooling-compiler-cli-project-ecosystem" class="toc-part-title-link">Part VI: Tooling, Compiler CLI &amp; Project Ecosystem</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#61-compiler-commands-sf" class="toc-sub-link">6.1 Compiler Commands (<code>sf</code>)</a></li><li><a href="#62-compiler-optimization-pipeline-performance-tuning" class="toc-sub-link">6.2 Compiler Optimization Pipeline &amp; Performance Tuning</a></li><li><a href="#63-package-manager-spm" class="toc-sub-link">6.3 Package Manager (<code>spm</code>)</a></li><li><a href="#64-code-quality-tooling" class="toc-sub-link">6.4 Code Quality &amp; Tooling</a></li></ul>
+        </div>
+        
+        <div class="toc-part-box">
+            <div class="toc-part-header">
+                <span class="toc-part-pill">PART 7</span>
+                <a href="#part-vii-complete-working-examples" class="toc-part-title-link">Part VII: Complete Working Examples</a>
+            </div>
+            <ul class="toc-sub-list"><li><a href="#example-1-high-performance-data-pipeline-with-collections-hashing" class="toc-sub-link">Example 1: High-Performance Data Pipeline with Collections &amp; Hashing</a></li><li><a href="#example-2-thread-safe-state-atomic-concurrency" class="toc-sub-link">Example 2: Thread-Safe State &amp; Atomic Concurrency</a></li><li><a href="#example-3-file-system-inspector-path-manipulation" class="toc-sub-link">Example 3: File System Inspector &amp; Path Manipulation</a></li></ul>
+        </div>
+        
+    </div>
+</div>
+<h2 id="quick-reference-syntax-cheat-sheet" class="doc-h2">Quick Reference &amp; Syntax Cheat Sheet</h2><div class="doc-spacer"></div><div class="table-container"><table><thead><tr><th>Feature</th><th>Salivo Syntax</th><th>Notes</th></tr></thead><tbody><tr><td><strong>Module Header</strong></td><td><code>module mypackage.core;</code></td><td>Required at the top of every file</td></tr><tr><td><strong>Stream Imports</strong></td><td><code>&gt;&lt;salivo.std.io;</code> or <code>&gt;&lt;salivo.std.math;</code></td><td>Grouped: <code>&gt;&lt;salivo.std.core::{assert, assertEq};</code></td></tr><tr><td><strong>Immutable Variable</strong></td><td><code>let name = &quot;Salivo&quot;;</code></td><td>Bound value cannot be reassigned</td></tr><tr><td><strong>Mutable Variable</strong></td><td><code>let mut count = 0;</code> or <code>mut count = 0;</code></td><td>Reassignable with <code>=</code> or <code>+=</code></td></tr><tr><td><strong>Constant</strong></td><td><code>const MAX_SIZE = 4096;</code></td><td>Evaluated at compile time</td></tr><tr><td><strong>Global Binding</strong></td><td><code>global let PORT = 8080;</code></td><td>Package-scoped global</td></tr><tr><td><strong>Function</strong></td><td><code>pub func add(a: int, b: int) -&gt; int { return a + b; }</code></td><td>Returns value with <code>-&gt; Type</code></td></tr><tr><td><strong>Entry Point</strong></td><td><code>func main() -&gt; int { outln(&quot;Hello&quot;); return 0; }</code></td><td>Returns exit status code</td></tr><tr><td><strong>Conditionals</strong></td><td><code>if (x &gt; 0) { ... } else if (x == 0) { ... } else { ... }</code></td><td>Parentheses around conditions</td></tr><tr><td><strong>While Loop</strong></td><td><code>while (count &lt; 10) { count = count + 1; }</code></td><td>Standard while loop</td></tr><tr><td><strong>For Loop</strong></td><td><code>for (let mut i = 0; i &lt; n; i = i + 1) { ... }</code></td><td>3-clause C-style loop</td></tr><tr><td><strong>Struct</strong></td><td><code>struct Point { x: int, y: int }</code></td><td>Generic: <code>struct Pair&lt;T, U&gt; { first: T, second: U }</code></td></tr><tr><td><strong>Enum</strong></td><td><code>enum Status { Pending, Active, Done }</code></td><td>Algebraic: <code>enum Option&lt;T&gt; { Some(T), None }</code></td></tr><tr><td><strong>Pattern Match</strong></td><td><code>match val { 0 =&gt; &quot;zero&quot;, 1 =&gt; &quot;one&quot;, _ =&gt; &quot;other&quot; }</code></td><td>Strictly exhaustive</td></tr><tr><td><strong>Try Operator</strong></td><td><code>let data = open(&quot;file.txt&quot;)?;</code></td><td>Unwraps <code>Result</code>/<code>Option</code> or early-returns</td></tr><tr><td><strong>Trait</strong></td><td><code>trait Show { func show(self) -&gt; string; }</code></td><td>Interface contracts</td></tr><tr><td><strong>Implementation</strong></td><td><code>impl Show for Point { func show(self) -&gt; string { ... } }</code></td><td>Trait and struct methods</td></tr><tr><td><strong>Postfix Modifiers</strong></td><td><code>val:trim:upper</code>, <code>num:str</code>, <code>text:slice(0, 5)</code>, <code>text:len</code></td><td>Left-to-right chaining</td></tr><tr><td><strong>String Coercion</strong></td><td><code>&quot;literal&quot;</code> seamlessly coerces to <code>StrSlice</code>/<code>String</code></td><td>Zero boilerplate string passing</td></tr><tr><td><strong>String Interpolation</strong></td><td><code>$&quot;User: {name:trim:upper}, ID: {id:str}, Score: {score}&quot;</code></td><td>Formatted templates</td></tr><tr><td><strong>Standard Input</strong></td><td><code>let line = in();</code> or <code>let num = in():int;</code></td><td>Flushes stdout automatically</td></tr><tr><td><strong>Standard Output</strong></td><td><code>out(&quot;Prompt: &quot;);</code> and <code>outln(&quot;Message&quot;);</code></td><td>Prints to stdout</td></tr></tbody></table></div><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-i-language-fundamentals-core-syntax" class="doc-h1 part-h1">Part I: Language Fundamentals &amp; Core Syntax</h1>
+</div>
+<div class="doc-spacer"></div><h2 id="11-lexical-structure-clean-language-design" class="doc-h2">1.1 Lexical Structure &amp; Clean Language Design</h2><div class="doc-spacer"></div><p class="doc-p">Salivo enforces a clean, modern type system while providing maximum flexibility for functions, variables, and system programming:</p><div class="doc-spacer"></div><ul class="doc-list"><li><strong>Data Types (Zero-Underscore Standard):</strong> Structs, enums, traits, and type annotations strictly use clean PascalCase without underscores (<code>Point</code>, <code>Option</code>, <code>Result</code>, <code>UserProfile</code>). The underscore <code>_</code> is strictly never a datatype.</li><li><strong>Functions, Variables, &amp; Struct Fields (Flexible Naming):</strong> Functions, method names, variables, and struct fields freely support both modern <code>camelCase</code> and <code>snake_case</code> with underscores (<code>pathJoin</code> or <code>path_join</code>, <code>assertEq</code> or <code>assert_eq</code>, <code>userId</code> or <code>user_id</code>, <code>maxLineWidth</code> or <code>max_line_width</code>). Both forms are fully first-class and interoperable across the standard library, tooling, and user code.</li><li><strong>Numbers &amp; Wildcards:</strong> Numbers support underscore digit separators for readability (e.g., <code>1_000_000</code>), and <code>_</code> is used for pattern match wildcards and discarded bindings (<code>let _ = expr;</code>).</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-1')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-1"><code class="lang-salivo"><span class="c-comment">// ✅ Clean Data Types (Zero-Underscores)</span>
+<span class="c-kw">struct</span> UserSession {
+    <span class="c-type">int</span> userId;
+    <span class="c-type">string</span> token;
+    <span class="c-type">bool</span> isActive;
+}
+
+<span class="c-comment">// ✅ Flexible Function &amp; Variable Identifiers</span>
+<span class="c-kw">pub</span> <span class="c-kw">func</span> get_user_session(<span class="c-type">int</span> user_id) -&gt; UserSession {
+    <span class="c-kw">let</span> timeout_ms = 30_000;
+<span class="c-comment">    // ...</span>
+}</code></pre>
+</div><div class="doc-spacer"></div><h3 id="comments" class="doc-h3">Comments</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-2')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-2"><code class="lang-salivo"><span class="c-comment">// Single-line comment</span>
+
+<span class="c-comment">/*</span>
+  Multi-line block comment
+<span class="c-comment">*/</span>
+
+<span class="c-comment">/// Documentation docstring attached to following declaration</span>
+<span class="c-kw">pub</span> <span class="c-kw">func</span> calculate() -&gt; <span class="c-type">int</span> { <span class="c-kw">return</span> 42; }</code></pre>
+</div><div class="doc-spacer"></div><h2 id="12-modules-stream-import-directives" class="doc-h2">1.2 Modules &amp; Stream Import Directives</h2><div class="doc-spacer"></div><p class="doc-p">Every Salivo file begins with an explicit module namespace declaration. Modules are organized in dot-separated hierarchies.</p><div class="doc-spacer"></div><h3 id="module-declaration" class="doc-h3">Module Declaration</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-3')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-3"><code class="lang-salivo"><span class="c-kw">module</span> myapp.network.client;</code></pre>
+</div><div class="doc-spacer"></div><h3 id="stream-import-syntax" class="doc-h3">Stream Import Syntax (<code>&gt;&lt;</code>)</h3><div class="doc-spacer"></div><p class="doc-p">Salivo uses the <strong>Stream Header Import Operator</strong> (<code>&gt;&lt;</code>) exclusively for importing modules, types, and functions. (The legacy <code>import</code> keyword is deprecated).</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-4')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-4"><code class="lang-salivo"><span class="c-comment">// 1. Full module stream import</span>
+<span class="c-kw">&gt;&lt;</span>salivo.std.io;
+<span class="c-kw">&gt;&lt;</span>salivo.std.math;
+
+<span class="c-comment">// 2. Selective symbol import with destructuring</span>
+<span class="c-kw">&gt;&lt;</span>salivo.std.core::{assert, assertEq, <span class="c-type">Option</span>, some, none};
+
+<span class="c-comment">// 3. Selective cryptographic and filesystem primitives</span>
+<span class="c-kw">&gt;&lt;</span>salivo.std.crypto::{sha256Hex, secSeed};
+<span class="c-kw">&gt;&lt;</span>salivo.std.fs::{pathJoin, pathExists, open, close};
+
+<span class="c-comment">// 4. Custom package imports</span>
+<span class="c-kw">&gt;&lt;</span>mypackage.services.auth::{authenticate, Session};</code></pre>
+</div><div class="doc-spacer"></div><h2 id="13-variables-mutability-scope" class="doc-h2">1.3 Variables, Mutability, &amp; Scope</h2><div class="doc-spacer"></div><p class="doc-p">Variables in Salivo are immutable by default when declared with <code>let</code>.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-5')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-5"><code class="lang-salivo"><span class="c-comment">// Immutable binding (cannot be reassigned)</span>
+<span class="c-kw">let</span> max_connections = 100;
+<span class="c-kw">let</span> host = <span class="c-string">&quot;127.0.0.1&quot;</span>;
+
+<span class="c-comment">// Mutable binding</span>
+<span class="c-kw">let</span> <span class="c-kw">mut</span> counter = 0;
+counter = counter + 1;
+counter += 5;
+
+<span class="c-comment">// Explicit type annotations</span>
+<span class="c-type">int</span> port = 8080;
+<span class="c-type">float</span> ratio = 1.618;
+<span class="c-type">bool</span> is_running = true;
+<span class="c-type">string</span> application_name = <span class="c-string">&quot;SalivoEngine&quot;</span>;
+
+<span class="c-comment">// Compile-time constants</span>
+<span class="c-kw">const</span> BUFFER_CAPACITY = 8192;
+<span class="c-kw">const</span> MAX_RETRIES = 3;
+
+<span class="c-comment">// Global package-scoped bindings</span>
+<span class="c-kw">global</span> <span class="c-kw">let</span> SYSTEM_VERSION = <span class="c-string">&quot;1.0.0&quot;</span>;
+<span class="c-kw">global</span> <span class="c-type">int</span> ACTIVE_WORKERS = 0;</code></pre>
+</div><div class="doc-spacer"></div><h2 id="14-data-types-literals" class="doc-h2">1.4 Data Types &amp; Literals</h2><div class="doc-spacer"></div><h3 id="primitive-data-types" class="doc-h3">Primitive Data Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><strong><code>int</code></strong>: 64-bit signed two&#x27;s complement integer (<code>-9223372036854775808</code> to <code>9223372036854775807</code>).</li><li><strong><code>float</code></strong>: 32-bit IEEE 754 single-precision floating point.</li><li><strong><code>double</code></strong>: 64-bit IEEE 754 double-precision floating point.</li><li><strong><code>bool</code></strong>: Boolean values <code>true</code> or <code>false</code>.</li><li><strong><code>char</code></strong>: Unicode scalar codepoint value (represented internally as UTF-32 scalar).</li><li><strong><code>string</code></strong>: UTF-8 immutable reference-counted string sequence.</li><li><strong><code>byte</code></strong>: 8-bit unsigned octet (0 to 255).</li><li><strong><code>void</code></strong>: Unit type representing the absence of a value.</li></ul><div class="doc-spacer"></div><h3 id="literals" class="doc-h3">Literals</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-6')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-6"><code class="lang-salivo"><span class="c-kw">let</span> dec = 42;
+<span class="c-kw">let</span> hex = 0x2A;
+<span class="c-kw">let</span> bin = 0b101010;
+<span class="c-kw">let</span> flt = 3.14159;
+<span class="c-kw">let</span> flag = true;
+<span class="c-kw">let</span> ch = <span class="c-string">&#x27;Z&#x27;</span>;
+<span class="c-kw">let</span> str_val = <span class="c-string">&quot;Salivo Language\n&quot;</span>;
+<span class="c-kw">let</span> raw_escaped = <span class="c-string">&quot;C:\\Windows\\System32&quot;</span>;</code></pre>
+</div><div class="doc-spacer"></div><h2 id="15-operators-expressions" class="doc-h2">1.5 Operators &amp; Expressions</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-7')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-7"><code class="lang-salivo"><span class="c-comment">// Arithmetic</span>
+<span class="c-kw">let</span> sum = 10 + 20;
+<span class="c-kw">let</span> diff = 30 - 15;
+<span class="c-kw">let</span> prod = 4 * 5;
+<span class="c-kw">let</span> quot = 100 / 4;
+<span class="c-kw">let</span> rem = 29 % 5;
+
+<span class="c-comment">// Comparison</span>
+<span class="c-kw">let</span> eq = (sum == 30);
+<span class="c-kw">let</span> ne = (diff != 0);
+<span class="c-kw">let</span> lt = (prod &lt; 50);
+<span class="c-kw">let</span> lte = (prod &lt;= 20);
+<span class="c-kw">let</span> gt = (quot &gt; 10);
+<span class="c-kw">let</span> gte = (quot &gt;= 25);
+
+<span class="c-comment">// Logical</span>
+<span class="c-kw">let</span> both = (eq &amp;&amp; !lt);
+<span class="c-kw">let</span> either = (eq || lt);
+
+<span class="c-comment">// Bitwise</span>
+<span class="c-kw">let</span> bit_and = 0xFF &amp; 0x0F;
+<span class="c-kw">let</span> bit_or  = 0xF0 | 0x0F;
+<span class="c-kw">let</span> bit_xor = 0xAA ^ 0x55;
+<span class="c-kw">let</span> bit_shl = 1 &lt;&lt; 4;
+<span class="c-kw">let</span> bit_shr = 16 &gt;&gt; 2;
+
+<span class="c-comment">// Assignment Compound Operators</span>
+<span class="c-kw">let</span> <span class="c-kw">mut</span> num = 10;
+num += 5;
+num -= 2;
+num *= 3;
+num /= 2;
+
+<span class="c-comment">// Postfix Try Operator (?) for Error Propagation</span>
+<span class="c-comment">// Unwraps Ok(v)/Some(v) or early-returns Err(e)/None from the current function</span>
+<span class="c-kw">let</span> file_handle = open(<span class="c-string">&quot;config.json&quot;</span>)?;
+<span class="c-kw">let</span> user_id = find_user(<span class="c-string">&quot;admin&quot;</span>)?;</code></pre>
+</div><div class="doc-spacer"></div><h2 id="16-control-flow" class="doc-h2">1.6 Control Flow</h2><div class="doc-spacer"></div><h3 id="if-else-conditions" class="doc-h3">If / Else Conditions</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-8')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-8"><code class="lang-salivo"><span class="c-kw">if</span> (score &gt;= 90) {
+    grade = <span class="c-string">&quot;A&quot;</span>;
+} <span class="c-kw">else</span> <span class="c-kw">if</span> (score &gt;= 80) {
+    grade = <span class="c-string">&quot;B&quot;</span>;
+} <span class="c-kw">else</span> <span class="c-kw">if</span> (score &gt;= 70) {
+    grade = <span class="c-string">&quot;C&quot;</span>;
+} <span class="c-kw">else</span> {
+    grade = <span class="c-string">&quot;F&quot;</span>;
+}</code></pre>
+</div><div class="doc-spacer"></div><h3 id="while-loop" class="doc-h3">While Loop</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-9')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-9"><code class="lang-salivo"><span class="c-kw">let</span> <span class="c-kw">mut</span> i = 0;
+<span class="c-kw">while</span> (i &lt; 10) {
+    <span class="c-kw">if</span> (i == 5) {
+        i = i + 1;
+        <span class="c-kw">continue</span>;
+    }
+    outln(<span class="c-string">$&quot;Step: {i}&quot;</span>);
+    i = i + 1;
+}</code></pre>
+</div><div class="doc-spacer"></div><h3 id="3-clause-for-loop" class="doc-h3">3-Clause For Loop</h3><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-10')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-10"><code class="lang-salivo"><span class="c-kw">for</span> (<span class="c-kw">let</span> <span class="c-kw">mut</span> idx = 0; idx &lt; 10; idx = idx + 1) {
+    <span class="c-kw">if</span> (idx == 8) {
+        <span class="c-kw">break</span>;
+    }
+    outln(<span class="c-string">$&quot;Index: {idx}&quot;</span>);
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="17-functions-procedures" class="doc-h2">1.7 Functions &amp; Procedures</h2><div class="doc-spacer"></div><p class="doc-p">Functions are declared with <code>func</code>. The return type is defined after <code>-&gt;</code>. If omitted, the return type defaults to <code>void</code>.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-11')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-11"><code class="lang-salivo"><span class="c-comment">// Basic function</span>
+<span class="c-kw">func</span> calculate_area(width: <span class="c-type">int</span>, height: <span class="c-type">int</span>) -&gt; <span class="c-type">int</span> {
+    <span class="c-kw">return</span> width * height;
+}
+
+<span class="c-comment">// Public generic function</span>
+<span class="c-kw">pub</span> <span class="c-kw">func</span> identity&lt;T&gt;(item: T) -&gt; T {
+    <span class="c-kw">return</span> item;
+}
+
+<span class="c-comment">// Function with no return value</span>
+<span class="c-kw">pub</span> <span class="c-kw">func</span> log_message(msg: <span class="c-type">string</span>) {
+    outln(<span class="c-string">$&quot;[LOG] {msg}&quot;</span>);
+}
+
+<span class="c-comment">// Program Entry Point</span>
+<span class="c-kw">func</span> main() -&gt; <span class="c-type">int</span> {
+    <span class="c-kw">let</span> area = calculate_area(10, 20);
+    outln(<span class="c-string">$&quot;Area: {area}&quot;</span>);
+    <span class="c-kw">return</span> 0;
+}</code></pre>
+</div><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-ii-type-system-structs-enums-traits" class="doc-h1 part-h1">Part II: Type System, Structs, Enums &amp; Traits</h1>
+</div>
+<div class="doc-spacer"></div><h2 id="21-structs-generic-types" class="doc-h2">2.1 Structs &amp; Generic Types</h2><div class="doc-spacer"></div><p class="doc-p">Structs define custom composite data structures.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-12')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-12"><code class="lang-salivo"><span class="c-kw">pub</span> <span class="c-kw">struct</span> Vector2 {
+    x: <span class="c-type">float</span>,
+    y: <span class="c-type">float</span>,
+}
+
+<span class="c-comment">// Generic Struct</span>
+<span class="c-kw">pub</span> <span class="c-kw">struct</span> KeyValuePair&lt;K, V&gt; {
+    key: K,
+    value: V,
+    is_valid: <span class="c-type">bool</span>,
+}
+
+<span class="c-comment">// Instantiation &amp; Field Access</span>
+<span class="c-kw">let</span> v = Vector2 { x: 3.5, y: 7.2 };
+outln(<span class="c-string">$&quot;Vector: ({v.x}, {v.y})&quot;</span>);
+
+<span class="c-kw">let</span> pair = KeyValuePair&lt;<span class="c-type">string</span>, <span class="c-type">int</span>&gt; {
+    key: <span class="c-string">&quot;timeout_ms&quot;</span>,
+    value: 5000,
+    is_valid: true,
+};</code></pre>
+</div><div class="doc-spacer"></div><h2 id="22-enums-algebraic-data-types" class="doc-h2">2.2 Enums &amp; Algebraic Data Types</h2><div class="doc-spacer"></div><p class="doc-p">Enums can be standard tagged discriminants or algebraic sum types with attached payloads.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-13')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-13"><code class="lang-salivo"><span class="c-comment">// Tagged Enum</span>
+<span class="c-kw">pub</span> <span class="c-kw">enum</span> HttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+}
+
+<span class="c-comment">// Algebraic Tagged Union with Payloads</span>
+<span class="c-kw">pub</span> <span class="c-kw">enum</span> WebResponse {
+    Success(<span class="c-type">string</span>),
+    Redirect(<span class="c-type">string</span>, <span class="c-type">int</span>),
+    ClientError(<span class="c-type">int</span>, <span class="c-type">string</span>),
+    ServerError(<span class="c-type">string</span>),
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="23-pattern-matching-match" class="doc-h2">2.3 Pattern Matching (<code>match</code>)</h2><div class="doc-spacer"></div><p class="doc-p">Pattern matching is exhaustive and supports destructuring enum variants and constants.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-14')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-14"><code class="lang-salivo"><span class="c-kw">pub</span> <span class="c-kw">func</span> handle_response(resp: WebResponse) -&gt; <span class="c-type">string</span> {
+    <span class="c-kw">return</span> <span class="c-kw">match</span> resp {
+        WebResponse:<span class="c-mod">:Success(body)</span> =&gt; <span class="c-string">$&quot;200 OK: {body}&quot;</span>,
+        WebResponse:<span class="c-mod">:Redirect(url, code)</span> =&gt; <span class="c-string">$&quot;Redirect {code} to {url}&quot;</span>,
+        WebResponse:<span class="c-mod">:ClientError(status, err)</span> =&gt; <span class="c-string">$&quot;Error {status}: {err}&quot;</span>,
+        WebResponse:<span class="c-mod">:ServerError(msg)</span> =&gt; <span class="c-string">$&quot;500 Internal Error: {msg}&quot;</span>,
+        _ =&gt; <span class="c-string">&quot;Unknown status&quot;</span>,
+    };
+}
+
+<span class="c-kw">let</span> status = HttpMethod:<span class="c-mod">:Get</span>;
+<span class="c-kw">match</span> status {
+    HttpMethod:<span class="c-mod">:Get</span> =&gt; outln(<span class="c-string">&quot;Performing GET request&quot;</span>),
+    HttpMethod:<span class="c-mod">:Post</span> =&gt; outln(<span class="c-string">&quot;Performing POST request&quot;</span>),
+    _ =&gt; outln(<span class="c-string">&quot;Other HTTP method&quot;</span>),
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="24-traits-method-implementations" class="doc-h2">2.4 Traits &amp; Method Implementations</h2><div class="doc-spacer"></div><p class="doc-p">Traits define contracts for polymorphism. Methods and traits are attached to structs using <code>impl</code>.</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-15')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-15"><code class="lang-salivo"><span class="c-kw">pub</span> <span class="c-kw">trait</span> Printable {
+    <span class="c-kw">func</span> tostring(self) -&gt; <span class="c-type">string</span>;
+}
+
+<span class="c-kw">pub</span> <span class="c-kw">struct</span> User {
+    id: <span class="c-type">int</span>,
+    username: <span class="c-type">string</span>,
+}
+
+<span class="c-comment">// Implementing a Trait</span>
+<span class="c-kw">impl</span> Printable <span class="c-kw">for</span> User {
+    <span class="c-kw">func</span> tostring(self) -&gt; <span class="c-type">string</span> {
+        <span class="c-kw">return</span> <span class="c-string">$&quot;User(id={self.id}, username={self.username})&quot;</span>;
+    }
+}
+
+<span class="c-comment">// Adding Methods Directly to a Struct</span>
+<span class="c-kw">impl</span> User {
+    <span class="c-kw">func</span> new(id: <span class="c-type">int</span>, name: <span class="c-type">string</span>) -&gt; User {
+        <span class="c-kw">return</span> User { id: id, username: name };
+    }
+
+    <span class="c-kw">func</span> isadmin(self) -&gt; <span class="c-type">bool</span> {
+        <span class="c-kw">return</span> self.id == 1;
+    }
+}
+
+<span class="c-comment">// Usage</span>
+<span class="c-kw">let</span> u = User:<span class="c-mod">:new</span>(1, <span class="c-string">&quot;guest&quot;</span>);
+outln(u.tostring());
+<span class="c-kw">if</span> (u.isadmin()) {
+    outln(<span class="c-string">&quot;Administrator access granted.&quot;</span>);
+}
+
+<span class="c-comment">// Automatic Scope Cleanup Protocol (Drop Trait)</span>
+<span class="c-kw">pub</span> <span class="c-kw">trait</span> <span class="c-type">Drop</span> {
+    <span class="c-kw">func</span> drop(self);
+}
+
+<span class="c-kw">impl</span> <span class="c-type">Drop</span> <span class="c-kw">for</span> User {
+    <span class="c-kw">func</span> drop(self) {
+        outln(<span class="c-string">$&quot;Cleaning up resources for user {self.username}...&quot;</span>);
+    }
+}
+
+<span class="c-comment">// Display and Debug Traits for Formatting</span>
+<span class="c-kw">pub</span> <span class="c-kw">trait</span> <span class="c-type">Display</span> {
+    <span class="c-kw">func</span> display(self) -&gt; <span class="c-type">String</span>;
+}
+
+<span class="c-kw">pub</span> <span class="c-kw">trait</span> <span class="c-type">Debug</span> {
+    <span class="c-kw">func</span> debug(self) -&gt; <span class="c-type">String</span>;
+}
+
+<span class="c-kw">impl</span> <span class="c-type">Display</span> <span class="c-kw">for</span> User {
+    <span class="c-kw">func</span> display(self) -&gt; <span class="c-type">String</span> {
+        <span class="c-kw">return</span> <span class="c-string">$&quot;User({self.username} #{self.id})&quot;</span>;
+    }
+}
+
+<span class="c-kw">impl</span> <span class="c-type">Debug</span> <span class="c-kw">for</span> User {
+    <span class="c-kw">func</span> debug(self) -&gt; <span class="c-type">String</span> {
+        <span class="c-kw">return</span> <span class="c-string">$&quot;User {{ id: {self.id}, username: \&quot;</span>{self.username}\<span class="c-string">&quot; }}&quot;</span>;
+    }
+}</code></pre>
+</div><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-iii-postfix-modifiers-string-interpolation" class="doc-h1 part-h1">Part III: Postfix Modifiers &amp; String Interpolation</h1>
+</div>
+<div class="doc-spacer"></div><p class="doc-p">Salivo features a unique <strong>Postfix Modifier Engine</strong> that eliminates nested wrapper functions in favor of concise, left-to-right chaining.</p><div class="doc-spacer"></div><h2 id="31-postfix-modifiers-reference" class="doc-h2">3.1 Postfix Modifiers Reference</h2><div class="doc-spacer"></div><div class="table-container"><table><thead><tr><th>Modifier</th><th>Description</th><th>Example</th><th>Result</th></tr></thead><tbody><tr><td><code>:int</code></td><td>Converts string or float to integer</td><td><code>&quot;42&quot;:int</code></td><td><code>42</code></td></tr><tr><td><code>:float</code></td><td>Converts string or integer to float</td><td><code>&quot;3.14&quot;:float</code></td><td><code>3.14</code></td></tr><tr><td><code>:str</code></td><td>Converts integer, float, or object to string</td><td><code>100:str</code></td><td><code>&quot;100&quot;</code></td></tr><tr><td><code>:trim</code></td><td>Trims leading and trailing whitespace</td><td><code>&quot;  salivo  &quot;:trim</code></td><td><code>&quot;salivo&quot;</code></td></tr><tr><td><code>:upper</code></td><td>Converts string to uppercase</td><td><code>&quot;hello&quot;:upper</code></td><td><code>&quot;HELLO&quot;</code></td></tr><tr><td><code>:lower</code></td><td>Converts string to lowercase</td><td><code>&quot;WORLD&quot;:lower</code></td><td><code>&quot;world&quot;</code></td></tr><tr><td><code>:len</code></td><td>Returns byte length of string or collection</td><td><code>&quot;data&quot;:len</code></td><td><code>4</code></td></tr><tr><td><code>:slice(a, b)</code></td><td>Extracts substring from index <code>a</code> to <code>b</code></td><td><code>&quot;salivolang&quot;:slice(0, 6)</code></td><td><code>&quot;salivo&quot;</code></td></tr></tbody></table></div><div class="doc-spacer"></div><h2 id="32-modifier-chaining" class="doc-h2">3.2 Modifier Chaining</h2><div class="doc-spacer"></div><p class="doc-p">Modifiers chain naturally from left to right:</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-16')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-16"><code class="lang-salivo"><span class="c-kw">let</span> input_text = <span class="c-string">&quot;   HELLO SALIVO DEVELOPERS   &quot;</span>;
+<span class="c-kw">let</span> cleaned = input_text<span class="c-mod">:trim</span><span class="c-mod">:lower</span><span class="c-mod">:slice(0, 12)</span>;
+<span class="c-comment">// Result: &quot;hello salivo&quot;</span></code></pre>
+</div><div class="doc-spacer"></div><h2 id="33-formatted-string-interpolation" class="doc-h2">3.3 Formatted String Interpolation (<code>$&quot;...&quot;</code>)</h2><div class="doc-spacer"></div><p class="doc-p">Templates embed variables, expressions, and modifier chains directly:</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-17')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-17"><code class="lang-salivo"><span class="c-kw">let</span> user = <span class="c-string">&quot;  developer  &quot;</span>;
+<span class="c-kw">let</span> score = 98.6;
+<span class="c-kw">let</span> rank = 1;
+
+<span class="c-kw">let</span> summary = <span class="c-string">$&quot;Candidate: {user<span class="c-mod">:trim</span><span class="c-mod">:upper</span>}, Rank: #{rank<span class="c-mod">:str</span>}, Score: {score<span class="c-mod">:float</span>}&quot;</span>;
+outln(summary);
+<span class="c-comment">// Output: Candidate: DEVELOPER, Rank: #1, Score: 98.6</span></code></pre>
+</div><div class="doc-spacer"></div><h2 id="34-string-literal-auto-coercion" class="doc-h2">3.4 String Literal Auto-Coercion</h2><div class="doc-spacer"></div><p class="doc-p">Salivo features automatic string literal coercion. Whenever a function, struct field, or variable declaration expects a borrowed <code>StrSlice</code> or owned <code>String</code>, a raw <code>&quot;string literal&quot;</code> is seamlessly coerced at compile time without requiring manual conversion boilerplate:</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-18')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-18"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.fs::{pathJoin};
+<span class="c-kw">&gt;&lt;</span>salivo.std.strings::{pushStr, stringNew};
+
+<span class="c-comment">// String literals automatically coerce to StrSlice / String parameters!</span>
+<span class="c-kw">let</span> joined = pathJoin(<span class="c-string">&quot;var&quot;</span>, <span class="c-string">&quot;log/salivo.log&quot;</span>);
+
+<span class="c-kw">let</span> <span class="c-kw">mut</span> s = stringNew();
+s = pushStr(s, <span class="c-string">&quot;Automated Coercion&quot;</span>);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="35-the-format-macro-trait-formatting" class="doc-h2">3.5 The <code>format!</code> Macro &amp; Trait Formatting</h2><div class="doc-spacer"></div><p class="doc-p">Salivo provides a high-performance, compile-time validated <code>format!</code> macro that expands expressions into owned <code>String</code> instances with zero unnecessary allocations.</p><div class="doc-spacer"></div><h3 id="placeholders-dispatch-modes" class="doc-h3">Placeholders &amp; Dispatch Modes</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>{}</code> — <strong>Display formatting</strong>: Invokes the <code>Display</code> trait (<code>func display(self) -&gt; String</code>) on custom types, or native string formatting on primitives (<code>int</code>, <code>float</code>, <code>bool</code>, <code>string</code>, <code>StrSlice</code>, <code>String</code>).</li><li><code>{:?}</code> — <strong>Debug formatting</strong>: Invokes the <code>Debug</code> trait (<code>func debug(self) -&gt; String</code>) on custom types, or escaped quote debugging on strings.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-19')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-19"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.core::{<span class="c-type">Display</span>, <span class="c-type">Debug</span>, outln};
+<span class="c-kw">&gt;&lt;</span>salivo.std.strings::{<span class="c-type">String</span>};
+
+<span class="c-kw">pub</span> <span class="c-kw">struct</span> Point {
+    <span class="c-type">int</span> x;
+    <span class="c-type">int</span> y;
+}
+
+<span class="c-kw">impl</span> <span class="c-type">Display</span> <span class="c-kw">for</span> Point {
+    <span class="c-kw">func</span> display(self) -&gt; <span class="c-type">String</span> {
+        <span class="c-kw">return</span> <span class="c-string">$&quot;Point({self.x}, {self.y})&quot;</span>;
+    }
+}
+
+<span class="c-kw">pub</span> <span class="c-kw">func</span> main() -&gt; <span class="c-type">int</span> {
+    <span class="c-kw">let</span> p = Point { x: 10, y: 25 };
+    <span class="c-kw">let</span> text = format!(<span class="c-string">&quot;Coordinate: {}, Label: {:?}&quot;</span>, p, <span class="c-string">&quot;target_alpha&quot;</span>);
+    outln(text);
+<span class="c-comment">    // Output: Coordinate: Point(10, 25), Label: &quot;target_alpha&quot;</span>
+    <span class="c-kw">return</span> 0;
+}</code></pre>
+</div><div class="doc-spacer"></div><h3 id="safety-memory-invariants" class="doc-h3">Safety &amp; Memory Invariants</h3><div class="doc-spacer"></div><p class="doc-p">1. <strong>Checked Allocation Arithmetic</strong>: Aggregate segment lengths and final buffer allocations are evaluated through runtime-checked arithmetic (<code>salivo_checked_add_len</code>), preventing 64-bit integer wrapping vulnerabilities and panicking cleanly if sizes exceed memory limits.</p><div class="doc-spacer"></div><p class="doc-p">2. <strong>Deterministic Temporary Deallocation</strong>: Temporary heap allocations produced dynamically during formatting (such as custom <code>Display</code> returned <code>String</code> buffers or escaped debug C buffers) are tracked and freed exactly once upon formatting completion.</p><div class="doc-spacer"></div><p class="doc-p">3. <strong>Authoritative Length with Embedded NUL</strong>: Formatting preserves exact byte counts and embedded NUL (<code>\0</code>) bytes without <code>strlen</code> truncation.</p><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-iv-low-level-memory-engine-smart-pointers" class="doc-h1 part-h1">Part IV: Low-Level Memory Engine &amp; Smart Pointers</h1>
+</div>
+<div class="doc-spacer"></div><p class="doc-p">The <code>salivo.std.mem</code> module gives full control over heap memory, reference counting, and raw layout intrinsics.</p><div class="doc-spacer"></div><h2 id="41-heap-allocation-engine" class="doc-h2">4.1 Heap Allocation Engine</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-20')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-20"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.mem;
+
+<span class="c-comment">// Allocate 64 bytes with 8-byte alignment</span>
+<span class="c-kw">let</span> addr = alloc(64, 8);
+
+<span class="c-comment">// Allocate zero-initialized memory</span>
+<span class="c-kw">let</span> zero_addr = alloczero(128, 8);
+
+<span class="c-comment">// Check if pointer is currently live</span>
+<span class="c-kw">let</span> is_live = isallocated(addr);
+
+<span class="c-comment">// Reallocate buffer to larger size (from 64 to 256 bytes)</span>
+<span class="c-kw">let</span> new_addr = realloc(addr, 64, 256, 8);
+
+<span class="c-comment">// Deallocate when finished</span>
+dealloc(new_addr, 256, 8);
+dealloc(zero_addr, 128, 8);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="42-raw-memory-operations-intrinsics" class="doc-h2">4.2 Raw Memory Operations &amp; Intrinsics</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-21')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-21"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.mem;
+
+<span class="c-kw">let</span> buffer = alloc(32, 8);
+
+<span class="c-comment">// Write and read 64-bit integers at offsets</span>
+writei64(buffer, 0, 1000);
+writei64(buffer, 8, 2000);
+<span class="c-kw">let</span> val0 = readi64(buffer, 0); <span class="c-comment">// 1000</span>
+<span class="c-kw">let</span> val1 = readi64(buffer, 8); <span class="c-comment">// 2000</span>
+
+<span class="c-comment">// Write and read single bytes</span>
+writebyte(buffer, 16, 255);
+<span class="c-kw">let</span> b = readbyte(buffer, 16);  <span class="c-comment">// 255</span>
+
+<span class="c-comment">// Zero out a region of memory</span>
+zero(buffer, 0, 32);
+
+<span class="c-comment">// Copy memory from source to destination</span>
+<span class="c-kw">let</span> dest = alloc(32, 8);
+copy(buffer, dest, 32);
+
+<span class="c-comment">// Pointer arithmetic and string conversions</span>
+<span class="c-kw">let</span> s_ptr = strtoptr(<span class="c-string">&quot;Hello Memory&quot;</span>);
+<span class="c-kw">let</span> str_back = ptrtostr(s_ptr);
+
+dealloc(buffer, 32, 8);
+dealloc(dest, 32, 8);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="43-slices-spans" class="doc-h2">4.3 Slices &amp; Spans</h2><div class="doc-spacer"></div><p class="doc-p">Non-owning views over contiguous memory buffers:</p><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-22')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-22"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.mem;
+
+<span class="c-kw">let</span> raw = alloc(80, 8);
+<span class="c-kw">for</span> (<span class="c-kw">let</span> <span class="c-kw">mut</span> i = 0; i &lt; 10; i = i + 1) {
+    writei64(raw, i * 8, (i + 1) * 10);
+}
+
+<span class="c-comment">// Create slice view</span>
+<span class="c-kw">let</span> s: Slice&lt;<span class="c-type">int</span>&gt; = fromrawparts&lt;<span class="c-type">int</span>&gt;(raw, 10);
+<span class="c-kw">let</span> length = slicelen&lt;<span class="c-type">int</span>&gt;(s);      <span class="c-comment">// 10</span>
+<span class="c-kw">let</span> el0 = sliceget&lt;<span class="c-type">int</span>&gt;(s, 0);       <span class="c-comment">// 10</span>
+<span class="c-kw">let</span> el4 = sliceget&lt;<span class="c-type">int</span>&gt;(s, 4);       <span class="c-comment">// 50</span>
+
+<span class="c-comment">// Modify through slice view</span>
+sliceset&lt;<span class="c-type">int</span>&gt;(s, 0, 999);
+
+<span class="c-comment">// Create subslice (indices 2 to 6)</span>
+<span class="c-kw">let</span> sub = slicesub&lt;<span class="c-type">int</span>&gt;(s, 2, 6);
+
+dealloc(raw, 80, 8);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="44-smart-pointers-box-arc-weak-arena" class="doc-h2">4.4 Smart Pointers: Box&lt;T&gt;, Arc&lt;T&gt;, Weak&lt;T&gt;, Arena</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-23')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-23"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.mem;
+
+<span class="c-comment">// 1. Box&lt;T&gt; (Heap allocated single ownership)</span>
+<span class="c-kw">let</span> b = boxnew&lt;<span class="c-type">int</span>&gt;(42, 8);
+<span class="c-kw">let</span> value = deref&lt;<span class="c-type">int</span>&gt;(b); <span class="c-comment">// 42</span>
+
+<span class="c-comment">// 2. Arc&lt;T&gt; (Atomic Reference Counting)</span>
+<span class="c-kw">let</span> arc_node = arcnew&lt;<span class="c-type">string</span>&gt;(<span class="c-string">&quot;Shared State&quot;</span>, 16);
+<span class="c-kw">let</span> cloned_arc = retain&lt;<span class="c-type">string</span>&gt;(arc_node);
+<span class="c-kw">let</span> strong_cnt = strongcount&lt;<span class="c-type">string</span>&gt;(cloned_arc); <span class="c-comment">// 2</span>
+
+<span class="c-kw">let</span> released = release&lt;<span class="c-type">string</span>&gt;(cloned_arc);
+<span class="c-kw">let</span> final_release = release&lt;<span class="c-type">string</span>&gt;(arc_node); <span class="c-comment">// Automatically deallocated</span>
+
+<span class="c-comment">// 3. Arena Allocator</span>
+<span class="c-kw">let</span> a = arena(1048576); <span class="c-comment">// 1 MB Arena</span></code></pre>
+</div><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-v-complete-standard-library-reference" class="doc-h1 part-h1">Part V: Complete Standard Library Reference</h1>
+</div>
+<div class="doc-spacer"></div><p class="doc-p">Every module in the Salivo Standard Library (<code>salivo.std.*</code>) is described below with complete function signatures, descriptions, and code examples.</p><div class="doc-spacer"></div><h2 id="51-salivostdprelude-salivostdcore" class="doc-h2">5.1 <code>salivo.std.prelude</code> &amp; <code>salivo.std.core</code></h2><div class="doc-spacer"></div><p class="doc-p">Automatically imported into every Salivo compilation unit.</p><div class="doc-spacer"></div><h3 id="functions-structs-traits" class="doc-h3">Functions, Structs &amp; Traits</h3><div class="doc-spacer"></div><h4 id="option" class="doc-h4"><code>Option&lt;T&gt;</code></h4><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-24')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-24"><code class="lang-salivo"><span class="c-kw">pub</span> <span class="c-kw">struct</span> <span class="c-type">Option</span>&lt;T&gt; {
+    value: T,
+    is_some: <span class="c-type">bool</span>,
+}</code></pre>
+</div><div class="doc-spacer"></div><ul class="doc-list"><li><code>some&lt;T&gt;(val: T) -&gt; Option&lt;T&gt;</code>: Constructs an <code>Option</code> containing a value.</li><li><code>none&lt;T&gt;() -&gt; Option&lt;T&gt;</code>: Constructs an empty <code>Option</code>.</li></ul><div class="doc-spacer"></div><h4 id="result" class="doc-h4"><code>Result&lt;T, E&gt;</code></h4><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-25')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-25"><code class="lang-salivo"><span class="c-kw">pub</span> <span class="c-kw">struct</span> <span class="c-type">Result</span>&lt;T, E&gt; {
+    value: T,
+    error: E,
+    is_ok: <span class="c-type">bool</span>,
+}</code></pre>
+</div><div class="doc-spacer"></div><ul class="doc-list"><li><code>ok&lt;T, E&gt;(val: T) -&gt; Result&lt;T, E&gt;</code>: Constructs a successful <code>Result</code>.</li><li><code>err&lt;T, E&gt;(e: E) -&gt; Result&lt;T, E&gt;</code>: Constructs a failed <code>Result</code>.</li></ul><div class="doc-spacer"></div><h4 id="diagnostics-assertions" class="doc-h4">Diagnostics &amp; Assertions</h4><div class="doc-spacer"></div><ul class="doc-list"><li><code>panic(msg: string)</code>: Aborts execution with a diagnostic trace.</li><li><code>assert(cond: bool, msg: string)</code>: Panics if <code>cond</code> is false.</li><li><code>assertEq(a: int, b: int, msg: string)</code> / <code>asserteq(...)</code>: Panics if <code>a != b</code>.</li><li><code>assertStrEq(a: string, b: string, msg: string)</code> / <code>assertstreq(...)</code>: Panics if <code>a != b</code>.</li><li><code>assertNe(a: int, b: int, msg: string)</code> / <code>assertne(...)</code>: Panics if <code>a == b</code>.</li><li><code>assertStrNe(a: string, b: string, msg: string)</code> / <code>assertstrne(...)</code>: Panics if <code>a == b</code>.</li></ul><div class="doc-spacer"></div><h4 id="standard-traits" class="doc-h4">Standard Traits</h4><div class="doc-spacer"></div><ul class="doc-list"><li><code>trait Display { func display(self) -&gt; string; }</code></li><li><code>trait Debug { func debug(self) -&gt; string; }</code></li><li><code>trait Iterator&lt;T&gt; { func next(self) -&gt; Option&lt;T&gt;; }</code></li><li><code>trait Drop { func drop(self); }</code>: Standard automated RAII cleanup protocol.</li></ul><div class="doc-spacer"></div><h4 id="core-conversions-formatting" class="doc-h4">Core Conversions &amp; Formatting</h4><div class="doc-spacer"></div><ul class="doc-list"><li><code>str(v: int) -&gt; string</code>: Converts integer to string.</li><li><code>intstr(v: int) -&gt; string</code>: Converts integer to string.</li><li><code>strint(s: string) -&gt; int</code>: Parses string to integer.</li><li><code>floatstr(f: float) -&gt; string</code>: Converts float to string.</li><li><code>strfloat(s: string) -&gt; float</code>: Parses string to float.</li><li><code>len(s: string) -&gt; int</code>: Returns string length.</li><li><code>trim(s: string) -&gt; string</code>: Strips whitespace from both ends.</li><li><code>upper(s: string) -&gt; string</code>: Converts string to uppercase.</li><li><code>lower(s: string) -&gt; string</code>: Converts string to lowercase.</li><li><code>slice(s: string, start: int, end: int) -&gt; string</code>: Substring from <code>start</code> to <code>end</code>.</li><li><code>charat(s: string, idx: int) -&gt; int</code>: Returns Unicode codepoint at index <code>idx</code>.</li><li><code>find(s: string, sub: string) -&gt; int</code>: Returns first index of <code>sub</code>, or <code>-1</code>.</li><li><code>contains(s: string, sub: string) -&gt; bool</code>: Returns <code>true</code> if <code>sub</code> exists in <code>s</code>.</li><li><code>startswith(s: string, prefix: string) -&gt; bool</code> / <code>startsWith(...)</code>: Returns <code>true</code> if <code>s</code> begins with <code>prefix</code>.</li><li><code>endswith(s: string, suffix: string) -&gt; bool</code> / <code>endsWith(...)</code>: Returns <code>true</code> if <code>s</code> terminates with <code>suffix</code>.</li><li><code>replace(s: string, target: string, repl: string) -&gt; string</code>: Replaces occurrences of <code>target</code> with <code>repl</code>.</li><li><code>repeat(s: string, count: int) -&gt; string</code>: Repeats string <code>count</code> times.</li><li><code>padstart(s: string, targetlen: int, pad: string) -&gt; string</code> / <code>padStart(...)</code>: Prepends <code>pad</code> until <code>targetlen</code>.</li><li><code>padend(s: string, targetlen: int, pad: string) -&gt; string</code> / <code>padEnd(...)</code>: Appends <code>pad</code> until <code>targetlen</code>.</li><li><code>in() -&gt; string</code> / <code>input() -&gt; string</code>: Reads a line from standard input.</li><li><code>env(key: string, fallback: string) -&gt; string</code>: Reads environment variable <code>key</code> or returns <code>fallback</code>.</li><li><code>debug(s: string) -&gt; string</code>: Returns escaped, quoted debug representation of string.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-26')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-26"><code class="lang-salivo"><span class="c-kw">let</span> greeting = <span class="c-string">&quot;  salivo world  &quot;</span>;
+<span class="c-kw">let</span> clean = trim(greeting);
+<span class="c-kw">let</span> up = upper(clean);
+<span class="c-kw">let</span> has_world = contains(up, <span class="c-string">&quot;WORLD&quot;</span>);
+outln(<span class="c-string">$&quot;Result: {up}, Found: {has_world}&quot;</span>);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="52-salivostdstrings" class="doc-h2">5.2 <code>salivo.std.strings</code></h2><div class="doc-spacer"></div><p class="doc-p">Advanced UTF-8 string manipulation, owned <code>String</code>, and zero-copy <code>StrSlice</code> views.</p><div class="doc-spacer"></div><h3 id="types" class="doc-h3">Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>String</code>: Owned growable heap string (<code>ptr</code>, <code>len</code>, <code>cap</code>).</li><li><code>StrSlice</code>: Borrowed zero-copy string slice view (<code>ptr</code>, <code>len</code>).</li><li><code>ByteSlice</code>: Raw unvalidated byte buffer view (<code>ptr</code>, <code>len</code>).</li><li><code>CharIterator</code>: Unicode scalar code point iterator (<code>ptr</code>, <code>len</code>, <code>index</code>).</li></ul><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>stringNew() -&gt; String</code> / <code>stringnew()</code>: Creates new empty owned string.</li><li><code>stringWithCap(cap: int) -&gt; String</code> / <code>stringwithcap()</code>: Preallocates string with capacity <code>cap</code>.</li><li><code>fromStr(s: StrSlice) -&gt; String</code> / <code>fromstr()</code>: Allocates owned <code>String</code> from <code>StrSlice</code>.</li><li><code>asStr(s: String) -&gt; StrSlice</code> / <code>asstr()</code>: Borrows <code>StrSlice</code> from owned <code>String</code>.</li><li><code>tryFromParts(ptr: int, len: int) -&gt; Option&lt;StrSlice&gt;</code> / <code>tryfromparts()</code>: Validates that memory region contains valid UTF-8 and returns <code>Some(StrSlice)</code> or <code>None</code>.</li><li><code>fromUtf8(bytes: ByteSlice) -&gt; Option&lt;StrSlice&gt;</code> / <code>fromutf8()</code>: Validates a raw <code>ByteSlice</code> and returns borrowed <code>StrSlice</code> if valid UTF-8.</li><li><code>fromparts(ptr: int, len: int) -&gt; StrSlice</code> / <code>fromRawParts()</code>: Low-level unchecked raw constructor (explicit FFI/runtime escape hatch; does not validate UTF-8).</li><li><code>fromCString(s: string) -&gt; String</code> / <code>fromcstring()</code>: Creates owned <code>String</code> from string literal.</li><li><code>toCString(s: String) -&gt; string</code> / <code>tocstring()</code>: Converts <code>String</code> to C-string.</li><li><code>cStringView(s: string) -&gt; StrSlice</code> / <code>cstringview()</code>: Creates borrowed <code>StrSlice</code> from literal.</li><li><code>subslicestr(s: StrSlice, start: int, end: int) -&gt; StrSlice</code>: Zero-copy subslice.</li><li><code>concat(a: String, b: String) -&gt; String</code>: Concatenates two owned strings.</li><li><code>pushStr(s: String, appendtext: StrSlice) -&gt; String</code> / <code>pushstr()</code>: Appends slice to string.</li><li><code>push(s: String, codepoint: int) -&gt; String</code>: Appends Unicode codepoint.</li><li><code>pushByte(s: String, b: int) -&gt; String</code> / <code>pushbyte()</code>: Appends raw byte.</li><li><code>clear(s: String) -&gt; String</code>: Truncates string to length 0.</li><li><code>reserve(s: String, mincap: int) -&gt; String</code>: Ensures string capacity.</li><li><code>chars(s: String) -&gt; CharIterator</code>: Initializes codepoint iterator.</li><li><code>nextchar(it: CharIterator) -&gt; Option&lt;int&gt;</code>: Reads current codepoint.</li><li><code>stepchar(it: CharIterator) -&gt; CharIterator</code>: Advances iterator by 1 codepoint.</li><li><code>unicodeToUpper(cp: int) -&gt; int</code> / <code>unicodetopper(cp: int) -&gt; int</code>: Unicode-aware 1:1 scalar uppercase mapping (covering ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic, and Fullwidth forms).</li><li><code>unicodeToLower(cp: int) -&gt; int</code> / <code>unicodetolower(cp: int) -&gt; int</code>: Unicode-aware 1:1 scalar lowercase mapping (covering ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic, and Fullwidth forms).</li><li><code>toUpper(s: String) -&gt; String</code> / <code>upper(s: String) -&gt; String</code>: Converts String to uppercase using Unicode-aware 1:1 scalar case conversion.</li><li><code>toLower(s: String) -&gt; String</code> / <code>lower(s: String) -&gt; String</code>: Converts String to lowercase using Unicode-aware 1:1 scalar case conversion.</li><li><code>rfind(s: String, sub: String) -&gt; int</code>: Finds last index of <code>sub</code>.</li><li><code>assertStringEq(a: String, b: String, msg: string)</code> / <code>assertstringeq(...)</code>: Asserts string equality.</li><li><code>assertSliceEq(a: StrSlice, b: StrSlice, msg: string)</code> / <code>assertsliceeq(...)</code>: Asserts slice equality.</li></ul><div class="doc-spacer"></div>
+<div class="callout-card callout-note">
+    <div class="callout-header">
+        <span class="callout-badge">NOTE</span>
+    </div>
+    <div class="callout-body"><strong>Unicode Case Mapping Architecture &amp; Structural Scope</strong>:<br/><code>unicodeToUpper</code>, <code>unicodeToLower</code>, <code>toUpper</code>, and <code>toLower</code> provide high-performance <strong>Unicode-aware 1:1 scalar code point case mapping</strong> across major global scripts (ASCII, Latin-1 Supplement, Latin Extended-A, Greek/Coptic, Cyrillic, and Fullwidth Latin).<br/>Because scalar functions map a single code point to a single code point (<code>int -&gt; int</code>), 1:1 scalar conversion preserves code point length invariants. Multi-code point expansions (such as German <code>ß</code> expanding to <code>SS</code>, or ligatures such as <code>ﬁ</code> expanding to <code>FI</code>) and contextual/locale-specific casing (such as Turkish dotted/dotless <code>I</code>/<code>i</code>) are outside the 1:1 scalar mapping model. Unmapped code points outside the curated set are safely preserved without modification or corruption.</div>
+</div><div class="doc-spacer"></div>
+<div class="callout-card callout-tip">
+    <div class="callout-header">
+        <span class="callout-badge">TIP</span>
+    </div>
+    <div class="callout-body"><strong>Authoritative Length &amp; Embedded NUL (<code>\0</code>) Preservation</strong>:<br/>Both <code>String</code> (<code>{ ptr: int, len: int, cap: int }</code>) and <code>StrSlice</code> (<code>{ ptr: int, len: int }</code>) treat their explicit <code>len</code> field as authoritative across all compiler lowering passes and standard library operations. Unlike legacy C strings, strings in Salivo fully support arbitrary binary byte sequences and embedded NUL bytes (<code>\0</code>) without premature <code>strlen()</code> truncation.</div>
+</div><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-27')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-27"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.strings;
+
+<span class="c-kw">let</span> <span class="c-kw">mut</span> s = stringNew();
+s = pushStr(s, cStringView(<span class="c-string">&quot;Salivo&quot;</span>));
+s = push(s, 32); <span class="c-comment">// Space</span>
+s = pushStr(s, cStringView(<span class="c-string">&quot;Language&quot;</span>));
+
+<span class="c-kw">let</span> slice_view = asStr(s);
+assertEq(slice_view.len, 15, <span class="c-string">&quot;Slice length mismatch&quot;</span>);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="53-salivostdcollections" class="doc-h2">5.3 <code>salivo.std.collections</code></h2><div class="doc-spacer"></div><p class="doc-p">High-performance generic data structures.</p><div class="doc-spacer"></div><h3 id="1-vector-vec" class="doc-h3">1. Vector (<code>Vec&lt;T&gt;</code>)</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>vecNew&lt;T&gt;() -&gt; Vec&lt;T&gt;</code> / <code>vecnew&lt;T&gt;()</code>: Creates an empty dynamic vector.</li><li><code>vecCap&lt;T&gt;(cap: int) -&gt; Vec&lt;T&gt;</code> / <code>veccap&lt;T&gt;()</code>: Creates a vector with initial capacity.</li><li><code>push&lt;T&gt;(v: Vec&lt;T&gt;, val: T) -&gt; Vec&lt;T&gt;</code>: Appends an element with exponential growth.</li><li><code>pop&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Removes and returns the last element.</li><li><code>get&lt;T&gt;(v: Vec&lt;T&gt;, index: int) -&gt; T</code>: Reads element at <code>index</code> with bounds checking.</li><li><code>set&lt;T&gt;(v: Vec&lt;T&gt;, index: int, val: T)</code>: In-place update of element at <code>index</code>.</li><li><code>swapRemove&lt;T&gt;(v: Vec&lt;T&gt;, index: int) -&gt; Vec&lt;T&gt;</code> / <code>swap_remove&lt;T&gt;()</code>: $O(1)$ removal by replacing target with last element.</li><li><code>insert&lt;T&gt;(v: Vec&lt;T&gt;, index: int, val: T) -&gt; Vec&lt;T&gt;</code>: Inserts element at index.</li><li><code>remove&lt;T&gt;(v: Vec&lt;T&gt;, index: int) -&gt; Vec&lt;T&gt;</code>: Removes element at index with element shifting.</li><li><code>veclen&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; int</code>: Returns current element count.</li><li><code>capacity&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; int</code>: Returns allocated capacity.</li><li><code>empty&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; bool</code> / <code>isEmpty&lt;T&gt;()</code>: Checks if vector is empty.</li><li><code>reserve&lt;T&gt;(v: Vec&lt;T&gt;, additional: int) -&gt; Vec&lt;T&gt;</code>: Reserves additional capacity.</li><li><code>reserveExact&lt;T&gt;(v: Vec&lt;T&gt;, additional: int) -&gt; Vec&lt;T&gt;</code> / <code>reserve_exact&lt;T&gt;()</code>: Reserves exact capacity.</li><li><code>truncate&lt;T&gt;(v: Vec&lt;T&gt;, newlen: int) -&gt; Vec&lt;T&gt;</code>: Truncates to <code>newlen</code>, dropping discarded elements.</li><li><code>resize&lt;T&gt;(v: Vec&lt;T&gt;, newlen: int, defaultval: T) -&gt; Vec&lt;T&gt;</code>: Resizes with default.</li><li><code>clear&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; Vec&lt;T&gt;</code>: Clears all elements, retaining capacity.</li><li><code>vecIter&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; VecIterator&lt;T&gt;</code>: Creates forward cursor iterator.</li><li><code>vecNext&lt;T&gt;(it: VecIterator&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Advances iterator.</li><li><code>vecEq&lt;T&gt;(a: Vec&lt;T&gt;, b: Vec&lt;T&gt;) -&gt; bool</code>: Element-wise vector equality.</li><li><code>vecDebug&lt;T&gt;(v: Vec&lt;T&gt;) -&gt; string</code>: Debug string representation <code>[elem1, elem2]</code>.</li></ul><div class="doc-spacer"></div><h3 id="2-double-ended-queue-deque-vecdeque" class="doc-h3">2. Double-Ended Queue (<code>Deque&lt;T&gt;</code> / <code>VecDeque&lt;T&gt;</code>)</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>dequeNew&lt;T&gt;() -&gt; Deque&lt;T&gt;</code> / <code>deqNew&lt;T&gt;()</code>: Creates a ring-buffer double-ended queue.</li><li><code>pushFront&lt;T&gt;(dq: Deque&lt;T&gt;, val: T) -&gt; Deque&lt;T&gt;</code>: Prepends element at front in amortized $O(1)$.</li><li><code>pushBack&lt;T&gt;(dq: Deque&lt;T&gt;, val: T) -&gt; Deque&lt;T&gt;</code>: Appends element at back in amortized $O(1)$.</li><li><code>popFront&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Removes and returns front element.</li><li><code>popBack&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Removes and returns back element.</li><li><code>deqget&lt;T&gt;(dq: Deque&lt;T&gt;, index: int) -&gt; T</code>: Reads element at logical index <code>index</code>.</li><li><code>deqlen&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; int</code>: Returns current number of elements.</li><li><code>deqIsEmpty&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; bool</code>: Returns <code>true</code> if deque is empty.</li><li><code>deqIter&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; DequeIterator&lt;T&gt;</code>: Creates forward iterator.</li><li><code>deqNext&lt;T&gt;(it: DequeIterator&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Advances deque iterator.</li><li><code>dequeEq&lt;T&gt;(a: Deque&lt;T&gt;, b: Deque&lt;T&gt;) -&gt; bool</code>: Deque equality.</li><li><code>dequeDebug&lt;T&gt;(dq: Deque&lt;T&gt;) -&gt; string</code>: Debug representation <code>[elem1, elem2]</code>.</li></ul><div class="doc-spacer"></div><h3 id="3-hash-map-hashmap" class="doc-h3">3. Hash Map (<code>HashMap&lt;K, V&gt;</code>)</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>mapNew&lt;K, V&gt;() -&gt; HashMap&lt;K, V&gt;</code>: Creates an empty open-addressing hash table with linear probing.</li><li><code>put&lt;K, V&gt;(map: HashMap&lt;K, V&gt;, key: K, val: V) -&gt; HashMap&lt;K, V&gt;</code> / <code>insert&lt;K, V&gt;()</code>: Inserts or updates key, automatically rehashing at 75% load factor.</li><li><code>lookup&lt;K, V&gt;(map: HashMap&lt;K, V&gt;, key: K) -&gt; Option&lt;V&gt;</code>: Retrieves value for key without truncation on embedded NUL bytes.</li><li><code>has&lt;K, V&gt;(map: HashMap&lt;K, V&gt;, key: K) -&gt; bool</code> / <code>containsKey&lt;K, V&gt;()</code>: Checks key existence.</li><li><code>delete&lt;K, V&gt;(map: HashMap&lt;K, V&gt;, key: K) -&gt; HashMap&lt;K, V&gt;</code> / <code>remove&lt;K, V&gt;()</code>: Removes key, marking slot as tombstone for reuse.</li><li><code>maplen&lt;K, V&gt;(map: HashMap&lt;K, V&gt;) -&gt; int</code>: Returns count of active entries.</li><li><code>mapIsEmpty&lt;K, V&gt;(map: HashMap&lt;K, V&gt;) -&gt; bool</code>: Returns <code>true</code> if map is empty.</li><li><code>mapIter&lt;K, V&gt;(map: HashMap&lt;K, V&gt;) -&gt; MapIterator&lt;K, V&gt;</code>: Creates bucket cursor iterator.</li><li><code>mapNext&lt;K, V&gt;(it: MapIterator&lt;K, V&gt;) -&gt; Option&lt;MapEntry&lt;K, V&gt;&gt;</code>: Advances map iterator.</li><li><code>mapEq&lt;K, V&gt;(a: HashMap&lt;K, V&gt;, b: HashMap&lt;K, V&gt;) -&gt; bool</code>: Key-value map equality.</li><li><code>mapDebug&lt;K, V&gt;(map: HashMap&lt;K, V&gt;) -&gt; string</code>: Debug representation <code>{k1: v1, k2: v2}</code>.</li></ul><div class="doc-spacer"></div><h3 id="4-hash-set-hashset" class="doc-h3">4. Hash Set (<code>HashSet&lt;T&gt;</code>)</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>setNew&lt;T&gt;() -&gt; HashSet&lt;T&gt;</code>: Creates an empty hash set built on <code>HashMap&lt;T, int&gt;</code>.</li><li><code>add&lt;T&gt;(set: HashSet&lt;T&gt;, val: T) -&gt; HashSet&lt;T&gt;</code>: Adds element to set.</li><li><code>discard&lt;T&gt;(set: HashSet&lt;T&gt;, val: T) -&gt; HashSet&lt;T&gt;</code>: Removes element from set.</li><li><code>member&lt;T&gt;(set: HashSet&lt;T&gt;, val: T) -&gt; bool</code> / <code>setContains&lt;T&gt;()</code>: Checks element membership.</li><li><code>setlen&lt;T&gt;(set: HashSet&lt;T&gt;) -&gt; int</code>: Returns element count.</li><li><code>setIsEmpty&lt;T&gt;(set: HashSet&lt;T&gt;) -&gt; bool</code>: Checks if set is empty.</li><li><code>setUnion&lt;T&gt;(a: HashSet&lt;T&gt;, b: HashSet&lt;T&gt;) -&gt; HashSet&lt;T&gt;</code>: Computes union $A \cup B$.</li><li><code>setIntersection&lt;T&gt;(a: HashSet&lt;T&gt;, b: HashSet&lt;T&gt;) -&gt; HashSet&lt;T&gt;</code>: Computes intersection $A \cap B$.</li><li><code>setDifference&lt;T&gt;(a: HashSet&lt;T&gt;, b: HashSet&lt;T&gt;) -&gt; HashSet&lt;T&gt;</code>: Computes difference $A \setminus B$.</li><li><code>setIter&lt;T&gt;(set: HashSet&lt;T&gt;) -&gt; SetIterator&lt;T&gt;</code>: Creates set iterator.</li><li><code>setNext&lt;T&gt;(it: SetIterator&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Advances set iterator.</li><li><code>setEq&lt;T&gt;(a: HashSet&lt;T&gt;, b: HashSet&lt;T&gt;) -&gt; bool</code>: Set equality.</li><li><code>setDebug&lt;T&gt;(set: HashSet&lt;T&gt;) -&gt; string</code>: Debug representation <code>{elem1, elem2}</code>.</li></ul><div class="doc-spacer"></div><h3 id="5-stack-stack-queue-queue-adapters" class="doc-h3">5. Stack (<code>Stack&lt;T&gt;</code>) &amp; Queue (<code>Queue&lt;T&gt;</code>) Adapters</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>stackNew&lt;T&gt;() -&gt; Stack&lt;T&gt;</code>: Creates a LIFO stack adapter over <code>Vec&lt;T&gt;</code>.</li><li><code>stackPush&lt;T&gt;(s: Stack&lt;T&gt;, val: T) -&gt; Stack&lt;T&gt;</code>: Pushes element onto stack.</li><li><code>stackPop&lt;T&gt;(s: Stack&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Pops element from stack.</li><li><code>stackPeek&lt;T&gt;(s: Stack&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Peeks at top element.</li><li><code>stackLen&lt;T&gt;(s: Stack&lt;T&gt;) -&gt; int</code>: Returns stack depth.</li><li><code>stackIsEmpty&lt;T&gt;(s: Stack&lt;T&gt;) -&gt; bool</code>: Checks if stack is empty.</li><li><code>queueNew&lt;T&gt;() -&gt; Queue&lt;T&gt;</code>: Creates a FIFO queue adapter over ring-buffer <code>Deque&lt;T&gt;</code>.</li><li><code>enqueue&lt;T&gt;(q: Queue&lt;T&gt;, val: T) -&gt; Queue&lt;T&gt;</code>: Enqueues element at tail.</li><li><code>dequeue&lt;T&gt;(q: Queue&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Dequeues element from head.</li><li><code>queuePeek&lt;T&gt;(q: Queue&lt;T&gt;) -&gt; Option&lt;T&gt;</code>: Peeks at head element.</li><li><code>queueLen&lt;T&gt;(q: Queue&lt;T&gt;) -&gt; int</code>: Returns queue length.</li><li><code>queueIsEmpty&lt;T&gt;(q: Queue&lt;T&gt;) -&gt; bool</code>: Checks if queue is empty.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-28')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-28"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.collections::{<span class="c-type">Vec</span>, vecNew, push, get, veclen, <span class="c-type">HashMap</span>, mapNew, put, lookup, Deque, dequeNew, pushBack, popFront};
+
+<span class="c-comment">// Vector Example</span>
+<span class="c-kw">let</span> <span class="c-kw">mut</span> v = vecNew&lt;<span class="c-type">int</span>&gt;();
+v = push&lt;<span class="c-type">int</span>&gt;(v, 100);
+v = push&lt;<span class="c-type">int</span>&gt;(v, 200);
+<span class="c-kw">let</span> val = get&lt;<span class="c-type">int</span>&gt;(v, 0); <span class="c-comment">// 100</span>
+
+<span class="c-comment">// Hash Map Example</span>
+<span class="c-kw">let</span> <span class="c-kw">mut</span> users = mapNew&lt;<span class="c-type">int</span>, <span class="c-type">string</span>&gt;();
+users = put&lt;<span class="c-type">int</span>, <span class="c-type">string</span>&gt;(users, 101, <span class="c-string">&quot;User A&quot;</span>);
+users = put&lt;<span class="c-type">int</span>, <span class="c-type">string</span>&gt;(users, 102, <span class="c-string">&quot;User B&quot;</span>);
+<span class="c-kw">let</span> user_opt = lookup&lt;<span class="c-type">int</span>, <span class="c-type">string</span>&gt;(users, 101);
+<span class="c-kw">if</span> (user_opt.is_some) {
+    outln(<span class="c-string">$&quot;Found User: {user_opt.value}&quot;</span>);
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="54-salivostdmath" class="doc-h2">5.4 <code>salivo.std.math</code></h2><div class="doc-spacer"></div><p class="doc-p">Constants, trigonometry, logarithms, arithmetic invariants, and random numbers.</p><div class="doc-spacer"></div><h3 id="constants" class="doc-h3">Constants</h3><div class="doc-spacer"></div><p class="doc-p"><code>PI</code> (3.14159...), <code>TAU</code> (6.28318...), <code>E</code> (2.71828...), <code>LN2</code>, <code>LN10</code>, <code>SQRT2</code>, <code>EPSILON</code>, <code>NAN_VAL</code>, <code>INFINITY_VAL</code>, <code>NEG_INFINITY_VAL</code>.</p><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>abs(v: int) -&gt; int</code> / <code>absfloat(v: float) -&gt; float</code>: Absolute value.</li><li><code>min(a: int, b: int) -&gt; int</code> / <code>max(a: int, b: int) -&gt; int</code>: Minimum and maximum.</li><li><code>clamp(val: int, min_val: int, max_val: int) -&gt; int</code>: Clamps value in range.</li><li><code>pow(base_val: int, exp_val: int) -&gt; int</code>: Integer power.</li><li><code>sqrt(v: float) -&gt; float</code>: Square root (Newton-Raphson).</li><li><code>cbrt(v: float) -&gt; float</code>: Cube root.</li><li><code>sin(rad: float) -&gt; float</code> / <code>cos(rad: float) -&gt; float</code> / <code>tan(rad: float) -&gt; float</code>: Trigonometric functions.</li><li><code>asin(v: float) -&gt; float</code> / <code>acos(v: float) -&gt; float</code> / <code>atan(v: float) -&gt; float</code> / <code>atan2(y: float, x: float) -&gt; float</code>: Inverse trigonometry.</li><li><code>exp(v: float) -&gt; float</code>: Exponential function $e^v$.</li><li><code>log(v: float) -&gt; float</code> / <code>log2(v: float) -&gt; float</code> / <code>log10(v: float) -&gt; float</code>: Logarithms.</li><li><code>floor(v: float) -&gt; int</code> / <code>ceil(v: float) -&gt; int</code> / <code>round(v: float) -&gt; int</code> / <code>trunc(v: float) -&gt; int</code>: Rounding.</li><li><code>fract(v: float) -&gt; float</code>: Fractional part.</li><li><code>satadd(a: int, b: int, max_val: int) -&gt; int</code> / <code>satsub(a: int, b: int, min_val: int) -&gt; int</code>: Saturating arithmetic.</li><li><code>checkedadd(a: int, b: int, max_val: int) -&gt; Option&lt;int&gt;</code>: Overflow-checked arithmetic.</li><li><code>wrapadd(a: int, b: int, max_val: int) -&gt; int</code>: Wrapping arithmetic.</li><li><code>seed(s: int) -&gt; Seed</code>: Initializes PRNG seed.</li><li><code>rng(s: Seed) -&gt; RandomGenerator</code>: Initializes PRNG state.</li><li><code>nextu32(rng: RandomGenerator) -&gt; int</code>: Generates next random 32-bit integer.</li><li><code>nextf32(rng: RandomGenerator) -&gt; float</code>: Generates float in $[0.0, 1.0)$.</li><li><code>range(rng: RandomGenerator, min_val: int, max_val: int) -&gt; int</code>: Random integer in $[min, max]$.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-29')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-29"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.math;
+
+<span class="c-kw">let</span> s = seed(12345);
+<span class="c-kw">let</span> r = rng(s);
+<span class="c-kw">let</span> die_roll = range(r, 1, 6);
+<span class="c-kw">let</span> hyp = sqrt(3.0 * 3.0 + 4.0 * 4.0); <span class="c-comment">// 5.0</span></code></pre>
+</div><div class="doc-spacer"></div><h2 id="55-salivostdio" class="doc-h2">5.5 <code>salivo.std.io</code></h2><div class="doc-spacer"></div><p class="doc-p">File streams, standard I/O streams, binary buffering, and directories.</p><div class="doc-spacer"></div><h3 id="types" class="doc-h3">Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>File</code>: File stream handle (<code>handle_id</code>, <code>position</code>, <code>is_open</code>, <code>arc_ref</code>).</li><li><code>Directory</code>: Directory handle (<code>handle_id</code>, <code>path</code>).</li><li><code>Metadata</code>: File size, directory flag, readonly status.</li><li><code>IoError</code> &amp; <code>IoErrorKind</code> (<code>NotFound</code>, <code>PermissionDenied</code>, <code>AlreadyExists</code>, <code>InvalidInput</code>, etc.).</li></ul><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>open(path: string) -&gt; Result&lt;File, IoError&gt;</code>: Opens existing file.</li><li><code>create(path: string) -&gt; Result&lt;File, IoError&gt;</code>: Creates/truncates file.</li><li><code>isopen(f: File) -&gt; bool</code>: Checks open status.</li><li><code>close(f: File) -&gt; Result&lt;bool, IoError&gt;</code>: Closes file stream.</li><li><code>read(f: File, buf_ptr: int, count_bytes: int) -&gt; Result&lt;int, IoError&gt;</code>: Reads bytes into buffer.</li><li><code>write(f: File, buf_ptr: int, count_bytes: int) -&gt; Result&lt;int, IoError&gt;</code>: Writes bytes from buffer.</li><li><code>flush(f: File) -&gt; Result&lt;bool, IoError&gt;</code>: Flushes file buffer.</li><li><code>seek(f: File, offset: int, whence: int) -&gt; Result&lt;int, IoError&gt;</code>: Seeks position.</li><li><code>tell(f: File) -&gt; Result&lt;int, IoError&gt;</code>: Gets current position.</li><li><code>delete(path: string) -&gt; Result&lt;bool, IoError&gt;</code>: Removes file.</li><li><code>exists(path: string) -&gt; bool</code>: Checks file existence.</li><li><code>mkdir(path: string) -&gt; Result&lt;Directory, IoError&gt;</code>: Creates directory.</li><li><code>rmdir(path: string) -&gt; Result&lt;bool, IoError&gt;</code>: Removes directory.</li><li><code>dirlist(path: string) -&gt; Result&lt;string, IoError&gt;</code>: Lists entries.</li><li><code>dircount(path: string) -&gt; Result&lt;int, IoError&gt;</code>: Entry count.</li><li><code>pwd() -&gt; string</code>: Returns current working directory.</li><li><code>cd(path: string) -&gt; Result&lt;bool, IoError&gt;</code>: Changes directory.</li><li><code>readstr(path: string) -&gt; Result&lt;string, IoError&gt;</code>: Reads full file to string.</li><li><code>writestr(path: string, content: string) -&gt; Result&lt;bool, IoError&gt;</code>: Writes string to file.</li><li><code>appendstr(path: string, content: string) -&gt; Result&lt;bool, IoError&gt;</code>: Appends string to file.</li><li><code>readline() -&gt; Result&lt;string, IoError&gt;</code> / <code>inln() -&gt; string</code>: Reads stdin line.</li><li><code>inint() -&gt; int</code> / <code>infloat() -&gt; float</code>: Reads typed values from stdin.</li><li><code>readbytes(f: File, count_bytes: int) -&gt; Result&lt;int, IoError&gt;</code>: Allocates and reads bytes.</li><li><code>writebytes(f: File, buffer_addr: int, count_bytes: int) -&gt; Result&lt;int, IoError&gt;</code>: Writes raw bytes.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-30')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-30"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.io;
+
+<span class="c-kw">let</span> write_res = writestr(<span class="c-string">&quot;config.json&quot;</span>, <span class="c-string">&quot;{\&quot;</span>status\<span class="c-string">&quot;: \&quot;</span>active\<span class="c-string">&quot;}&quot;</span>);
+<span class="c-kw">if</span> (write_res.is_ok) {
+    <span class="c-kw">let</span> content_res = readstr(<span class="c-string">&quot;config.json&quot;</span>);
+    <span class="c-kw">if</span> (content_res.is_ok) {
+        outln(<span class="c-string">$&quot;Read: {content_res.value}&quot;</span>);
+    }
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="56-salivostdfs" class="doc-h2">5.6 <code>salivo.std.fs</code></h2><div class="doc-spacer"></div><p class="doc-p">Path normalization, file metadata inspection, and low-level OS file descriptors.</p><div class="doc-spacer"></div><h3 id="types-functions" class="doc-h3">Types &amp; Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>path(p: string) -&gt; Path</code>: Constructs Path wrapper.</li><li><code>normalize(path: string) -&gt; string</code>: Converts backslashes to forward slashes.</li><li><code>pathJoin(path1: string, path2: string) -&gt; string</code> / <code>pathjoin(...)</code>: Joins two paths safely.</li><li><code>parent(path: string) -&gt; string</code>: Returns parent directory path.</li><li><code>filename(path: string) -&gt; string</code>: Returns base filename.</li><li><code>ext(path: string) -&gt; string</code>: Returns file extension without dot.</li><li><code>absolute(path: string) -&gt; string</code>: Resolves absolute path.</li><li><code>relative(base: string, target: string) -&gt; string</code>: Computes relative path.</li><li><code>pathExists(path: string) -&gt; bool</code> / <code>pathexists(...)</code>: Checks file or directory existence.</li><li><code>open(path: string, mode: string) -&gt; File</code>: Opens file with mode (<code>&quot;r&quot;</code>, <code>&quot;w&quot;</code>, <code>&quot;a&quot;</code>, <code>&quot;rb+&quot;</code>).</li><li><code>close(file: File)</code> / <code>flush(file: File)</code> / <code>sync(file: File)</code></li><li><code>meta(file: File) -&gt; FileMetadata</code>: Size, timestamps, permissions.</li><li><code>read(file: File, buffer: int, maxbytes: int) -&gt; int</code>: Reads up to <code>maxbytes</code>.</li><li><code>readByte(file: File) -&gt; int</code> / <code>readbyte(...)</code>: Reads single byte.</li><li><code>seek(file: File, offset: int) -&gt; int</code> / <code>tell(file: File) -&gt; int</code> / <code>eof(file: File) -&gt; bool</code></li><li><code>write(file: File, val: int) -&gt; int</code>: Writes single byte.</li><li><code>append(file: File, val: int) -&gt; int</code>: Appends byte at end of file.</li><li><code>mkdir(path: string) -&gt; Directory</code> / <code>rmdir(path: string)</code> / <code>dirExists(path: string) -&gt; bool</code> / <code>dirList(path: string) -&gt; string</code></li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-31')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-31"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.fs::{pathJoin, ext, filename, parent};
+
+<span class="c-kw">let</span> full_path = pathJoin(<span class="c-string">&quot;C:/salivo/projects&quot;</span>, <span class="c-string">&quot;server.sal&quot;</span>);
+<span class="c-kw">let</span> file_ext = ext(full_path);       <span class="c-comment">// &quot;sal&quot;</span>
+<span class="c-kw">let</span> file_base = filename(full_path); <span class="c-comment">// &quot;server.sal&quot;</span>
+<span class="c-kw">let</span> parent_dir = parent(full_path);  <span class="c-comment">// &quot;C:/salivo/projects&quot;</span></code></pre>
+</div><div class="doc-spacer"></div><h2 id="57-salivostdcrypto" class="doc-h2">5.7 <code>salivo.std.crypto</code></h2><div class="doc-spacer"></div><p class="doc-p">Cryptographic hashing, symmetric encryption, and OS entropy generation.</p><div class="doc-spacer"></div><h3 id="types" class="doc-h3">Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>Sha256</code>, <code>Sha512</code>, <code>Blake3</code> Hash contexts.</li><li><code>Aes128</code>, <code>Aes256</code> Symmetric ciphers.</li><li><code>EntropyProvider</code>, <code>RandomDevice</code>, <code>SecureRandom</code>.</li><li><code>CryptoError</code> &amp; <code>CryptoErrorKind</code>.</li></ul><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>sha256() -&gt; Sha256</code> / <code>sha512() -&gt; Sha512</code> / <code>blake3() -&gt; Blake3</code>: Creates hash engines.</li><li><code>sha256Hex(input_raw: string) -&gt; string</code> / <code>sha256hex(...)</code>: Computes 64-character SHA-256 hex digest.</li><li><code>aes128(key_addr: int) -&gt; Result&lt;Aes128, CryptoError&gt;</code>: Creates AES-128 cipher.</li><li><code>aes256(key_addr: int) -&gt; Result&lt;Aes256, CryptoError&gt;</code>: Creates AES-256 cipher.</li><li><code>entropy(avail: bool, source_id: int) -&gt; EntropyProvider</code>: Initializes entropy source.</li><li><code>secSeed(provider: EntropyProvider) -&gt; Result&lt;int, CryptoError&gt;</code> / <code>secseed(...)</code>: Secure 64-bit seed from OS CSPRNG.</li><li><code>randBytes(count_bytes: int, provider: EntropyProvider) -&gt; Result&lt;int, CryptoError&gt;</code> / <code>randbytes(...)</code>: Secure random bytes.</li><li><code>encrypt(cipher: Aes256, plaintext_addr: int, plaintext_len: int) -&gt; Result&lt;int, CryptoError&gt;</code>: Encrypts memory buffer.</li><li><code>decrypt(cipher: Aes256, ciphertext_addr: int, ciphertext_len: int) -&gt; Result&lt;int, CryptoError&gt;</code>: Decrypts memory buffer.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-32')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-32"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.crypto::{sha256Hex};
+
+<span class="c-kw">let</span> hash = sha256Hex(<span class="c-string">&quot;salivo-production-payload&quot;</span>);
+outln(<span class="c-string">$&quot;SHA-256: {hash}&quot;</span>);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="58-salivostdsync" class="doc-h2">5.8 <code>salivo.std.sync</code></h2><div class="doc-spacer"></div><p class="doc-p">Thread synchronization primitives, mutual exclusion, condition variables, channels, and atomic memory operations.</p><div class="doc-spacer"></div><h3 id="types-functions" class="doc-h3">Types &amp; Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><strong>Mutex</strong>:</li><li><code>mutex() -&gt; Mutex</code>: Creates new OS mutex.</li><li><code>lock(m: Mutex) -&gt; MutexGuard</code>: Acquires mutual exclusion.</li><li><code>trylock(m: Mutex) -&gt; bool</code>: Non-blocking acquisition.</li><li><code>unlock(g: MutexGuard)</code>: Releases lock.</li><li><code>islocked(m: Mutex) -&gt; bool</code> / <code>owner(m: Mutex) -&gt; int</code></li><li><strong>RwLock (Read-Write Lock)</strong>:</li><li><code>rwlock() -&gt; RwLock</code></li><li><code>readlock(rw: RwLock) -&gt; ReadGuard</code> / <code>tryread(rw: RwLock) -&gt; bool</code> / <code>unlockread(g: ReadGuard)</code></li><li><code>writelock(rw: RwLock) -&gt; WriteGuard</code> / <code>trywrite(rw: RwLock) -&gt; bool</code> / <code>unlockwrite(g: WriteGuard)</code></li><li><code>readcount(rw: RwLock) -&gt; int</code> / <code>iswritelocked(rw: RwLock) -&gt; bool</code></li><li><strong>Condvar (Condition Variable)</strong>:</li><li><code>condvar() -&gt; Condvar</code></li><li><code>wait(cv: Condvar, m: Mutex)</code>: Waits for condition notification.</li><li><code>notify(cv: Condvar) -&gt; bool</code>: Wakes one waiting worker.</li><li><code>signal(cv: Condvar) -&gt; bool</code>: Wakes all waiting workers.</li><li><code>waitercount(cv: Condvar) -&gt; int</code>: Active wait count.</li><li><strong>Channel</strong>:</li><li><code>channel() -&gt; Channel</code>: Creates MPMC message channel.</li><li><code>sender(ch: Channel) -&gt; Sender</code> / <code>receiver(ch: Channel) -&gt; Receiver</code></li><li><code>send(s: Sender, value: int) -&gt; bool</code>: Sends integer value.</li><li><code>recv(r: Receiver) -&gt; int</code>: Blocking receive.</li><li><code>tryrecv(r: Receiver) -&gt; Option&lt;int&gt;</code>: Non-blocking receive.</li><li><code>close(ch: Channel)</code> / <code>isclosed(ch: Channel) -&gt; bool</code> / <code>size(ch: Channel) -&gt; int</code></li><li><strong>Atomics</strong>:</li><li><code>atomic(initial: int) -&gt; AtomicInt</code></li><li><code>load(a: AtomicInt) -&gt; int</code> / <code>store(a: AtomicInt, value: int)</code></li><li><code>swap(a: AtomicInt, value: int) -&gt; int</code></li><li><code>cas(a: AtomicInt, expected: int, desired: int) -&gt; bool</code>: Compare-and-swap.</li><li><code>fetchadd(a: AtomicInt, value: int) -&gt; int</code> / <code>fetchsub(a: AtomicInt, value: int) -&gt; int</code></li><li><code>atomicbool(initial: bool) -&gt; AtomicBool</code> / <code>loadbool</code> / <code>storebool</code> / <code>swapbool</code></li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-33')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-33"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.sync;
+
+<span class="c-kw">let</span> m = mutex();
+<span class="c-kw">let</span> guard = lock(m);
+<span class="c-comment">// Critical section operations...</span>
+unlock(guard);
+
+<span class="c-kw">let</span> counter = atomic(0);
+fetchadd(counter, 1);
+<span class="c-kw">let</span> current = load(counter); <span class="c-comment">// 1</span></code></pre>
+</div><div class="doc-spacer"></div><h2 id="59-salivostdtime" class="doc-h2">5.9 <code>salivo.std.time</code></h2><div class="doc-spacer"></div><p class="doc-p">High-precision monotonic clock, timestamps, ISO-8601 formatting, and timers.</p><div class="doc-spacer"></div><h3 id="types" class="doc-h3">Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>Duration</code> (<code>seconds</code>, <code>nanoseconds</code>).</li><li><code>Instant</code> (<code>ticks_nanos</code>).</li><li><code>Date</code> (<code>year</code>, <code>month</code>, <code>day</code>), <code>Time</code> (<code>hour</code>, <code>minute</code>, <code>second</code>, <code>nanosecond</code>), <code>DateTime</code>, <code>Timezone</code>.</li><li><code>Timer</code>, <code>Stopwatch</code>.</li></ul><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>duration(sec: int, nanos: int) -&gt; Duration</code>: Constructs duration.</li><li><code>fromms(ms: int) -&gt; Duration</code>: Converts milliseconds to duration.</li><li><code>now() -&gt; Instant</code>: Returns monotonic timestamp.</li><li><code>epoch() -&gt; int</code>: Returns Unix timestamp in milliseconds.</li><li><code>elapsed(start_t: Instant) -&gt; Duration</code>: Computes duration since <code>start_t</code>.</li><li><code>sleepdur(dur: Duration)</code> / <code>sleep(ms: int)</code>: Sleeps for duration.</li><li><code>sleepuntil(target_time_ms: int)</code>: Sleeps until target epoch time.</li><li><code>timer(delay_ms: int) -&gt; Timer</code>: Creates timer.</li><li><code>isactive(t: Timer) -&gt; bool</code> / <code>canceltimer(t: Timer) -&gt; bool</code> / <code>processtimers() -&gt; int</code></li><li><code>addduration(d1: Duration, d2: Duration) -&gt; Duration</code></li><li><code>subduration(d1: Duration, d2: Duration) -&gt; Duration</code></li><li><code>diffinstant(i1: Instant, i2: Instant) -&gt; Duration</code></li><li><code>format(dt: DateTime, fmt_str: string) -&gt; string</code>: Formats to ISO-8601 string.</li><li><code>parse(date_str: string, fmt_str: string) -&gt; Result&lt;DateTime, string&gt;</code>: Parses date string.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-34')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-34"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.time;
+
+<span class="c-kw">let</span> start = now();
+sleep(50);
+<span class="c-kw">let</span> dur = elapsed(start);
+outln(<span class="c-string">$&quot;Elapsed: {dur.nanoseconds} ns&quot;</span>);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="510-salivostdnet" class="doc-h2">5.10 <code>salivo.std.net</code></h2><div class="doc-spacer"></div><p class="doc-p">Operating system IPv4/IPv6 networking, TCP streams, listeners, UDP, and DNS resolution.</p><div class="doc-spacer"></div><h3 id="types" class="doc-h3">Types</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>IPAddress</code> (<code>version</code>, <code>octet1</code>, <code>octet2</code>, <code>octet3</code>, <code>octet4</code>).</li><li><code>SocketAddress</code> (<code>ip</code>, <code>port</code>).</li><li><code>TcpStream</code>, <code>TcpListener</code>, <code>UdpSocket</code>, <code>DnsResolver</code>.</li><li><code>NetworkError</code> &amp; <code>NetworkErrorKind</code>.</li></ul><div class="doc-spacer"></div><h3 id="functions" class="doc-h3">Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>ipv4(a: int, b: int, c: int, d: int) -&gt; IPAddress</code> / <code>ipv6(...)</code></li><li><code>sockaddr(ip: IPAddress, port: int) -&gt; SocketAddress</code></li><li><code>parseip(ip_str: string) -&gt; IPAddress</code>: Parses <code>&quot;192.168.1.1&quot;</code>.</li><li><code>resolve(domain_name: string, provider: PlatformProvider) -&gt; Result&lt;IPAddress, NetworkError&gt;</code>: DNS lookup.</li><li><code>tcpsendbuf(stream: TcpStream, buf_ptr: int, count_bytes: int) -&gt; Result&lt;int, NetworkError&gt;</code></li><li><code>tcpsendstr(stream: TcpStream, data: string) -&gt; Result&lt;int, NetworkError&gt;</code></li><li><code>tcprecvstr(stream: TcpStream, max_bytes: int) -&gt; Result&lt;string, NetworkError&gt;</code></li><li><code>shutdown(stream: TcpStream) -&gt; Result&lt;bool, NetworkError&gt;</code></li><li>Low-level socket intrinsics: <code>socket()</code>, <code>connect()</code>, <code>bind()</code>, <code>listen()</code>, <code>accept()</code>, <code>sockread()</code>, <code>sockwrite()</code>, <code>close()</code>.</li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-35')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-35"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.net;
+
+<span class="c-kw">let</span> ip = parseip(<span class="c-string">&quot;127.0.0.1&quot;</span>);
+<span class="c-kw">let</span> addr = sockaddr(ip, 8080);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="511-salivostdtask" class="doc-h2">5.11 <code>salivo.std.task</code></h2><div class="doc-spacer"></div><p class="doc-p">Cooperative concurrency, tasks, structured concurrency scopes, and cancellation.</p><div class="doc-spacer"></div><h3 id="types-functions" class="doc-h3">Types &amp; Functions</h3><div class="doc-spacer"></div><ul class="doc-list"><li><code>Task</code> (<code>state_ptr</code>, <code>poll_fn</code>), <code>TaskScope</code>, <code>CancellationToken</code>.</li><li><code>Poll&lt;T&gt;</code>: Variants <code>Poll::Ready(T)</code> or <code>Poll::Pending</code>.</li><li><code>TaskState</code>: <code>Created</code>, <code>Ready</code>, <code>Running</code>, <code>Pending</code>, <code>Completed</code>, <code>Destroyed</code>.</li><li><code>spawntask(root_task: Task) -&gt; int</code>: Spawns async task.</li><li><code>spawnval(val: int) -&gt; int</code>: Spawns value task.</li><li><code>fail(task_id: int, msg: string)</code> / <code>isfailed(task_id: int) -&gt; bool</code></li><li><code>wake(task_id: int)</code>: Wakes suspended task.</li><li><code>polltask(t: Task) -&gt; Poll&lt;int&gt;</code>: Polls task for completion.</li><li><code>gettaskstate(task_id: int) -&gt; TaskState</code> / <code>settaskstate(task_id: int, state: TaskState)</code></li><li><code>blockon(root_task: Task) -&gt; int</code>: Blocks current thread on root task.</li><li><code>scope() -&gt; TaskScope</code>: Creates structured concurrency scope.</li><li><code>scopespawn(sc: TaskScope, task: Task) -&gt; int</code>: Spawns task into scope.</li><li><code>scopejoin(sc: TaskScope, task_id: int) -&gt; int</code>: Joins specific child.</li><li><code>scopecancel(sc: TaskScope)</code>: Cancels all tasks in scope.</li><li><code>joinall(sc: TaskScope) -&gt; int</code> / <code>waitany(sc: TaskScope) -&gt; int</code> / <code>waitall(sc: TaskScope) -&gt; int</code></li><li><code>token() -&gt; CancellationToken</code> / <code>canceltoken(tok: CancellationToken)</code> / <code>istokenactive(tok: CancellationToken) -&gt; bool</code></li></ul><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-36')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-36"><code class="lang-salivo"><span class="c-kw">&gt;&lt;</span>salivo.std.task;
+
+<span class="c-kw">let</span> sc = scope();
+<span class="c-kw">let</span> t = <span class="c-type">Task</span> { state_ptr: 42, poll_fn: 0 };
+<span class="c-kw">let</span> tid = scopespawn(sc, t);
+<span class="c-kw">let</span> completed_val = scopejoin(sc, tid);</code></pre>
+</div><div class="doc-spacer"></div><h2 id="512-auxiliary-modules" class="doc-h2">5.12 Auxiliary Modules</h2><div class="doc-spacer"></div><ul class="doc-list"><li><strong><code>salivo.std.option</code></strong>: <code>unwrap&lt;T&gt;</code>, <code>unwrapor&lt;T&gt;</code>, <code>issome&lt;T&gt;</code>, <code>isnone&lt;T&gt;</code>.</li><li><strong><code>salivo.std.result</code></strong>: <code>unwrap&lt;T, E&gt;</code>, <code>unwraperr&lt;T, E&gt;</code>, <code>isok&lt;T, E&gt;</code>, <code>iserr&lt;T, E&gt;</code>.</li><li><strong><code>salivo.std.process</code></strong>: <code>exit(code: int)</code>, <code>cwd() -&gt; string</code>.</li><li><strong><code>salivo.std.random</code></strong>: <code>rand() -&gt; int</code>, <code>randrange(min_val: int, max_val: int) -&gt; int</code>, <code>randfloat() -&gt; float</code>.</li><li><strong><code>salivo.std.hash</code></strong>: <code>hashstr(s: string) -&gt; int</code> (DJB2 hash), <code>hash(v: int) -&gt; int</code>.</li><li><strong><code>salivo.std.iter</code></strong>: <code>rangeiter(start: int, end: int, step: int) -&gt; RangeIterator</code>, <code>next(iter: RangeIterator) -&gt; Option&lt;int&gt;</code>.</li></ul><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-vi-tooling-compiler-cli-project-ecosystem" class="doc-h1 part-h1">Part VI: Tooling, Compiler CLI &amp; Project Ecosystem</h1>
+</div>
+<div class="doc-spacer"></div><p class="doc-p">The official Salivo CLI is <code>sf</code> (located at <code>C:\Users\sahil\.salivo\bin\sf.exe</code>).</p><div class="doc-spacer"></div><h2 id="61-compiler-commands-sf" class="doc-h2">6.1 Compiler Commands (<code>sf</code>)</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">bash</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-37')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-37"><code class="lang-bash"><span class="c-comment"># Run a Salivo script directly</span>
+<span class="c-kw">sf</span> run main.sal
+
+<span class="c-comment"># Compile to optimized native executable</span>
+<span class="c-kw">sf</span> build main.sal -o server.exe --release
+
+<span class="c-comment"># Maximum native optimization with host CPU vectorization</span>
+<span class="c-kw">sf</span> build main.sal -o server.exe --opt-level aggressive --native
+
+<span class="c-comment"># Type-check and validate without code generation</span>
+<span class="c-kw">sf</span> check main.sal
+
+<span class="c-comment"># Execute test suite functions in source files</span>
+<span class="c-kw">sf</span> test tests/
+
+<span class="c-comment"># Start interactive REPL</span>
+<span class="c-kw">sf</span> repl</code></pre>
+</div><div class="doc-spacer"></div><h2 id="62-compiler-optimization-pipeline-performance-tuning" class="doc-h2">6.2 Compiler Optimization Pipeline &amp; Performance Tuning</h2><div class="doc-spacer"></div><p class="doc-p">The Salivo compiler infrastructure leverages an advanced Static Single Assignment (SSA) optimization engine feeding into LLVM 16:</p><div class="doc-spacer"></div><ul class="doc-list"><li><strong>Optimization Levels (<code>-O 0</code> to <code>-O 3</code>):</strong></li><li><code>-O 0</code> (Debug): Fast compilation, zero instruction reordering, preserves full debug line tables.</li><li><code>-O 1</code> (Basic): Local peephole optimizations and dead value stripping.</li><li><code>-O 2</code> (Standard Release): Global common subexpression elimination, function inlining, and standard loop simplifications.</li><li><code>-O 3</code> / <code>--opt-level aggressive</code>: Aggressive loop unrolling, SLP auto-vectorization, memory-to-register promotion, and aggressive inlining.</li><li><strong>Host CPU Vectorization (<code>--native</code>):</strong> Emits code specifically tailored to the host instruction set architecture, leveraging AVX2, FMA, and BMI2 vector registers.</li><li><strong>Zero-Cost SSA Optimization Passes:</strong></li><li><strong><code>ArcOptimization</code>:</strong> Analyzes lifetime ranges and elides redundant paired ARC retain/release operations within basic blocks and loops, reducing atomic reference counting overhead to zero for local variables.</li><li><strong><code>BoundsCheckElimination</code>:</strong> Employs dominator tree range analysis to verify index validity at loop entry, safely hoisting bounds checks out of inner iteration loops.</li><li><strong><code>ConstantDivisorOptimization</code>:</strong> Evaluates constant non-zero divisors at compile time, eliminating branch conditions and panic splitting on arithmetic division and modulo operations.</li><li><strong><code>DeadCodeElimination</code> (<code>DCE</code>):</strong> Recursively strips dead branches, unreachable blocks, and unused temporary values prior to backend emission.</li></ul><div class="doc-spacer"></div><h2 id="63-package-manager-spm" class="doc-h2">6.3 Package Manager (<code>spm</code>)</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">bash</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-38')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-38"><code class="lang-bash"><span class="c-comment"># Initialize a new Salivo project</span>
+<span class="c-kw">spm</span> init myproject
+
+<span class="c-comment"># Add an official package dependency</span>
+<span class="c-kw">spm</span> add @salivo/http
+
+<span class="c-comment"># Install dependencies defined in Salivo.toml</span>
+<span class="c-kw">spm</span> install
+
+<span class="c-comment"># Publish package to the Salivo registry</span>
+<span class="c-kw">spm</span> publish</code></pre>
+</div><div class="doc-spacer"></div><h2 id="64-code-quality-tooling" class="doc-h2">6.4 Code Quality &amp; Tooling</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">bash</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-39')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-39"><code class="lang-bash"><span class="c-comment"># Format code according to official style rules</span>
+<span class="c-kw">salivofmt</span> --check src/
+<span class="c-kw">salivofmt</span> --write src/
+
+<span class="c-comment"># Run static analysis and linting</span>
+<span class="c-kw">salivolint</span> src/
+
+<span class="c-comment"># Generate API documentation</span>
+<span class="c-kw">salivodoc</span> src/ -o docs/</code></pre>
+</div><div class="doc-spacer"></div>
+<div class="part-banner">
+    <div class="part-banner-tag">OFFICIAL LANGUAGE MANUAL</div>
+    <h1 id="part-vii-complete-working-examples" class="doc-h1 part-h1">Part VII: Complete Working Examples</h1>
+</div>
+<div class="doc-spacer"></div><h2 id="example-1-high-performance-data-pipeline-with-collections-hashing" class="doc-h2">Example 1: High-Performance Data Pipeline with Collections &amp; Hashing</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-40')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-40"><code class="lang-salivo"><span class="c-kw">module</span> app.pipeline;
+
+<span class="c-kw">&gt;&lt;</span>salivo.std.core::{assert, assertEq};
+<span class="c-kw">&gt;&lt;</span>salivo.std.collections::{vecNew, push, get, veclen, mapNew, put, lookup};
+<span class="c-kw">&gt;&lt;</span>salivo.std.crypto::{sha256Hex};
+<span class="c-kw">&gt;&lt;</span>salivo.std.time::{now, elapsed};
+
+<span class="c-kw">func</span> main() -&gt; <span class="c-type">int</span> {
+    <span class="c-kw">let</span> start_time = now();
+    outln(<span class="c-string">&quot;=== Starting Salivo Data Pipeline ===&quot;</span>);
+
+<span class="c-comment">    // Initialize collections</span>
+    <span class="c-kw">let</span> <span class="c-kw">mut</span> data_vec = vecNew&lt;<span class="c-type">string</span>&gt;();
+    data_vec = push&lt;<span class="c-type">string</span>&gt;(data_vec, <span class="c-string">&quot;transaction_1001&quot;</span>);
+    data_vec = push&lt;<span class="c-type">string</span>&gt;(data_vec, <span class="c-string">&quot;transaction_1002&quot;</span>);
+    data_vec = push&lt;<span class="c-type">string</span>&gt;(data_vec, <span class="c-string">&quot;transaction_1003&quot;</span>);
+
+    <span class="c-kw">let</span> <span class="c-kw">mut</span> ledger = mapNew&lt;<span class="c-type">string</span>, <span class="c-type">string</span>&gt;();
+
+<span class="c-comment">    // Process and hash each item</span>
+    <span class="c-kw">for</span> (<span class="c-kw">let</span> <span class="c-kw">mut</span> i = 0; i &lt; veclen&lt;<span class="c-type">string</span>&gt;(data_vec); i = i + 1) {
+        <span class="c-kw">let</span> raw_tx = get&lt;<span class="c-type">string</span>&gt;(data_vec, i);
+        <span class="c-kw">let</span> digest = sha256Hex(raw_tx);
+        ledger = put&lt;<span class="c-type">string</span>, <span class="c-type">string</span>&gt;(ledger, raw_tx, digest);
+        outln(<span class="c-string">$&quot;[PROCESSED] {raw_tx<span class="c-mod">:upper</span>} -&gt; Digest: {digest<span class="c-mod">:slice(0, 16)</span>}...&quot;</span>);
+    }
+
+<span class="c-comment">    // Verify lookup</span>
+    <span class="c-kw">let</span> query = lookup&lt;<span class="c-type">string</span>, <span class="c-type">string</span>&gt;(ledger, <span class="c-string">&quot;transaction_1002&quot;</span>);
+    <span class="c-kw">if</span> (query.is_some) {
+        outln(<span class="c-string">$&quot;Verified lookup for TX 1002: {query.value<span class="c-mod">:slice(0, 8)</span>}&quot;</span>);
+    }
+
+    <span class="c-kw">let</span> dur = elapsed(start_time);
+    outln(<span class="c-string">$&quot;Pipeline completed in {dur.nanoseconds} ns&quot;</span>);
+    <span class="c-kw">return</span> 0;
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="example-2-thread-safe-state-atomic-concurrency" class="doc-h2">Example 2: Thread-Safe State &amp; Atomic Concurrency</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-41')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-41"><code class="lang-salivo"><span class="c-kw">module</span> app.concurrent_counter;
+
+<span class="c-kw">&gt;&lt;</span>salivo.std.core::{assertEq};
+<span class="c-kw">&gt;&lt;</span>salivo.std.sync::{mutex, lock, unlock, atomic, fetchadd, load};
+<span class="c-kw">&gt;&lt;</span>salivo.std.task::{scope, spawntask, scopespawn, scopejoin, <span class="c-type">Task</span>};
+
+<span class="c-kw">func</span> main() -&gt; <span class="c-type">int</span> {
+    outln(<span class="c-string">&quot;=== Salivo Concurrency &amp; Sync Demonstration ===&quot;</span>);
+
+    <span class="c-kw">let</span> total_tasks = 10;
+    <span class="c-kw">let</span> global_counter = atomic(0);
+    <span class="c-kw">let</span> state_lock = mutex();
+
+    <span class="c-kw">let</span> sc = scope();
+
+    <span class="c-kw">for</span> (<span class="c-kw">let</span> <span class="c-kw">mut</span> i = 0; i &lt; total_tasks; i = i + 1) {
+<span class="c-comment">        // Increment atomic counter safely</span>
+        fetchadd(global_counter, 1);
+        
+        <span class="c-kw">let</span> guard = lock(state_lock);
+        outln(<span class="c-string">$&quot;Task {i<span class="c-mod">:str</span>} registered. Counter value: {load(global_counter)<span class="c-mod">:str</span>}&quot;</span>);
+        unlock(guard);
+    }
+
+    <span class="c-kw">let</span> final_count = load(global_counter);
+    assertEq(final_count, total_tasks, <span class="c-string">&quot;Concurrency counter mismatch&quot;</span>);
+    outln(<span class="c-string">$&quot;All {final_count<span class="c-mod">:str</span>} operations completed successfully.&quot;</span>);
+    <span class="c-kw">return</span> 0;
+}</code></pre>
+</div><div class="doc-spacer"></div><h2 id="example-3-file-system-inspector-path-manipulation" class="doc-h2">Example 3: File System Inspector &amp; Path Manipulation</h2><div class="doc-spacer"></div>
+<div class="code-wrapper">
+    <div class="code-header">
+        <div class="code-dots">
+            <span class="code-dot dot-red"></span>
+            <span class="code-dot dot-amber"></span>
+            <span class="code-dot dot-green"></span>
+            <span class="code-lang-tag">salivo</span>
+        </div>
+        <button class="copy-btn" onclick="copyCode(this, 'code-42')" title="Copy code">
+            <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <span>Copy</span>
+        </button>
+    </div>
+    <pre class="code-block" id="code-42"><code class="lang-salivo"><span class="c-kw">module</span> app.fs_inspector;
+
+<span class="c-kw">&gt;&lt;</span>salivo.std.fs::{pathJoin, normalize, filename, ext, pathExists, parent};
+<span class="c-kw">&gt;&lt;</span>salivo.std.io::{writestr, readstr, delete};
+
+<span class="c-kw">func</span> main() -&gt; <span class="c-type">int</span> {
+    <span class="c-kw">let</span> test_file = <span class="c-string">&quot;salivo_test_artifact.tmp&quot;</span>;
+    <span class="c-kw">let</span> test_data = <span class="c-string">&quot;Engine=Salivo\nVersion=1.0\nStatus=Operational&quot;</span>;
+
+<span class="c-comment">    // Write file</span>
+    <span class="c-kw">let</span> write_status = writestr(test_file, test_data);
+    <span class="c-kw">if</span> (!write_status.is_ok) {
+        outln(<span class="c-string">&quot;Failed to create test artifact.&quot;</span>);
+        <span class="c-kw">return</span> 1;
+    }
+
+<span class="c-comment">    // Path analysis</span>
+    <span class="c-kw">let</span> joined = pathJoin(<span class="c-string">&quot;workspace&quot;</span>, test_file);
+    outln(<span class="c-string">$&quot;Joined Path: {normalize(joined)}&quot;</span>);
+    outln(<span class="c-string">$&quot;Filename: {filename(test_file)}&quot;</span>);
+    outln(<span class="c-string">$&quot;Extension: {ext(test_file)}&quot;</span>);
+
+<span class="c-comment">    // Read and verify</span>
+    <span class="c-kw">let</span> read_result = readstr(test_file);
+    <span class="c-kw">if</span> (read_result.is_ok) {
+        outln(<span class="c-string">&quot;File Contents:\n&quot;</span> + read_result.value);
+    }
+
+<span class="c-comment">    // Cleanup</span>
+    delete(test_file);
+    outln(<span class="c-string">&quot;Cleaned up test artifact.&quot;</span>);
+    <span class="c-kw">return</span> 0;
+}</code></pre>
+</div><div class="doc-spacer"></div><hr class="doc-hr"/><div class="doc-spacer"></div><p class="doc-p"><em>The Salivo Programming Language Manual — Official Technical Documentation.</em></p><div class="doc-spacer"></div>
+        </article>
+    </main>
+</div>
+
+<div class="modal-overlay" id="search-modal" onclick="closeSearchOnOverlay(event)">
+    <div class="search-modal">
+        <div class="search-input-wrapper">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="modal-search-input" class="search-input" placeholder="Search functions, syntax, modules..." oninput="handleSearch(this.value)">
+        </div>
+        <div class="search-results" id="search-results-box">
+            <div style="padding: 12px; color: var(--text-dim); text-align: center;">Type to search across the entire manual...</div>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast-msg">Copied to clipboard!</div>
+
+<script>
+function toggleTheme() {
+    var html = document.documentElement;
+    var current = html.getAttribute('data-theme') || 'dark';
+    var next = current === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    localStorage.setItem('salivo_doc_theme', next);
+}
+
+(function() {
+    var saved = localStorage.getItem('salivo_doc_theme');
+    if (saved) {
+        document.documentElement.setAttribute('data-theme', saved);
+    }
+})();
+
+function copyCode(btn, codeId) {
+    var pre = document.getElementById(codeId);
+    if (!pre) return;
+    var text = pre.innerText;
+    navigator.clipboard.writeText(text).then(function() {
+        showToast("Code copied to clipboard!");
+        var span = btn.querySelector('span');
+        var originalText = span.innerText;
+        span.innerText = "Copied!";
+        setTimeout(function() {
+            span.innerText = originalText;
+        }, 1800);
+    });
+}
+
+function showToast(msg) {
+    var t = document.getElementById('toast-msg');
+    t.innerText = msg;
+    t.classList.add('show');
+    setTimeout(function() { t.classList.remove('show'); }, 2000);
+}
+
+function openSearch() {
+    var modal = document.getElementById('search-modal');
+    modal.classList.add('active');
+    setTimeout(function() { document.getElementById('modal-search-input').focus(); }, 50);
+}
+
+function closeSearch() {
+    document.getElementById('search-modal').classList.remove('active');
+}
+
+function closeSearchOnOverlay(e) {
+    if (e.target.id === 'search-modal') closeSearch();
+}
+
+window.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        openSearch();
+    }
+    if (e.key === 'Escape') {
+        closeSearch();
+    }
+});
+
+var searchIndex = [];
+document.querySelectorAll('h1, h2, h3, h4').forEach(function(h) {
+    if (h.id || h.innerText) {
+        searchIndex.push({
+            title: h.innerText,
+            id: h.id || '',
+            tag: h.tagName
+        });
+    }
+});
+
+function handleSearch(q) {
+    var box = document.getElementById('search-results-box');
+    if (!q.trim()) {
+        box.innerHTML = '<div style="padding: 12px; color: var(--text-dim); text-align: center;">Type to search across the entire manual...</div>';
+        return;
+    }
+    var query = q.toLowerCase();
+    var matches = searchIndex.filter(function(item) { return item.title.toLowerCase().indexOf(query) !== -1; }).slice(0, 10);
+
+    if (matches.length === 0) {
+        box.innerHTML = '<div style="padding: 12px; color: var(--text-dim); text-align: center;">No matches found</div>';
+        return;
+    }
+
+    box.innerHTML = matches.map(function(m) {
+        return '<a href="#' + m.id + '" class="search-result-item" onclick="closeSearch()">' +
+            '<div style="font-weight: 600; font-size: 0.95rem;">' + m.title + '</div>' +
+            '<div style="font-size: 0.78rem; color: var(--text-dim); text-transform: uppercase;">' + m.tag + '</div>' +
+        '</a>';
+    }).join('');
+}
+</script>
+</body>
+</html>

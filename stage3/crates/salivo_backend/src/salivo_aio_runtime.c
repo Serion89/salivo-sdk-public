@@ -1248,7 +1248,12 @@ static int64_t sa_await_common(int64_t h, int64_t timeout_ms) {
     return r;
 }
 
-int64_t salivo_aio_await(int64_t h) { return sa_await_common(h, -1); }
+int64_t salivo_aio_await(int64_t h) {
+    /* A Task built from a failed spawn carries the spawn's error code as its handle: awaiting it
+     * reports that error (e.g. Shutdown) instead of a generic InvalidHandle. */
+    if (h < 0 && h >= SA_EFAILED) return h;
+    return sa_await_common(h, -1);
+}
 
 int64_t salivo_aio_await_timeout(int64_t h, int64_t ms) {
     if (ms < 0) return SA_EINVAL;
@@ -2208,6 +2213,88 @@ char* salivo_aio_buf_str(int64_t buf, int64_t len) {
     if (len > 0) memcpy(s, (void*)(intptr_t)buf, (size_t)len);
     s[len] = 0;
     return s;
+}
+
+/* ============================================================================================
+ * Argument blocks for `async func`: the compiler-generated wrapper packs the call's arguments
+ * into a block, spawns the entry thunk with the block, and the thunk unpacks and frees it. Text
+ * arguments are copied (the caller's string may not outlive the call); reading one hands the copy
+ * to the task.
+ * ========================================================================================== */
+#define SA_ARG_MAGIC 0x53414C4941524753LL
+
+typedef struct {
+    int64_t magic;
+    int64_t n;
+    int64_t vals[1]; /* n slots, followed by n kind bytes (0 int, 1 owned text) */
+} SaArgs;
+
+static unsigned char* sa_arg_kinds(SaArgs* a) { return (unsigned char*)&a->vals[a->n]; }
+
+static SaArgs* sa_args_of(int64_t b, int64_t i) {
+    SaArgs* a = (SaArgs*)(intptr_t)b;
+    if (!a || a->magic != SA_ARG_MAGIC || i < 0 || i >= a->n) return NULL;
+    return a;
+}
+
+int64_t salivo_aio_arg_new(int64_t n) {
+    if (n < 0 || n > 64) return SA_EINVAL;
+    size_t sz = sizeof(SaArgs) + sizeof(int64_t) * (size_t)(n > 0 ? n - 1 : 0) + (size_t)n;
+    SaArgs* a = (SaArgs*)calloc(1, sz);
+    if (!a) return SA_EOS;
+    a->magic = SA_ARG_MAGIC;
+    a->n = n;
+    return (int64_t)(intptr_t)a;
+}
+
+int64_t salivo_aio_arg_set_int(int64_t b, int64_t i, int64_t v) {
+    SaArgs* a = sa_args_of(b, i);
+    if (!a) return SA_EINVAL;
+    if (sa_arg_kinds(a)[i] == 1) free((char*)(intptr_t)a->vals[i]);
+    a->vals[i] = v;
+    sa_arg_kinds(a)[i] = 0;
+    return SA_OK;
+}
+
+int64_t salivo_aio_arg_set_text(int64_t b, int64_t i, const char* s) {
+    SaArgs* a = sa_args_of(b, i);
+    if (!a || !s) return SA_EINVAL;
+    size_t n = strlen(s);
+    char* copy = (char*)malloc(n + 1);
+    if (!copy) return SA_EOS;
+    memcpy(copy, s, n + 1);
+    if (sa_arg_kinds(a)[i] == 1) free((char*)(intptr_t)a->vals[i]);
+    a->vals[i] = (int64_t)(intptr_t)copy;
+    sa_arg_kinds(a)[i] = 1;
+    return SA_OK;
+}
+
+int64_t salivo_aio_arg_int(int64_t b, int64_t i) {
+    SaArgs* a = sa_args_of(b, i);
+    return a && sa_arg_kinds(a)[i] == 0 ? a->vals[i] : 0;
+}
+
+char* salivo_aio_arg_get_str(int64_t b, int64_t i) {
+    SaArgs* a = sa_args_of(b, i);
+    if (a && sa_arg_kinds(a)[i] == 1) {
+        char* s = (char*)(intptr_t)a->vals[i];
+        a->vals[i] = 0;
+        sa_arg_kinds(a)[i] = 0; /* ownership moves to the task */
+        return s;
+    }
+    char* e = (char*)malloc(1);
+    if (e) e[0] = 0;
+    return e;
+}
+
+int64_t salivo_aio_arg_free(int64_t b) {
+    SaArgs* a = (SaArgs*)(intptr_t)b;
+    if (!a || a->magic != SA_ARG_MAGIC) return SA_EINVAL;
+    for (int64_t i = 0; i < a->n; i++)
+        if (sa_arg_kinds(a)[i] == 1) free((char*)(intptr_t)a->vals[i]);
+    a->magic = 0;
+    free(a);
+    return SA_OK;
 }
 
 char* salivo_aio_error_name_str(int64_t code) {

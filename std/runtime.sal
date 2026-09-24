@@ -13,7 +13,7 @@ module salivo.std.runtime;
 // Backends: Windows (IOCP) and POSIX (epoll on Linux, poll(2) on macOS/BSD).
 // Design and guarantees: docs/STAGE_36_1_RUNTIME.md.
 
-><salivo.std.core::{Result, ok, err, Drop};
+><salivo.std.core::{Result, ok, err, Drop, panic};
 
 pub enum AioError {
     WouldBlock,
@@ -75,6 +75,44 @@ pub func errorFromCode(code: int) -> AioError {
     if (code == -16) { return AioError::Truncated; }
     if (code == -17) { return AioError::TaskFailed; }
     return AioError::Unknown;
+}
+
+/// Name of an AioError ("Timeout", "Closed", ...).
+pub func errorName(e: AioError) -> string {
+    if (e == AioError::WouldBlock) { return "WouldBlock"; }
+    if (e == AioError::Eof) { return "Eof"; }
+    if (e == AioError::ConnectionReset) { return "ConnectionReset"; }
+    if (e == AioError::Timeout) { return "Timeout"; }
+    if (e == AioError::Cancelled) { return "Cancelled"; }
+    if (e == AioError::Closed) { return "Closed"; }
+    if (e == AioError::InvalidArgument) { return "InvalidArgument"; }
+    if (e == AioError::Os) { return "Os"; }
+    if (e == AioError::Shutdown) { return "Shutdown"; }
+    if (e == AioError::InvalidHandle) { return "InvalidHandle"; }
+    if (e == AioError::Full) { return "Full"; }
+    if (e == AioError::Unsupported) { return "Unsupported"; }
+    if (e == AioError::NotInTask) { return "NotInTask"; }
+    if (e == AioError::ConnectionRefused) { return "ConnectionRefused"; }
+    if (e == AioError::AddressInUse) { return "AddressInUse"; }
+    if (e == AioError::Truncated) { return "Truncated"; }
+    if (e == AioError::TaskFailed) { return "TaskFailed"; }
+    return "Unknown";
+}
+
+/// Unwraps a socket result or panics with the operation and the error, e.g. "connect: ConnectionRefused".
+pub func expectStream(r: Result<TcpStream, AioError>, what: string) -> TcpStream {
+    if (!r.is_ok) { panic(what + ": " + errorName(r.error)); }
+    return r.value;
+}
+
+pub func expectListener(r: Result<TcpListener, AioError>, what: string) -> TcpListener {
+    if (!r.is_ok) { panic(what + ": " + errorName(r.error)); }
+    return r.value;
+}
+
+pub func expectUdp(r: Result<UdpSocket, AioError>, what: string) -> UdpSocket {
+    if (!r.is_ok) { panic(what + ": " + errorName(r.error)); }
+    return r.value;
 }
 
 /// Name of a raw runtime result code ("Timeout", "Closed", ...).
@@ -186,6 +224,13 @@ pub func awaitTask(t: Task) -> Result<int, AioError> {
 
 /// awaitTask, then releases the handle.
 pub func join(t: Task) -> Result<int, AioError> {
+    let r = valueResult(rtaioawait(t.handle));
+    rtaiorelease(t.handle);
+    return r;
+}
+
+/// What `await t` compiles to: waits for t, returns its result, releases the handle.
+pub func asyncJoin(t: Task) -> Result<int, AioError> {
     let r = valueResult(rtaioawait(t.handle));
     rtaiorelease(t.handle);
     return r;

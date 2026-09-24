@@ -76,4 +76,10 @@ rtaiobufget|salivo_aio_buf_get|int|int,int|never|any thread|borrows the buffer
 rtaiobufset|salivo_aio_buf_set|int|int,int,int|never|any thread|borrows the buffer
 rtaiobufputtext|salivo_aio_buf_put_text|int|int,int,string|never|any thread|copies at most cap bytes of text into the buffer
 rtaiobufstr|salivo_aio_buf_str|string|int,int|never|any thread|returns a new heap string owned by the caller
+rtaioargnew|salivo_aio_arg_new|int|int|never|any thread|argument block for an async func call (compiler-generated); freed by rtaioargfree
+rtaioargsetint|salivo_aio_arg_set_int|int|int,int,int|never|single owner|stores an int (or bool) argument
+rtaioargsettext|salivo_aio_arg_set_text|int|int,int,string|never|single owner|stores a copy of a string argument
+rtaioargint|salivo_aio_arg_int|int|int,int|never|single owner|reads an int argument
+rtaioargstr|salivo_aio_arg_get_str|string|int,int|never|single owner|hands the copied string argument to the caller
+rtaioargfree|salivo_aio_arg_free|int|int|never|single owner|frees the block and any strings not handed out
 rtaioerrorname|salivo_aio_error_name_str|string|int|never|any thread|returns a static string
