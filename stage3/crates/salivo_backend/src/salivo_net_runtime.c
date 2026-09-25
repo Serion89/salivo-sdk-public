@@ -21,9 +21,20 @@ typedef int SOCKET;
 #define WSAGetLastError() errno
 #endif
 
+/* Length argument type of send/recv: int on Winsock, size_t on POSIX. Callers pass n > 0;
+   Winsock lengths clamp to INT_MAX (a partial transfer, reported by the return value). */
+#ifdef _WIN32
+typedef int salivo_io_len_t;
+static salivo_io_len_t salivo_io_len(long long n) { return n > INT_MAX ? INT_MAX : (int)n; }
+#else
+typedef size_t salivo_io_len_t;
+static salivo_io_len_t salivo_io_len(long long n) { return (size_t)n; }
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #define MAX_SOCKET_HANDLES 1024
 
@@ -225,8 +236,8 @@ long long salivo_net_send(long long handle, const char* data) {
         return -1;
     }
     if (!data) return 0;
-    int len = (int)strlen(data);
-    int sent = (int)send(s, data, len, 0);
+    size_t len = strlen(data);
+    int sent = (int)send(s, data, salivo_io_len((long long)len), 0);
     SALIVO_NET_LOG("[RT] salivo_net_send handle=%lld sent=%d bytes\n", handle, sent);
     return (long long)sent;
 }
@@ -242,7 +253,7 @@ char* salivo_net_recv(long long handle, long long max_bytes) {
     if (max_bytes <= 0) max_bytes = 4096;
     char* buf = (char*)malloc((size_t)max_bytes + 1);
     if (!buf) return "";
-    int recvd = (int)recv(s, buf, (int)max_bytes, 0);
+    int recvd = (int)recv(s, buf, salivo_io_len(max_bytes), 0);
     if (recvd < 0) recvd = 0;
     buf[recvd] = '\0';
     SALIVO_NET_LOG("[RT] salivo_net_recv handle=%lld recvd=%d bytes: '%s'\n", handle, recvd, buf);
@@ -322,7 +333,7 @@ long long salivo_net_send_buf(long long handle, const char* buf_ptr, long long l
     SOCKET s = get_socket_by_handle(handle);
     if (s == INVALID_SOCKET) return -1;
     if (!buf_ptr || len_bytes <= 0) return 0;
-    int sent = (int)send(s, buf_ptr, (int)len_bytes, 0);
+    int sent = (int)send(s, buf_ptr, salivo_io_len(len_bytes), 0);
     return (long long)sent;
 }
 
@@ -330,7 +341,7 @@ long long salivo_net_recv_buf(long long handle, char* buf_ptr, long long max_byt
     SOCKET s = get_socket_by_handle(handle);
     if (s == INVALID_SOCKET) return -1;
     if (!buf_ptr || max_bytes <= 0) return 0;
-    int recvd = (int)recv(s, buf_ptr, (int)max_bytes, 0);
+    int recvd = (int)recv(s, buf_ptr, salivo_io_len(max_bytes), 0);
     if (recvd < 0) recvd = 0;
     return (long long)recvd;
 }

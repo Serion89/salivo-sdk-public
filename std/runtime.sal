@@ -217,6 +217,16 @@ pub func spawnOn(rt: Runtime, entry: int, arg: int) -> Result<Task, AioError> {
     return ok<Task, AioError>(Task { handle: h });
 }
 
+/// Spawns entry(h) and hands it ownership of the handle h (a stream, listener, file, channel,
+/// task or HTTP connection/stream). If the task is cancelled before it ever runs (for example by
+/// runtimeShutdown), the runtime closes or releases h so it cannot leak. On error the caller
+/// still owns h.
+pub func spawnOwning(entry: int, h: int) -> Result<Task, AioError> {
+    let t = rtaiospawnowning(entry, h);
+    if (t < 0) { return err<Task, AioError>(errorFromCode(t)); }
+    return ok<Task, AioError>(Task { handle: t });
+}
+
 /// Suspends the caller until t finishes and returns its result. Keeps the handle.
 pub func awaitTask(t: Task) -> Result<int, AioError> {
     return valueResult(rtaioawait(t.handle));

@@ -186,7 +186,7 @@ pub func tcpaccept(stream_listener: TcpListener) -> Result<TcpStream, NetworkErr
     };
     let peer_port = rtnetgetpeerport(client_fd);
     let addr = SocketAddress {
-        ip: ipv4(127, 0, 0, 1),
+        ip: parseip(rtnetgetpeerip(client_fd)),
         port: peer_port,
     };
     return ok<TcpStream, NetworkError>(TcpStream {

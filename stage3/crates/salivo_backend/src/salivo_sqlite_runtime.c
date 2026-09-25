@@ -214,6 +214,47 @@ long long salivo_sqlite_finalize(long long stmt_handle) {
     return 0;
 }
 
+/* Growable JSON output buffer; `failed` latches on allocation failure */
+typedef struct { char* data; size_t len; size_t cap; int failed; } JsonBuf;
+
+static void jb_put(JsonBuf* b, const char* s, size_t n) {
+    if (b->failed) return;
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (b->len + n + 1 > cap) cap *= 2;
+        char* d = (char*)realloc(b->data, cap);
+        if (!d) { b->failed = 1; return; }
+        b->data = d;
+        b->cap = cap;
+    }
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+}
+
+/* Appends s as a quoted, escaped JSON string (NULL -> "") */
+static void jb_str(JsonBuf* b, const char* s) {
+    jb_put(b, "\"", 1);
+    for (const unsigned char* p = (const unsigned char*)(s ? s : ""); *p; p++) {
+        char esc[8];
+        switch (*p) {
+            case '"': jb_put(b, "\\\"", 2); break;
+            case '\\': jb_put(b, "\\\\", 2); break;
+            case '\n': jb_put(b, "\\n", 2); break;
+            case '\r': jb_put(b, "\\r", 2); break;
+            case '\t': jb_put(b, "\\t", 2); break;
+            default:
+                if (*p < 0x20) {
+                    snprintf(esc, sizeof(esc), "\\u%04x", *p);
+                    jb_put(b, esc, 6);
+                } else {
+                    jb_put(b, (const char*)p, 1);
+                }
+        }
+    }
+    jb_put(b, "\"", 1);
+}
+
 char* salivo_sqlite_query_json(long long db_handle, const char* sql) {
     sqlite3* db = get_db_by_handle(db_handle);
     if (!db || !sql) {
@@ -229,33 +270,30 @@ char* salivo_sqlite_query_json(long long db_handle, const char* sql) {
         return empty;
     }
     int col_count = sqlite3_column_count(stmt);
-    char buf[16384];
-    int pos = 0;
-    buf[pos++] = '[';
+    JsonBuf jb = {NULL, 0, 0, 0};
+    jb_put(&jb, "[", 1);
     int first_row = 1;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!first_row) {
-            buf[pos++] = ',';
-            buf[pos++] = ' ';
-        }
+        if (!first_row) jb_put(&jb, ", ", 2);
         first_row = 0;
-        buf[pos++] = '{';
+        jb_put(&jb, "{", 1);
         for (int i = 0; i < col_count; i++) {
-            if (i > 0) {
-                buf[pos++] = ',';
-                buf[pos++] = ' ';
-            }
-            const char* col_name = sqlite3_column_name(stmt, i);
-            const char* col_text = (const char*)sqlite3_column_text(stmt, i);
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "\"%s\": \"%s\"", col_name ? col_name : "", col_text ? col_text : "");
+            if (i > 0) jb_put(&jb, ", ", 2);
+            jb_str(&jb, sqlite3_column_name(stmt, i));
+            jb_put(&jb, ": ", 2);
+            jb_str(&jb, (const char*)sqlite3_column_text(stmt, i));
         }
-        buf[pos++] = '}';
+        jb_put(&jb, "}", 1);
     }
-    buf[pos++] = ']';
-    buf[pos] = '\0';
+    jb_put(&jb, "]", 1);
     sqlite3_finalize(stmt);
-    char* res = (char*)malloc(strlen(buf) + 1);
-    strcpy(res, buf);
+    if (jb.failed) {
+        free(jb.data);
+        char* empty = (char*)malloc(3);
+        if (empty) strcpy(empty, "[]");
+        return empty;
+    }
+    char* res = jb.data;
     return res;
 }
 

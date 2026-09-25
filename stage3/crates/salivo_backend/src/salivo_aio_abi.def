@@ -1,4 +1,4 @@
-# Salivo Stage 36.1 async runtime ABI - the single canonical definition.
+# Salivo Stage 36.1 async runtime + Stage 36.2 HTTP transport ABI - the single canonical definition.
 #
 # Consumers (none of them keep a second copy of this table):
 #   crates/salivo_semantic   declares every intrinsic from it (include_str!)
@@ -13,8 +13,8 @@
 # aggregate layout crosses it. Negative `int` results are error codes (see AIO_ERRORS).
 #
 # Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
-@abi_version 36102
-@errors 0:Ok,-1:WouldBlock,-2:Eof,-3:ConnectionReset,-4:Timeout,-5:Cancelled,-6:Closed,-7:InvalidArgument,-8:Os,-9:Shutdown,-10:InvalidHandle,-11:Full,-12:Unsupported,-13:NotInTask,-14:ConnectionRefused,-15:AddressInUse,-16:Truncated,-17:TaskFailed
+@abi_version 36200
+@errors 0:Ok,-1:WouldBlock,-2:Eof,-3:ConnectionReset,-4:Timeout,-5:Cancelled,-6:Closed,-7:InvalidArgument,-8:Os,-9:Shutdown,-10:InvalidHandle,-11:Full,-12:Unsupported,-13:NotInTask,-14:ConnectionRefused,-15:AddressInUse,-16:Truncated,-17:TaskFailed,-18:BadMessage,-19:InvalidHeader,-20:InvalidFraming,-21:HeaderTooLarge,-22:BodyTooLarge,-23:VersionNotSupported,-24:ProtocolError,-25:StreamReset,-26:FlowControl,-27:Compression,-28:Refused,-29:GoingAway
 rtaioabiversion|salivo_aio_abi_version|int||never|any thread|none
 rtaiocreate|salivo_aio_create|int|int|never|any thread; up to 32 live runtimes|caller owns the runtime handle until rtaiodestroy
 rtaiouse|salivo_aio_use|int|int|never|calling OS thread|selects the runtime handle-less calls from this thread use (0 clears); tasks always use their own runtime
@@ -30,6 +30,7 @@ rtaiolastpeer|salivo_aio_last_peer_str|string||never|task-local or thread-local|
 rtaiolastoserror|salivo_aio_last_os_error|int||never|task-local or thread-local|OS error code behind the caller's previous Os error
 rtaioworkerid|salivo_aio_worker_id|int||never|any thread|none
 rtaiospawn|salivo_aio_spawn|int|int,int|never|any thread|caller owns the task handle; release with rtaiorelease
+rtaiospawnowning|salivo_aio_spawn_owning|int|int,int|never|any thread|the task owns the handle passed as its argument: if it is cancelled before its first run the runtime closes/releases that handle; on error the caller keeps it
 rtaiospawnon|salivo_aio_spawn_on|int|int,int,int|never|any thread|spawns on an explicit runtime; caller owns the task handle
 rtaioawait|salivo_aio_await|int|int|suspends the task; parks a non-worker thread|any thread|borrows the handle; result via rtaiolastvalue
 rtaioawaittimeout|salivo_aio_await_timeout|int|int,int|suspends the task; parks a non-worker thread|any thread|borrows the handle; on Timeout the target task is cancelled
@@ -83,3 +84,32 @@ rtaioargint|salivo_aio_arg_int|int|int,int|never|single owner|reads an int argum
 rtaioargstr|salivo_aio_arg_get_str|string|int,int|never|single owner|hands the copied string argument to the caller
 rtaioargfree|salivo_aio_arg_free|int|int|never|single owner|frees the block and any strings not handed out
 rtaioerrorname|salivo_aio_error_name_str|string|int|never|any thread|returns a static string
+# ---- Stage 36.2 HTTP/1.1 + HTTP/2 (salivo_aio_http.inc). Connections and exchanges are handles in the
+# runtime's table; an exchange refers to its connection by handle only (no ownership cycle).
+rtaiohttpserver|salivo_aio_http_server|int|int,int|never|any thread|takes ownership of the TCP stream (the connection closes it); proto 0 auto, 1 HTTP/1.1, 2 HTTP/2 prior knowledge; caller owns the connection handle; errors: InvalidArgument, InvalidHandle, Refused (connection limit), Os; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpclient|salivo_aio_http_client|int|int,int|never|any thread|takes ownership of the TCP stream; proto 1 or 2; caller owns the connection handle; errors: InvalidArgument, InvalidHandle, Refused (connection limit), Os; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpset|salivo_aio_http_set|int|int,int,int|never|any thread; before the connection starts|sets limit `key` of a connection (0 = process defaults; key 100 = maximum connections); errors: InvalidArgument (key/value, or a buffer/SETTINGS key after HTTP/2 started), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpnext|salivo_aio_http_next|int|int|suspends until a request head is parsed|one acceptor per connection|caller owns the returned exchange handle; Eof when the connection ends; errors: Eof (connection ended); BadMessage, InvalidHeader, InvalidFraming, HeaderTooLarge, BodyTooLarge, VersionNotSupported (request rejected with 4xx/5xx); ProtocolError, Compression, FlowControl (HTTP/2 connection error); Timeout, Cancelled, Closed; InvalidArgument (response pending, second acceptor); platform: identical on every 36.1 backend (no platform code)
+rtaiohttprequest|salivo_aio_http_request|int|int,string,string|never|any thread|copies method and target; caller owns the exchange handle; errors: InvalidArgument (syntax, exchange in progress), Closed, InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpaddheader|salivo_aio_http_add_header|int|int,string,string|never|exchange owner|validates and copies an outbound field; rejects CR/LF/NUL and framing fields; errors: InvalidArgument (syntax, CR/LF/NUL, framing field, head already sent), HeaderTooLarge; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpsend|salivo_aio_http_send|int|int,int,int|suspends until the head is written (HTTP/2 client: until a stream slot is free)|exchange owner|status (0 on a client) and body length (-1 streams); errors: InvalidArgument, GoingAway, StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpwrite|salivo_aio_http_write|int|int,int,int|suspends until written (socket and flow-control backpressure)|exchange owner|writes len bytes of caller-owned memory; bodies above 4 KiB go to the socket without a copy; errors: InvalidArgument (head not sent, beyond the declared length), StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpwritetext|salivo_aio_http_write_text|int|int,string|suspends until written|exchange owner|writes the UTF-8 bytes of text; errors: InvalidArgument, StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpfinish|salivo_aio_http_finish|int|int|suspends until the terminator is written|exchange owner|ends the outbound body; a short fixed-length body fails and aborts the message; errors: InvalidFraming (short fixed-length body), StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpresponse|salivo_aio_http_response|int|int|suspends until the response head arrives|exchange owner|returns the status code; errors: InvalidArgument, StreamReset, Refused, GoingAway, BadMessage, InvalidFraming, ProtocolError, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpread|salivo_aio_http_read|int|int,int,int|suspends until body bytes arrive|exchange owner|copies at most cap body bytes into caller memory; Eof at the end of the body; errors: Eof (end of body), BodyTooLarge, InvalidFraming, InvalidHeader (trailer), StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpnextchunk|salivo_aio_http_next_chunk|int|int|suspends until body bytes arrive|exchange owner|makes the next body piece the exchange's current view (no copy) and returns its length; the view lives until the next call or free; errors: Eof (end of body), BodyTooLarge, InvalidFraming, InvalidHeader (trailer), StreamReset, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpchunkbyte|salivo_aio_http_chunk_byte|int|int,int|never|exchange owner|byte i of the current view; errors: InvalidArgument (index outside the view), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttptext|salivo_aio_http_text_str|string|int,int|never|exchange owner|0 method, 1 target, 2 path, 3 query, 4 authority, 5 scheme, 6 reason, 7 protocol; new string owned by the caller; errors: none ("" for an unknown key or handle); platform: identical on every 36.1 backend (no platform code)
+rtaiohttpheader|salivo_aio_http_header_str|string|int,string,int|never|exchange owner|n-th value of an inbound field (case-insensitive name); new string owned by the caller; errors: none ("" when absent); platform: identical on every 36.1 backend (no platform code)
+rtaiohttpheadercount|salivo_aio_http_header_count|int|int,string|never|exchange owner|number of inbound fields with the name ("" counts all); errors: InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpheaderat|salivo_aio_http_header_at_str|string|int,int,int|never|exchange owner|name (part 0) or value (part 1) of inbound field i; new string owned by the caller; errors: none ("" outside the field list); platform: identical on every 36.1 backend (no platform code)
+rtaiohttptrailer|salivo_aio_http_trailer_str|string|int,string|never|exchange owner|inbound trailer value after the body ended; new string owned by the caller; errors: none ("" when absent or before the body ended); platform: identical on every 36.1 backend (no platform code)
+rtaiohttpinfo|salivo_aio_http_info|int|int,int|never|any thread|integer facts about an exchange or connection (docs/STAGE_36_2_HTTP.md); errors: InvalidArgument (key), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpreset|salivo_aio_http_reset|int|int,int|never (queues RST_STREAM)|any thread|HTTP/2 resets the stream with the code; HTTP/1.1 closes the connection; errors: InvalidArgument (code), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpfree|salivo_aio_http_free|int|int|never|any thread|consumes the exchange handle; an unfinished HTTP/2 stream is reset, an unfinished HTTP/1.1 message closes the connection; errors: InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpgoaway|salivo_aio_http_goaway|int|int,int|never (queues GOAWAY)|any thread|graceful shutdown: no new streams; next() returns Eof once queued requests are taken; errors: InvalidArgument (code), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpping|salivo_aio_http_ping|int|int|suspends until the PING ACK|any thread|returns the round trip in microseconds (HTTP/2 only); errors: Unsupported (HTTP/1.1), InvalidArgument (PING outstanding), Full, Timeout, Cancelled, Closed; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpclose|salivo_aio_http_close|int|int|never|any thread|consumes the connection handle and closes the socket; waiting exchanges fail with Closed; errors: InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpauthority|salivo_aio_http_authority|int|int,string|never|any thread|copies the default Host / :authority of a client connection; errors: InvalidArgument (server connection, invalid text), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
+rtaiohttpstat|salivo_aio_http_stat|int|int|never|any thread|process-wide HTTP counters (copies, pool, live objects); errors: InvalidArgument (key); platform: identical on every 36.1 backend (no platform code)

@@ -30,6 +30,7 @@ char* salivo_aio_last_peer_str(void) {  sa_unsupported(); return (char*)"Unsuppo
 int64_t salivo_aio_last_os_error(void) {  return sa_unsupported(); }
 int64_t salivo_aio_worker_id(void) {  return sa_unsupported(); }
 int64_t salivo_aio_spawn(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_spawn_owning(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
 int64_t salivo_aio_spawn_on(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
 int64_t salivo_aio_await(int64_t a0) { (void)a0; return sa_unsupported(); }
 int64_t salivo_aio_await_timeout(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
@@ -83,3 +84,30 @@ int64_t salivo_aio_arg_int(int64_t a0, int64_t a1) { (void)a0; (void)a1; return 
 char* salivo_aio_arg_get_str(int64_t a0, int64_t a1) { (void)a0; (void)a1; sa_unsupported(); return (char*)"Unsupported"; }
 int64_t salivo_aio_arg_free(int64_t a0) { (void)a0; return sa_unsupported(); }
 char* salivo_aio_error_name_str(int64_t a0) { (void)a0; sa_unsupported(); return (char*)"Unsupported"; }
+int64_t salivo_aio_http_server(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_client(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_set(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_next(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_request(int64_t a0, const char* a1, const char* a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_add_header(int64_t a0, const char* a1, const char* a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_send(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_write(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_write_text(int64_t a0, const char* a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_finish(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_response(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_read(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; return sa_unsupported(); }
+int64_t salivo_aio_http_next_chunk(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_chunk_byte(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+char* salivo_aio_http_text_str(int64_t a0, int64_t a1) { (void)a0; (void)a1; sa_unsupported(); return (char*)"Unsupported"; }
+char* salivo_aio_http_header_str(int64_t a0, const char* a1, int64_t a2) { (void)a0; (void)a1; (void)a2; sa_unsupported(); return (char*)"Unsupported"; }
+int64_t salivo_aio_http_header_count(int64_t a0, const char* a1) { (void)a0; (void)a1; return sa_unsupported(); }
+char* salivo_aio_http_header_at_str(int64_t a0, int64_t a1, int64_t a2) { (void)a0; (void)a1; (void)a2; sa_unsupported(); return (char*)"Unsupported"; }
+char* salivo_aio_http_trailer_str(int64_t a0, const char* a1) { (void)a0; (void)a1; sa_unsupported(); return (char*)"Unsupported"; }
+int64_t salivo_aio_http_info(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_reset(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_free(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_goaway(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_ping(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_close(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_http_authority(int64_t a0, const char* a1) { (void)a0; (void)a1; return sa_unsupported(); }
+int64_t salivo_aio_http_stat(int64_t a0) { (void)a0; return sa_unsupported(); }

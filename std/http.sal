@@ -1,0 +1,414 @@
+module salivo.std.http;
+
+// Salivo Stage 36.2 - HTTP/1.1 and HTTP/2 transport on the Stage 36.1 runtime.
+//
+// An HttpConn owns one TCP stream. An HttpStream is one exchange on it: on a server, an inbound
+// request plus the response the application writes; on a client, the request the application
+// writes plus the inbound response. HTTP/1.1 and HTTP/2 share this API. Bodies stream in both
+// directions with backpressure; nothing buffers a whole body unless the caller asks (readAll).
+//
+// Design, limits and guarantees: docs/STAGE_36_2_HTTP.md.
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.runtime::{TcpStream, Buffer, tcpConnect, tcpClose};
+
+pub enum HttpError {
+    BadMessage,
+    InvalidHeader,
+    InvalidFraming,
+    HeaderTooLarge,
+    BodyTooLarge,
+    VersionNotSupported,
+    ProtocolError,
+    StreamReset,
+    FlowControl,
+    Compression,
+    Refused,
+    GoingAway,
+    Eof,
+    Timeout,
+    Cancelled,
+    Closed,
+    InvalidArgument,
+    InvalidHandle,
+    Shutdown,
+    Full,
+    Io,
+    Unsupported,
+    Unknown,
+}
+
+pub enum HttpVersion { Http10, Http11, Http2 }
+
+pub struct HttpConn { int handle; }
+pub struct HttpStream { int handle; }
+pub struct HttpHeader { string name; string value; }
+
+// Protocol selection for httpServer / httpClient.
+pub func protoAuto() -> int { return 0; }
+pub func protoHttp1() -> int { return 1; }
+pub func protoHttp2() -> int { return 2; }
+
+// Limit keys for setLimit / setDefaultLimit (defaults in docs/STAGE_36_2_HTTP.md).
+pub func limitRequestLine() -> int { return 0; }
+pub func limitHeaderCount() -> int { return 1; }
+pub func limitHeaderBytes() -> int { return 2; }
+pub func limitFieldSize() -> int { return 3; }
+pub func limitBodySize() -> int { return 4; }
+pub func limitChunkSize() -> int { return 5; }
+pub func limitFrameSize() -> int { return 6; }
+pub func limitHeaderList() -> int { return 7; }
+pub func limitStreams() -> int { return 8; }
+pub func limitStreamWindow() -> int { return 9; }
+pub func limitConnWindow() -> int { return 10; }
+pub func timeoutHeader() -> int { return 11; }
+pub func timeoutIdle() -> int { return 12; }
+pub func timeoutRead() -> int { return 13; }
+pub func timeoutWrite() -> int { return 14; }
+pub func timeoutRequest() -> int { return 15; }
+pub func timeoutStream() -> int { return 16; }
+pub func limitControlQueue() -> int { return 17; }
+pub func limitDrain() -> int { return 18; }
+pub func limitPeerResets() -> int { return 19; }
+pub func limitConnections() -> int { return 100; }
+
+pub func httpErrorFromCode(code: int) -> HttpError {
+    if (code == -2) { return HttpError::Eof; }
+    if (code == -3 || code == -6) { return HttpError::Closed; }
+    if (code == -4) { return HttpError::Timeout; }
+    if (code == -5) { return HttpError::Cancelled; }
+    if (code == -7 || code == -13) { return HttpError::InvalidArgument; }
+    if (code == -8 || code == -14) { return HttpError::Io; }
+    if (code == -9) { return HttpError::Shutdown; }
+    if (code == -10) { return HttpError::InvalidHandle; }
+    if (code == -11) { return HttpError::Full; }
+    if (code == -12) { return HttpError::Unsupported; }
+    if (code == -18) { return HttpError::BadMessage; }
+    if (code == -19) { return HttpError::InvalidHeader; }
+    if (code == -20) { return HttpError::InvalidFraming; }
+    if (code == -21) { return HttpError::HeaderTooLarge; }
+    if (code == -22) { return HttpError::BodyTooLarge; }
+    if (code == -23) { return HttpError::VersionNotSupported; }
+    if (code == -24) { return HttpError::ProtocolError; }
+    if (code == -25) { return HttpError::StreamReset; }
+    if (code == -26) { return HttpError::FlowControl; }
+    if (code == -27) { return HttpError::Compression; }
+    if (code == -28) { return HttpError::Refused; }
+    if (code == -29) { return HttpError::GoingAway; }
+    return HttpError::Unknown;
+}
+
+/// Name of an ABI error code ("BadMessage", "Timeout", ...).
+pub func httpErrorName(code: int) -> string {
+    return rtaioerrorname(code);
+}
+
+func hres(code: int) -> Result<int, HttpError> {
+    if (code < 0) { return err<int, HttpError>(httpErrorFromCode(code)); }
+    return ok<int, HttpError>(code);
+}
+
+func hconn(code: int) -> Result<HttpConn, HttpError> {
+    if (code < 0) { return err<HttpConn, HttpError>(httpErrorFromCode(code)); }
+    return ok<HttpConn, HttpError>(HttpConn { handle: code });
+}
+
+func hstream(code: int) -> Result<HttpStream, HttpError> {
+    if (code < 0) { return err<HttpStream, HttpError>(httpErrorFromCode(code)); }
+    return ok<HttpStream, HttpError>(HttpStream { handle: code });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connections
+// ---------------------------------------------------------------------------------------------
+
+/// Serves HTTP on an accepted stream. The connection takes ownership of the stream.
+pub func httpServer(s: TcpStream, proto: int) -> Result<HttpConn, HttpError> {
+    return hconn(rtaiohttpserver(s.handle, proto));
+}
+
+/// Speaks HTTP to a server over a connected stream (HTTP/2 uses prior knowledge).
+pub func httpClient(s: TcpStream, proto: int) -> Result<HttpConn, HttpError> {
+    return hconn(rtaiohttpclient(s.handle, proto));
+}
+
+pub func setLimit(c: HttpConn, key: int, value: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpset(c.handle, key, value));
+}
+
+/// Process-wide default for connections created afterwards.
+pub func setDefaultLimit(key: int, value: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpset(0, key, value));
+}
+
+/// Server: waits for the next request. Err(Eof) when the connection ends.
+pub func nextRequest(c: HttpConn) -> Result<HttpStream, HttpError> {
+    return hstream(rtaiohttpnext(c.handle));
+}
+
+/// Client: starts an exchange. Add headers (a "host" is expected), then sendRequest.
+pub func request(c: HttpConn, method: string, target: string) -> Result<HttpStream, HttpError> {
+    return hstream(rtaiohttprequest(c.handle, method, target));
+}
+
+/// Graceful shutdown (HTTP/2 GOAWAY): no new streams; permitted streams finish.
+pub func goaway(c: HttpConn, code: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpgoaway(c.handle, code));
+}
+
+/// HTTP/2 PING; returns the round trip in microseconds.
+pub func ping(c: HttpConn) -> Result<int, HttpError> {
+    return hres(rtaiohttpping(c.handle));
+}
+
+pub func httpClose(c: HttpConn) -> Result<int, HttpError> {
+    return hres(rtaiohttpclose(c.handle));
+}
+
+pub func connInfo(c: HttpConn, key: int) -> int {
+    return rtaiohttpinfo(c.handle, key);
+}
+
+/// Negotiated protocol: 1 (HTTP/1.1) or 2 (HTTP/2); 0 before detection.
+pub func connProtocol(c: HttpConn) -> int { return rtaiohttpinfo(c.handle, 0); }
+pub func openStreams(c: HttpConn) -> int { return rtaiohttpinfo(c.handle, 1); }
+pub func requestsServed(c: HttpConn) -> int { return rtaiohttpinfo(c.handle, 2); }
+
+// ---------------------------------------------------------------------------------------------
+// Outbound message (server response / client request)
+// ---------------------------------------------------------------------------------------------
+
+/// Appends a header. CR, LF and NUL are rejected; Content-Length and Transfer-Encoding are set
+/// by the transport from the length given to respond / sendRequest.
+pub func addHeader(s: HttpStream, name: string, value: string) -> Result<int, HttpError> {
+    return hres(rtaiohttpaddheader(s.handle, name, value));
+}
+
+/// Sends the response head. length -1 streams the body (chunked on HTTP/1.1, DATA on HTTP/2).
+/// A 1xx status sends an interim response; a final one may follow.
+pub func respond(s: HttpStream, status: int, length: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpsend(s.handle, status, length));
+}
+
+pub func sendRequest(s: HttpStream, length: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpsend(s.handle, 0, length));
+}
+
+/// Writes body bytes; suspends while the peer or the socket applies backpressure.
+pub func writeBody(s: HttpStream, b: Buffer, n: int) -> Result<int, HttpError> {
+    if (n < 0 || n > b.cap) { return err<int, HttpError>(HttpError::InvalidArgument); }
+    return hres(rtaiohttpwrite(s.handle, b.addr, n));
+}
+
+pub func writeText(s: HttpStream, text: string) -> Result<int, HttpError> {
+    return hres(rtaiohttpwritetext(s.handle, text));
+}
+
+pub func finish(s: HttpStream) -> Result<int, HttpError> {
+    return hres(rtaiohttpfinish(s.handle));
+}
+
+/// Complete fixed-length text response.
+pub func respondText(s: HttpStream, status: int, text: string) -> Result<int, HttpError> {
+    let r = rtaiohttpsend(s.handle, status, len(text));
+    if (r < 0) { return hres(r); }
+    let w = rtaiohttpwritetext(s.handle, text);
+    if (w < 0) { return hres(w); }
+    return hres(rtaiohttpfinish(s.handle));
+}
+
+/// Client: waits for the response head and returns the status (1xx interim responses are skipped).
+pub func awaitResponse(s: HttpStream) -> Result<int, HttpError> {
+    return hres(rtaiohttpresponse(s.handle));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inbound body
+// ---------------------------------------------------------------------------------------------
+
+/// Copies up to max body bytes into b. Err(Eof) at the end of the body.
+pub func readBody(s: HttpStream, b: Buffer, max: int) -> Result<int, HttpError> {
+    let mut m = max;
+    if (m > b.cap) { m = b.cap; }
+    if (m <= 0) { return err<int, HttpError>(HttpError::InvalidArgument); }
+    return hres(rtaiohttpread(s.handle, b.addr, m));
+}
+
+/// Zero-copy: the next body piece becomes the stream's current view (read it with chunkByte).
+/// The view stays valid until the next nextChunk or freeStream. Err(Eof) at the end.
+pub func nextChunk(s: HttpStream) -> Result<int, HttpError> {
+    return hres(rtaiohttpnextchunk(s.handle));
+}
+
+pub func chunkByte(s: HttpStream, i: int) -> int {
+    return rtaiohttpchunkbyte(s.handle, i);
+}
+
+/// Reads the whole body into b. Err(BodyTooLarge) when it does not fit.
+pub func readAll(s: HttpStream, b: Buffer) -> Result<int, HttpError> {
+    let mut total = 0;
+    let mut open = true;
+    while (open) {
+        if (total == b.cap) {
+            let probe = rtaiohttpnextchunk(s.handle);
+            if (probe == -2) { return ok<int, HttpError>(total); }
+            if (probe < 0) { return hres(probe); }
+            return err<int, HttpError>(HttpError::BodyTooLarge);
+        }
+        let r = rtaiohttpread(s.handle, b.addr + total, b.cap - total);
+        if (r == -2) {
+            open = false;
+        } else {
+            if (r < 0) { return hres(r); }
+            total = total + r;
+        }
+    }
+    return ok<int, HttpError>(total);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inbound head
+// ---------------------------------------------------------------------------------------------
+
+pub func method(s: HttpStream) -> string { return rtaiohttptext(s.handle, 0); }
+pub func target(s: HttpStream) -> string { return rtaiohttptext(s.handle, 1); }
+pub func path(s: HttpStream) -> string { return rtaiohttptext(s.handle, 2); }
+pub func query(s: HttpStream) -> string { return rtaiohttptext(s.handle, 3); }
+pub func authority(s: HttpStream) -> string { return rtaiohttptext(s.handle, 4); }
+pub func scheme(s: HttpStream) -> string { return rtaiohttptext(s.handle, 5); }
+pub func reason(s: HttpStream) -> string { return rtaiohttptext(s.handle, 6); }
+pub func protocolName(s: HttpStream) -> string { return rtaiohttptext(s.handle, 7); }
+
+pub func version(s: HttpStream) -> HttpVersion {
+    let v = rtaiohttpinfo(s.handle, 0);
+    if (v == 10) { return HttpVersion::Http10; }
+    if (v == 20) { return HttpVersion::Http2; }
+    return HttpVersion::Http11;
+}
+
+/// 0 origin-form, 1 absolute-form, 2 authority-form, 3 asterisk-form.
+pub func targetForm(s: HttpStream) -> int { return rtaiohttpinfo(s.handle, 1); }
+pub func status(s: HttpStream) -> int { return rtaiohttpinfo(s.handle, 2); }
+/// Declared Content-Length, or -1.
+pub func contentLength(s: HttpStream) -> int { return rtaiohttpinfo(s.handle, 3); }
+pub func keepAlive(s: HttpStream) -> bool { return rtaiohttpinfo(s.handle, 5) == 1; }
+pub func streamId(s: HttpStream) -> int { return rtaiohttpinfo(s.handle, 6); }
+pub func bodyComplete(s: HttpStream) -> bool { return rtaiohttpinfo(s.handle, 7) == 1; }
+pub func bodyReceived(s: HttpStream) -> int { return rtaiohttpinfo(s.handle, 8); }
+pub func streamInfo(s: HttpStream, key: int) -> int { return rtaiohttpinfo(s.handle, key); }
+
+/// First value of a header (case-insensitive name), "" when absent.
+pub func header(s: HttpStream, name: string) -> string { return rtaiohttpheader(s.handle, name, 0); }
+pub func headerN(s: HttpStream, name: string, n: int) -> string { return rtaiohttpheader(s.handle, name, n); }
+pub func headerCount(s: HttpStream, name: string) -> int { return rtaiohttpheadercount(s.handle, name); }
+pub func hasHeader(s: HttpStream, name: string) -> bool { return rtaiohttpheadercount(s.handle, name) > 0; }
+pub func fieldCount(s: HttpStream) -> int { return rtaiohttpheadercount(s.handle, ""); }
+
+pub func headerAt(s: HttpStream, i: int) -> HttpHeader {
+    return HttpHeader { name: rtaiohttpheaderat(s.handle, i, 0), value: rtaiohttpheaderat(s.handle, i, 1) };
+}
+
+pub func trailer(s: HttpStream, name: string) -> string { return rtaiohttptrailer(s.handle, name); }
+
+// ---------------------------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------------------------
+
+/// Cancels the exchange (HTTP/2 RST_STREAM with the code; HTTP/1.1 closes the connection).
+pub func resetStream(s: HttpStream, code: int) -> Result<int, HttpError> {
+    return hres(rtaiohttpreset(s.handle, code));
+}
+
+pub func freeStream(s: HttpStream) -> Result<int, HttpError> {
+    return hres(rtaiohttpfree(s.handle));
+}
+
+/// Process-wide counters (copies, buffer pool, live objects); keys in docs/STAGE_36_2_HTTP.md.
+pub func httpStat(key: int) -> int { return rtaiohttpstat(key); }
+
+/// Default Host / :authority for a client connection (requests without a "host" header use it).
+pub func setAuthority(c: HttpConn, authority: string) -> Result<int, HttpError> {
+    return hres(rtaiohttpauthority(c.handle, authority));
+}
+
+/// Connects and returns a client connection whose authority is "host:port".
+pub func httpConnect(host: string, port: int, proto: int) -> Result<HttpConn, HttpError> {
+    let s = tcpConnect(host, port);
+    if (!s.is_ok) { return err<HttpConn, HttpError>(HttpError::Closed); }
+    let c = rtaiohttpclient(s.value.handle, proto);
+    if (c < 0) {
+        let x = tcpClose(s.value);
+        return err<HttpConn, HttpError>(httpErrorFromCode(c));
+    }
+    let a = rtaiohttpauthority(c, host + $":{port}");
+    return ok<HttpConn, HttpError>(HttpConn { handle: c });
+}
+
+/// Instrumentation mode: turns the per-byte copy/view and per-frame counters on or off
+/// (off by default; SALIVO_HTTP_STATS=1 also enables it).
+pub func enableHttpStats(on: bool) -> Result<int, HttpError> {
+    let mut v = 0;
+    if (on) { v = 1; }
+    return hres(rtaiohttpset(0, 101, v));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Typed views of one exchange. They share the HttpStream handle; they add no state and no copy.
+// Server: requestOf(s) is the inbound request; the response is written with respond/writeBody.
+// Client: responseOf(s) is the inbound response after awaitResponse.
+// ---------------------------------------------------------------------------------------------
+
+pub enum HttpMethod { Get, Head, Post, Put, Delete, Connect, Options, Trace, Patch, Other }
+pub struct HttpStatus { int code; }
+pub struct HttpRequest { int handle; }
+pub struct HttpResponse { int handle; }
+pub struct HttpHeaders { int handle; }
+pub struct HttpBody { int handle; }
+
+pub func requestOf(s: HttpStream) -> HttpRequest { return HttpRequest { handle: s.handle }; }
+pub func responseOf(s: HttpStream) -> HttpResponse { return HttpResponse { handle: s.handle }; }
+
+pub func methodFromName(m: string) -> HttpMethod {
+    if (m == "GET") { return HttpMethod::Get; }
+    if (m == "HEAD") { return HttpMethod::Head; }
+    if (m == "POST") { return HttpMethod::Post; }
+    if (m == "PUT") { return HttpMethod::Put; }
+    if (m == "DELETE") { return HttpMethod::Delete; }
+    if (m == "CONNECT") { return HttpMethod::Connect; }
+    if (m == "OPTIONS") { return HttpMethod::Options; }
+    if (m == "TRACE") { return HttpMethod::Trace; }
+    if (m == "PATCH") { return HttpMethod::Patch; }
+    return HttpMethod::Other;
+}
+
+pub func requestMethod(r: HttpRequest) -> HttpMethod { return methodFromName(rtaiohttptext(r.handle, 0)); }
+pub func requestMethodName(r: HttpRequest) -> string { return rtaiohttptext(r.handle, 0); }
+pub func requestTarget(r: HttpRequest) -> string { return rtaiohttptext(r.handle, 1); }
+pub func requestPath(r: HttpRequest) -> string { return rtaiohttptext(r.handle, 2); }
+pub func requestQuery(r: HttpRequest) -> string { return rtaiohttptext(r.handle, 3); }
+pub func requestHeaders(r: HttpRequest) -> HttpHeaders { return HttpHeaders { handle: r.handle }; }
+pub func requestBody(r: HttpRequest) -> HttpBody { return HttpBody { handle: r.handle }; }
+
+pub func responseStatus(r: HttpResponse) -> HttpStatus { return HttpStatus { code: rtaiohttpinfo(r.handle, 2) }; }
+pub func responseHeaders(r: HttpResponse) -> HttpHeaders { return HttpHeaders { handle: r.handle }; }
+pub func responseBody(r: HttpResponse) -> HttpBody { return HttpBody { handle: r.handle }; }
+
+/// 1 informational, 2 success, 3 redirection, 4 client error, 5 server error.
+pub func statusClass(st: HttpStatus) -> int { return st.code / 100; }
+pub func isSuccess(st: HttpStatus) -> bool { return st.code >= 200 && st.code < 300; }
+
+pub func headersGet(h: HttpHeaders, name: string) -> string { return rtaiohttpheader(h.handle, name, 0); }
+pub func headersGetN(h: HttpHeaders, name: string, n: int) -> string { return rtaiohttpheader(h.handle, name, n); }
+pub func headersCount(h: HttpHeaders, name: string) -> int { return rtaiohttpheadercount(h.handle, name); }
+pub func headersHas(h: HttpHeaders, name: string) -> bool { return rtaiohttpheadercount(h.handle, name) > 0; }
+pub func headersLen(h: HttpHeaders) -> int { return rtaiohttpheadercount(h.handle, ""); }
+pub func headersAt(h: HttpHeaders, i: int) -> HttpHeader {
+    return HttpHeader { name: rtaiohttpheaderat(h.handle, i, 0), value: rtaiohttpheaderat(h.handle, i, 1) };
+}
+
+pub func bodyRead(b: HttpBody, buf: Buffer, max: int) -> Result<int, HttpError> {
+    return readBody(HttpStream { handle: b.handle }, buf, max);
+}
+pub func bodyNext(b: HttpBody) -> Result<int, HttpError> { return hres(rtaiohttpnextchunk(b.handle)); }
+pub func bodyByte(b: HttpBody, i: int) -> int { return rtaiohttpchunkbyte(b.handle, i); }
+pub func bodyTrailer(b: HttpBody, name: string) -> string { return rtaiohttptrailer(b.handle, name); }

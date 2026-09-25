@@ -125,7 +125,7 @@ pub func timer(int delay_ms) -> Timer {
     return Timer {
         id: t_id,
         interval: dur,
-        is_active: true,
+        is_active: t_id != 0,
     };
 }
 
@@ -196,50 +196,101 @@ func pad4(int v) -> string {
     return s;
 }
 
+/// strftime-style formatting: %Y %m %d %H %M %S %%; other characters are copied.
+/// An empty format yields ISO 8601 UTC (YYYY-MM-DDTHH:MM:SSZ).
 pub func format(DateTime dt, string fmt_str) -> string {
-    let yr = pad4(dt.date.year);
-    let mo = pad2(dt.date.month);
-    let dy = pad2(dt.date.day);
-    let hr = pad2(dt.time.hour);
-    let mn = pad2(dt.time.minute);
-    let sc = pad2(dt.time.second);
-
-    let d_part = yr + "-" + mo + "-" + dy;
-    let t_part = hr + ":" + mn + ":" + sc;
-    let iso = d_part + "T" + t_part + "Z";
-    return iso;
+    let mut fmt = fmt_str;
+    if (fmt == "") { fmt = "%Y-%m-%dT%H:%M:%SZ"; }
+    let n = len(fmt);
+    let mut out = "";
+    let mut i = 0;
+    while (i < n) {
+        let c = slice(fmt, i, i + 1);
+        if (c == "%" && i + 1 < n) {
+            let d = slice(fmt, i + 1, i + 2);
+            if (d == "Y") { out = out + pad4(dt.date.year); }
+            else if (d == "m") { out = out + pad2(dt.date.month); }
+            else if (d == "d") { out = out + pad2(dt.date.day); }
+            else if (d == "H") { out = out + pad2(dt.time.hour); }
+            else if (d == "M") { out = out + pad2(dt.time.minute); }
+            else if (d == "S") { out = out + pad2(dt.time.second); }
+            else if (d == "%") { out = out + "%"; }
+            else { out = out + c + d; }
+            i = i + 2;
+        } else {
+            out = out + c;
+            i = i + 1;
+        }
+    }
+    return out;
 }
 
+// Reads exactly `width` ASCII digits at `pos`; -1 if any is not a digit or input is short
+func readDigits(string s, int pos, int width) -> int {
+    if (pos + width > len(s)) { return -1; }
+    let mut v = 0;
+    let mut k = 0;
+    while (k < width) {
+        let ch = slice(s, pos + k, pos + k + 1);
+        if (ch < "0" || ch > "9") { return -1; }
+        v = v * 10 + strint(ch);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// Parses `date_str` with the same directives as format (fixed width: %Y=4, others 2).
+/// Literal characters must match. An empty format accepts ISO 8601 date or date-time.
 pub func parse(string date_str, string fmt_str) -> Result<DateTime, string> {
-    let slen = len(date_str);
-    if (slen < 10) {
-        return err<DateTime, string>("Invalid date string: too short");
+    let mut fmt = fmt_str;
+    if (fmt == "") {
+        if (len(date_str) <= 10) { fmt = "%Y-%m-%d"; }
+        else if (len(date_str) == 19) { fmt = "%Y-%m-%dT%H:%M:%S"; }
+        else { fmt = "%Y-%m-%dT%H:%M:%SZ"; }
     }
-    let yr_str = slice(date_str, 0, 4);
-    let mo_str = slice(date_str, 5, 7);
-    let dy_str = slice(date_str, 8, 10);
-
-    let yr = strint(yr_str);
-    let mo = strint(mo_str);
-    let dy = strint(dy_str);
-
-    let hr = 0;
-    let mn = 0;
-    let sc = 0;
-
-    if (slen >= 19) {
-        let hr_str = slice(date_str, 11, 13);
-        let mn_str = slice(date_str, 14, 16);
-        let sc_str = slice(date_str, 17, 19);
-        hr = strint(hr_str);
-        mn = strint(mn_str);
-        sc = strint(sc_str);
+    let n = len(fmt);
+    let mut pos = 0;
+    let mut i = 0;
+    let mut yr = 1970;
+    let mut mo = 1;
+    let mut dy = 1;
+    let mut hr = 0;
+    let mut mn = 0;
+    let mut sc = 0;
+    while (i < n) {
+        let c = slice(fmt, i, i + 1);
+        if (c == "%" && i + 1 < n && slice(fmt, i + 1, i + 2) != "%") {
+            let d = slice(fmt, i + 1, i + 2);
+            let mut width = 2;
+            if (d == "Y") { width = 4; }
+            let v = readDigits(date_str, pos, width);
+            if (v < 0) { return err<DateTime, string>("Invalid date string: expected digits for %" + d); }
+            if (d == "Y") { yr = v; }
+            else if (d == "m") { mo = v; }
+            else if (d == "d") { dy = v; }
+            else if (d == "H") { hr = v; }
+            else if (d == "M") { mn = v; }
+            else if (d == "S") { sc = v; }
+            else { return err<DateTime, string>("Unsupported directive %" + d); }
+            pos = pos + width;
+            i = i + 2;
+        } else {
+            let lit = c;
+            if (c == "%") { i = i + 1; }
+            if (pos >= len(date_str) || slice(date_str, pos, pos + 1) != lit) {
+                return err<DateTime, string>("Invalid date string: expected '" + lit + "'");
+            }
+            pos = pos + 1;
+            i = i + 1;
+        }
     }
-
+    if (pos != len(date_str)) { return err<DateTime, string>("Invalid date string: trailing characters"); }
+    if (mo < 1 || mo > 12 || dy < 1 || dy > 31 || hr > 23 || mn > 59 || sc > 60) {
+        return err<DateTime, string>("Invalid date string: field out of range");
+    }
     let d = Date { year: yr, month: mo, day: dy };
     let t = Time { hour: hr, minute: mn, second: sc, nanosecond: 0 };
-    let dt = DateTime { date: d, time: t, offset_seconds: 0 };
-    return ok<DateTime, string>(dt);
+    return ok<DateTime, string>(DateTime { date: d, time: t, offset_seconds: 0 });
 }
 
 pub func testtime() -> bool {

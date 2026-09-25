@@ -808,6 +808,53 @@ int64_t salivo_aio_read(int64_t h, int64_t buf, int64_t cap) {
     return r;
 }
 
+/* Gathered write of two buffers in one WSASend (used by the HTTP layer so a frame header and
+ * its payload leave in one system call without copying the payload). A partial completion
+ * finishes through sa_sock_write. Returns n1 + n2 or an error. */
+static int64_t sa_sock_write2(SaSock* k, const char* p1, int64_t n1, const char* p2, int64_t n2) {
+    SaTask* self = sa_current_task();
+    if (self && A_LOAD(&self->cancel_req)) return sa_cancelled_here();
+    if (n1 + n2 > (1 << 30)) {
+        int64_t r = sa_sock_write(k, (int64_t)(intptr_t)p1, n1);
+        return r < 0 ? r : sa_sock_write(k, (int64_t)(intptr_t)p2, n2) < 0 ? SA_EOS : n1 + n2;
+    }
+    WSABUF b[2];
+    b[0].len = (ULONG)n1;
+    b[0].buf = (char*)p1;
+    b[1].len = (ULONG)n2;
+    b[1].buf = (char*)p2;
+    SaIoOp op;
+    sa_rw_rdlock(&k->iolock);
+    if (A_LOAD(&k->closed)) {
+        sa_rw_rdunlock(&k->iolock);
+        return SA_ECLOSED;
+    }
+    sa_io_begin(k->obj.rt, &op);
+    int rc = WSASend(k->s, b, 2, NULL, 0, &op.ov, NULL);
+    int e = rc == SOCKET_ERROR ? WSAGetLastError() : 0;
+    sa_rw_rdunlock(&k->iolock);
+    if (rc == SOCKET_ERROR && e != WSA_IO_PENDING) {
+        sa_io_abort(k->obj.rt, &op);
+        return sa_map_err(e, 0);
+    }
+    int cs = sa_io_wait(&op, (HANDLE)k->s, &k->iolock, &k->closed);
+    if (op.err) return sa_map_err(op.err, cs);
+    int64_t done = (int64_t)op.bytes, r;
+    if (done < n1 && (r = sa_sock_write(k, (int64_t)(intptr_t)(p1 + done), n1 - done)) < 0) return r;
+    if (done < n1) done = n1;
+    if (done - n1 < n2 && (r = sa_sock_write(k, (int64_t)(intptr_t)(p2 + (done - n1)), n2 - (done - n1))) < 0) return r;
+    return n1 + n2;
+}
+
+static int64_t sa_aio_write2(int64_t h, const void* p1, int64_t n1, const void* p2, int64_t n2) {
+    SaObj* o = sa_lookup(h, OT_TCP_STREAM);
+    if (!o) return SA_EHANDLE;
+    int64_t r = sa_io_check(o);
+    if (!r) r = sa_sock_write2((SaSock*)o, (const char*)p1, n1, (const char*)p2, n2);
+    sa_obj_unref(o);
+    return r;
+}
+
 int64_t salivo_aio_write(int64_t h, int64_t buf, int64_t len) {
     if (len < 0 || (len > 0 && buf == 0)) return SA_EINVAL;
     SaObj* o = sa_lookup(h, 0);
@@ -839,7 +886,7 @@ int64_t salivo_aio_close(int64_t h) {
     int type = o->type;
     SaRuntime* rt = o->rt;
     sa_obj_unref(o);
-    if (type == OT_TASK) return SA_EINVAL; /* tasks are released, not closed */
+    if (type == OT_TASK || type == OT_HTTP_CONN || type == OT_HTTP_EX) return SA_EINVAL; /* released / closed through their own calls */
     o = sa_tab_remove(h, type);
     if (!o) return SA_EHANDLE; /* lost a race with another close */
     if (type == OT_CHAN) {

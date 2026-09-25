@@ -69,7 +69,7 @@ enum {
     SA_EFAILED = -17
 };
 
-#define SA_ABI_VERSION 36102
+#define SA_ABI_VERSION 36200
 
 /* ============================================================================================
  * Atomics. Relaxed counters use RELAXED; state machines use ACQ_REL; the two sleep/wake
@@ -107,7 +107,7 @@ enum {
 #define H_INC(h) ((uint32_t)(((h) >> 49) & 0x1FFF))
 #define RT_HANDLE(inc, rts) (((int64_t)(inc) << 16) | ((int64_t)(rts) << 8) | 0xA1)
 
-enum { OT_TASK = 1, OT_CHAN, OT_TCP_LISTENER, OT_TCP_STREAM, OT_UDP, OT_FILE };
+enum { OT_TASK = 1, OT_CHAN, OT_TCP_LISTENER, OT_TCP_STREAM, OT_UDP, OT_FILE, OT_HTTP_CONN, OT_HTTP_EX };
 
 struct SaRuntime;
 
@@ -179,6 +179,7 @@ typedef struct SaTask {
     int32_t fail_set;
     int32_t running_on; /* atomic; worker id or -1; proves no two workers run one task */
     int32_t budget;
+    int32_t owns_arg; /* arg is a handle the task owns: released if the task never runs */
     sa_task_fn fn;
     int64_t arg;
     int64_t result;
@@ -204,6 +205,7 @@ typedef struct SaTimer {
     uint64_t seq; /* FIFO order between equal deadlines */
     int64_t idx;  /* heap index, -1 when not armed */
     SaWaiter* w;
+    void (*cb)(struct SaTimer*); /* fired instead of w (under the timer lock) when set */
 } SaTimer;
 
 /* ============================================================================================
@@ -707,6 +709,8 @@ static void sa_fiber_put(SaRuntime* rt, SaWorker* w, void* f) {
 
 static void sa_mon_kick(SaRuntime* rt);
 
+static void sa_release_owned(int64_t h);
+
 static void sa_run_task(SaRuntime* rt, SaWorker* w, SaTask* t) {
     int32_t expect = SW_QUEUED;
     if (!A_CAS(&t->sched, &expect, SW_RUNNING)) {
@@ -714,7 +718,9 @@ static void sa_run_task(SaRuntime* rt, SaWorker* w, SaTask* t) {
         return;
     }
     if (!t->started && A_LOAD(&t->cancel_req)) {
-        /* Cancelled before it ever ran: the body is never entered. */
+        /* Cancelled before it ever ran: the body is never entered, so a handle it owned is
+         * released here instead of leaking. */
+        if (t->owns_arg) sa_release_owned(t->arg);
         sa_task_finalize(rt, t, TS_CANCELLED);
         return;
     }
@@ -729,6 +735,7 @@ static void sa_run_task(SaRuntime* rt, SaWorker* w, SaTask* t) {
             A_STORE(&t->running_on, -1);
             t->fail_set = 1;
             t->fail_code = SA_EOS;
+            if (t->owns_arg) sa_release_owned(t->arg);
             sa_task_finalize(rt, t, TS_FAILED);
             return;
         }
@@ -927,9 +934,10 @@ static void sa_heap_remove(SaRuntime* rt, int64_t i) {
 
 static void sa_reactor_notify(SaRuntime* rt);
 
-static int sa_timer_arm(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms) {
+static int sa_timer_arm_ex(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms, void (*cb)(SaTimer*)) {
     int notify = 0;
     tm->w = w;
+    tm->cb = cb;
     sa_mutex_lock(&rt->tm_lock);
     if (rt->heap_n == rt->heap_cap) {
         int64_t ncap = rt->heap_cap ? rt->heap_cap * 2 : 256;
@@ -953,6 +961,9 @@ static int sa_timer_arm(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms) {
     return 1;
 }
 
+static int sa_timer_arm(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms) { return sa_timer_arm_ex(rt, tm, w, ms, NULL); }
+static int sa_timer_arm_cb(SaRuntime* rt, SaTimer* tm, int64_t ms, void (*cb)(SaTimer*)) { return sa_timer_arm_ex(rt, tm, NULL, ms, cb); }
+
 /* Always takes the timer lock, even if the timer already fired: this orders the task's return
  * after the reactor's wake (see the waiter memory rule). */
 static void sa_timer_disarm(SaRuntime* rt, SaTimer* tm) {
@@ -969,7 +980,8 @@ static int64_t sa_timers_run(SaRuntime* rt) {
         SaTimer* tm = rt->heap[0];
         sa_heap_remove(rt, 0);
         A_INC(&rt->st_timers_fired);
-        sa_waiter_fire(tm->w);
+        if (tm->cb) tm->cb(tm);
+        else sa_waiter_fire(tm->w);
     }
     int64_t next = rt->heap_n > 0 ? rt->heap[0]->deadline_ns : INT64_MAX;
     rt->reactor_deadline_ns = next;
@@ -1120,7 +1132,7 @@ static void sa_task_finalize(SaRuntime* rt, SaTask* t, int final_state) {
     sa_obj_unref(&t->obj); /* the "alive" reference */
 }
 
-static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) {
+static int64_t sa_spawn_in_ex(SaRuntime* rt, int64_t fn, int64_t arg, int owns) {
     if (rt->state != RT_STARTED) return SA_ESHUTDOWN;
     if (fn == 0) return SA_EINVAL;
     SaTask* t = (SaTask*)calloc(1, sizeof(SaTask));
@@ -1128,6 +1140,7 @@ static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) {
     sa_obj_init(rt, &t->obj, OT_TASK, 2 /* handle + alive */, sa_task_destroy);
     t->fn = (sa_task_fn)(intptr_t)fn;
     t->arg = arg;
+    t->owns_arg = owns;
     t->running_on = -1;
     t->state = TS_CREATED;
     sa_mutex_init(&t->lock);
@@ -1162,6 +1175,18 @@ static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) {
     int64_t h = t->handle;
     sa_enqueue(rt, t, 0);
     return h;
+}
+
+static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) { return sa_spawn_in_ex(rt, fn, arg, 0); }
+
+/* Like spawn, but the task owns `h` (the argument): if the task is cancelled before it ever runs,
+ * the runtime closes/releases h, so a handle handed to a task never leaks. On error the caller
+ * still owns h. */
+int64_t salivo_aio_spawn_owning(int64_t fn, int64_t h) {
+    int64_t err = SA_ESHUTDOWN;
+    SaRuntime* rt = sa_ctx_rt(&err);
+    if (!rt) return err;
+    return sa_spawn_in_ex(rt, fn, h, 1);
 }
 
 int64_t salivo_aio_spawn(int64_t fn, int64_t arg) {
@@ -2301,7 +2326,9 @@ char* salivo_aio_error_name_str(int64_t code) {
     static const char* names[] = {"Ok", "WouldBlock", "Eof", "ConnectionReset", "Timeout", "Cancelled",
                                   "Closed", "InvalidArgument", "Os", "Shutdown", "InvalidHandle", "Full",
                                   "Unsupported", "NotInTask", "ConnectionRefused", "AddressInUse",
-                                  "Truncated", "TaskFailed"};
+                                  "Truncated", "TaskFailed", "BadMessage", "InvalidHeader", "InvalidFraming",
+                                  "HeaderTooLarge", "BodyTooLarge", "VersionNotSupported", "ProtocolError",
+                                  "StreamReset", "FlowControl", "Compression", "Refused", "GoingAway"};
     if (code > 0) code = 0;
     if (-code >= (int64_t)(sizeof(names) / sizeof(names[0]))) return (char*)"Unknown";
     return (char*)names[-code];
@@ -2416,6 +2443,7 @@ static int sa_sockaddr_port(const struct sockaddr_storage* ss) {
 #else
 #include "salivo_aio_io_posix.inc"
 #endif
+#include "salivo_aio_http.inc"
 
 #else /* no async backend for this platform */
 #include "salivo_aio_unsupported.inc"

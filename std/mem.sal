@@ -318,21 +318,23 @@ pub func deref<T>(Box<T> b) -> T {
     return b.value;
 }
 
-/// Atomic Reference Counted Pointer Arc<T>
+/// Atomic Reference Counted Pointer Arc<T>.
+/// `address` points at a control block whose first 8 bytes are the atomic strong count;
+/// it is field 0 because the backend retains/releases through field 0.
 pub struct Arc<T> {
+    int address;
     T value;
     int strong_ref_count;
     int weak_ref_count;
-    int address;
 }
 
 pub func arcnew<T>(T val, int element_size) -> Arc<T> {
-    let addr = allocate(element_size + 16, 8);
+    let addr = rtarcinit(allocate(element_size + 16, 8));
     return Arc<T> {
+        address: addr,
         value: val,
         strong_ref_count: 1,
         weak_ref_count: 0,
-        address: addr,
     };
 }
 
@@ -365,30 +367,25 @@ pub func arena(int capacity) -> Arena {
 /// Increments strong reference count of Arc<T>
 pub func retain<T>(Arc<T> ptr) -> Arc<T> {
     return Arc<T> {
-        value: ptr.value,
-        strong_ref_count: ptr.strong_ref_count + 1,
-        weak_ref_count: ptr.weak_ref_count,
         address: ptr.address,
+        value: ptr.value,
+        strong_ref_count: rtarcretain(ptr.address),
+        weak_ref_count: ptr.weak_ref_count,
     };
 }
 
-/// Decrements strong reference count of Arc<T>, destroying value if count drops to 0
+/// Decrements strong reference count of Arc<T>, freeing the control block when it drops to 0
 pub func release<T>(Arc<T> ptr) -> Arc<T> {
-    let new_count = ptr.strong_ref_count - 1;
-    if (new_count <= 0) {
-        deallocate(ptr.address, 32, 8);
-        new_count = 0;
-    }
     return Arc<T> {
-        value: ptr.value,
-        strong_ref_count: new_count,
-        weak_ref_count: ptr.weak_ref_count,
         address: ptr.address,
+        value: ptr.value,
+        strong_ref_count: rtarcrelease(ptr.address),
+        weak_ref_count: ptr.weak_ref_count,
     };
 }
 
 pub func strongcount<T>(Arc<T> ptr) -> int {
-    return ptr.strong_ref_count;
+    return rtarccount(ptr.address);
 }
 
 pub func weakcount<T>(Arc<T> ptr) -> int {
@@ -424,10 +421,8 @@ pub func writebyte(int addr, int offset, int val) {
 
 /// Zero-fills a range of memory bytes starting at address + offset
 pub func zero(int addr, int offset, int count_bytes) {
-    let i = 0;
-    while (i < count_bytes) {
-        rtmemwritebyte(addr, offset + i, 0);
-        i = i + 1;
+    if (count_bytes > 0) {
+        rtmemfill(addr + offset, 0, count_bytes);
     }
 }
 

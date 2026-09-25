@@ -212,6 +212,24 @@ pub func sha256Hex(input_raw: string) -> string {
     return rtcryptosha256str(input_raw);
 }
 
+/// HMAC-SHA256 (RFC 2104) of message under key, as lowercase hex
+pub func hmacSha256Hex(key: string, message: string) -> string {
+    return rtcryptohmacsha256str(key, message);
+}
+
+pub func hmacsha256hex(key: string, message: string) -> string {
+    return hmacSha256Hex(key, message);
+}
+
+/// Constant-time string equality for comparing secrets, MACs and tokens
+pub func constantTimeEq(a: string, b: string) -> bool {
+    return rtcryptoctequal(a, b) == 1;
+}
+
+pub func constanttimeeq(a: string, b: string) -> bool {
+    return constantTimeEq(a, b);
+}
+
 pub func sha256hex(input_raw: string) -> string {
     return sha256Hex(input_raw);
 }

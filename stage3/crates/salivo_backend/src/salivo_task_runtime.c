@@ -112,13 +112,21 @@ static void salivo_stat(int kind, long long bytes) {
         salivo_stats_registered = 1;
         if (getenv("SALIVO_ALLOC_STATS")) atexit(salivo_print_alloc_stats);
     }
-    salivo_stat_calls[kind]++;
-    salivo_stat_bytes[kind] += bytes;
+#ifdef _WIN32
+    InterlockedIncrement64(&salivo_stat_calls[kind]);
+    InterlockedExchangeAdd64(&salivo_stat_bytes[kind], bytes);
+#else
+    __atomic_add_fetch(&salivo_stat_calls[kind], 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&salivo_stat_bytes[kind], bytes, __ATOMIC_RELAXED);
+#endif
 }
 
-/* Frees a heap string produced by rtconcat/rtintstr; the static "" returned on allocation failure is skipped */
+/* Static "" returned by rtconcat/rtsubstr/rtintstr on allocation failure; never freed */
+static char salivo_empty_str[1] = {0};
+
+/* Frees a heap string produced by rtconcat/rtsubstr/rtintstr (a heap "" included) */
 void rtfreestr(char* s) {
-    if (s && s[0] != 0) free(s);
+    if (s && s != salivo_empty_str) free(s);
 }
 
 char* rtconcat(const char* a, const char* b) {
@@ -128,7 +136,7 @@ char* rtconcat(const char* a, const char* b) {
     size_t lb = strlen(b);
     salivo_stat(0, (long long)(la + lb + 1));
     char* res = (char*)malloc(la + lb + 1);
-    if (!res) return "";
+    if (!res) return salivo_empty_str;
     memcpy(res, a, la);
     memcpy(res + la, b, lb);
     res[la + lb] = '\0';
@@ -343,12 +351,12 @@ char* rtsubstr(const char* s, long long start, long long len) {
     /* Always a fresh heap string: callers may free a result they are done with */
     long long total_len = s ? (long long)strlen(s) : 0;
     if (start < 0) start = 0;
-    if (start >= total_len) { char* empty = (char*)malloc(1); if (empty) empty[0] = 0; return empty ? empty : ""; }
+    if (start >= total_len) { char* empty = (char*)malloc(1); if (empty) empty[0] = 0; return empty ? empty : salivo_empty_str; }
     if (len < 0) len = 0;
     if (start + len > total_len) len = total_len - start;
     salivo_stat(1, len + 1);
     char* res = (char*)malloc((size_t)len + 1);
-    if (!res) return "";
+    if (!res) return salivo_empty_str;
     memcpy(res, s + start, (size_t)len);
     res[len] = '\0';
     return res;
@@ -1956,41 +1964,66 @@ typedef struct {
     int id;
     int is_active;
     FILE* fp;
-    char path[256];
 } SalivoFileSlot;
 
 static int g_next_file_id = 1;
 static SalivoFileSlot g_file_table[MAX_FILES + 1];
+static volatile long g_file_lock = 0;
+
+/* Spinlock for short critical sections over the legacy handle tables */
+static void salivo_spin_lock(volatile long* l) {
+#ifdef _WIN32
+    while (InterlockedExchange(l, 1)) YieldProcessor();
+#else
+    while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE)) {}
+#endif
+}
+
+static void salivo_spin_unlock(volatile long* l) {
+#ifdef _WIN32
+    InterlockedExchange(l, 0);
+#else
+    __atomic_store_n(l, 0, __ATOMIC_RELEASE);
+#endif
+}
 
 long long salivo_c_file_open(const char* path, const char* mode) {
     if (!path) path = "";
     if (!mode) mode = "rb";
+    FILE* f = fopen(path, mode);
+    if (!f) return -1;
+    /* Slots are claimed under the lock and handed out round-robin, delaying handle reuse */
+    long long handle = -1;
+    salivo_spin_lock(&g_file_lock);
     for (int k = 0; k < MAX_FILES; k++) {
         int i = ((g_next_file_id + k) % MAX_FILES) + 1;
         if (!g_file_table[i].is_active) {
             g_next_file_id = i;
-            FILE* f = fopen(path, mode);
-            if (!f) return -1;
             g_file_table[i].id = i;
-            g_file_table[i].is_active = 1;
             g_file_table[i].fp = f;
-            strncpy(g_file_table[i].path, path, 255);
-            g_file_table[i].path[255] = '\0';
-            return (long long)i;
+            g_file_table[i].is_active = 1;
+            handle = i;
+            break;
         }
     }
-    return -1;
+    salivo_spin_unlock(&g_file_lock);
+    if (handle < 0) fclose(f);
+    return handle;
 }
 
 long long salivo_c_file_close(long long handle) {
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active) {
         return -1;
     }
-    if (g_file_table[handle].fp) {
-        fclose(g_file_table[handle].fp);
-        g_file_table[handle].fp = NULL;
-    }
+    /* Detach under the lock so concurrent closes release the FILE exactly once */
+    salivo_spin_lock(&g_file_lock);
+    int was_active = g_file_table[handle].is_active;
+    FILE* fp = was_active ? g_file_table[handle].fp : NULL;
+    g_file_table[handle].fp = NULL;
     g_file_table[handle].is_active = 0;
+    salivo_spin_unlock(&g_file_lock);
+    if (!was_active) return -1;
+    if (fp) fclose(fp);
     return 0;
 }
 
@@ -2119,7 +2152,7 @@ static void shim_write_decl(FILE* f, const char* def) {
         char c = *p;
         if (c == '(' || c == '[' || c == '{' || c == '<') { depth++; continue; }
         if ((c == ')' || c == ']' || c == '}' || c == '>') && depth > 0) { depth--; continue; }
-        if ((c == ',' || c == ')') && depth == 0 || c == 0) {
+        if (((c == ',' || c == ')') && depth == 0) || c == 0) {
             const char* e = p;
             const char* b = start;
             while (b < e && *b == ' ') b++;
@@ -2865,6 +2898,41 @@ void salivo_arc_release(void* ptr) {
     }
 }
 
+/* Salivo-facing ARC ops on the control block address (strong count at offset 0) */
+long long salivo_arc_init_i(long long addr) {
+    if (addr) *(volatile long long*)(uintptr_t)addr = 1;
+    return addr;
+}
+
+long long salivo_arc_retain_i(long long addr) {
+    if (!addr) return 0;
+#ifdef _WIN32
+    return InterlockedIncrement64((long long*)(uintptr_t)addr);
+#else
+    return __atomic_add_fetch((long long*)(uintptr_t)addr, 1, __ATOMIC_SEQ_CST);
+#endif
+}
+
+long long salivo_arc_release_i(long long addr) {
+    if (!addr) return 0;
+#ifdef _WIN32
+    long long remaining = InterlockedDecrement64((long long*)(uintptr_t)addr);
+#else
+    long long remaining = __atomic_sub_fetch((long long*)(uintptr_t)addr, 1, __ATOMIC_SEQ_CST);
+#endif
+    if (remaining <= 0) salivo_deallocate(addr, 0, 8);
+    return remaining < 0 ? 0 : remaining;
+}
+
+long long salivo_arc_count_i(long long addr) {
+    if (!addr) return 0;
+#ifdef _WIN32
+    return InterlockedCompareExchange64((long long*)(uintptr_t)addr, 0, 0);
+#else
+    return __atomic_load_n((long long*)(uintptr_t)addr, __ATOMIC_SEQ_CST);
+#endif
+}
+
 /* Forward declaration — defined below, needed for PRNG auto-seeding */
 long long salivo_clock_nanos(void);
 
@@ -2949,54 +3017,69 @@ typedef struct {
     long long expire_time_ms;
 } SalivoTimerSlot;
 
-static SalivoTimerSlot g_timer_table[1024];
-static long long g_timer_count = 0;
+#define SALIVO_TIMER_SLOTS 1024
+static SalivoTimerSlot g_timer_table[SALIVO_TIMER_SLOTS];
+static long long g_timer_gen = 0;
+static volatile long g_timer_lock = 0;
 
+static void salivo_timer_lock(void) { salivo_spin_lock(&g_timer_lock); }
+static void salivo_timer_unlock(void) { salivo_spin_unlock(&g_timer_lock); }
+
+/* Id = generation * SLOTS + slot: freed slots are reused and a stale id never matches. 0 = table full. */
 long long salivo_timer_create(long long delay_ms) {
-    long long id = ++g_timer_count;
-    if (id < 1024) {
-        g_timer_table[id].id = id;
-        g_timer_table[id].is_active = 1;
-        g_timer_table[id].expire_time_ms = salivo_time_now_ms() + delay_ms;
+    long long id = 0;
+    salivo_timer_lock();
+    for (int i = 1; i < SALIVO_TIMER_SLOTS; i++) {
+        if (!g_timer_table[i].is_active) {
+            id = (++g_timer_gen) * SALIVO_TIMER_SLOTS + i;
+            g_timer_table[i].id = id;
+            g_timer_table[i].is_active = 1;
+            g_timer_table[i].expire_time_ms = salivo_time_now_ms() + delay_ms;
+            break;
+        }
     }
+    salivo_timer_unlock();
     return id;
 }
 
+static SalivoTimerSlot* salivo_timer_slot(long long timer_id) {
+    if (timer_id < SALIVO_TIMER_SLOTS) return NULL;
+    SalivoTimerSlot* t = &g_timer_table[timer_id % SALIVO_TIMER_SLOTS];
+    return (t->id == timer_id && t->is_active) ? t : NULL;
+}
+
 long long salivo_timer_is_active(long long timer_id) {
-    if (timer_id < 1 || timer_id >= 1024) return 0;
-    return g_timer_table[timer_id].is_active ? 1 : 0;
+    salivo_timer_lock();
+    long long r = salivo_timer_slot(timer_id) ? 1 : 0;
+    salivo_timer_unlock();
+    return r;
 }
 
 long long salivo_timer_cancel(long long timer_id) {
-    if (timer_id < 1 || timer_id >= 1024) return 0;
-    if (!g_timer_table[timer_id].is_active) return 0;
-    g_timer_table[timer_id].is_active = 0;
-    return 1;
+    salivo_timer_lock();
+    SalivoTimerSlot* t = salivo_timer_slot(timer_id);
+    if (t) t->is_active = 0;
+    salivo_timer_unlock();
+    return t ? 1 : 0;
 }
 
 long long salivo_runtime_process_timers(void) {
-    long long min_expire = 0;
-    int min_idx = -1;
-    for (int i = 1; i <= g_timer_count && i < 1024; i++) {
-        if (g_timer_table[i].is_active) {
-            if (min_idx == -1 || g_timer_table[i].expire_time_ms < min_expire) {
-                min_expire = g_timer_table[i].expire_time_ms;
-                min_idx = i;
-            }
+    long long min_expire = 0, min_id = 0;
+    salivo_timer_lock();
+    for (int i = 1; i < SALIVO_TIMER_SLOTS; i++) {
+        if (g_timer_table[i].is_active && (!min_id || g_timer_table[i].expire_time_ms < min_expire)) {
+            min_expire = g_timer_table[i].expire_time_ms;
+            min_id = g_timer_table[i].id;
         }
     }
-
-    if (min_idx != -1) {
-        long long now = salivo_time_now_ms();
-        while (min_expire + 10 > now) {
-            long long sleep_amt = min_expire + 10 - now;
-            salivo_sleep_ms((int)sleep_amt);
-            now = salivo_time_now_ms();
-        }
-        g_timer_table[min_idx].is_active = 0;
-        return 1;
+    salivo_timer_unlock();
+    if (!min_id) return 0;
+    long long now = salivo_time_now_ms();
+    while (min_expire + 10 > now) {
+        salivo_sleep_ms((int)(min_expire + 10 - now));
+        now = salivo_time_now_ms();
     }
-    return 0;
+    return salivo_timer_cancel(min_id);
 }
 
 long long salivo_c_dir_exists(const char* path) {
@@ -3048,7 +3131,7 @@ long long salivo_c_file_remove(const char* path) {
 char* rtintstr(long long val) {
     salivo_stat(2, 32);
     char* buf = (char*)malloc(32);
-    if (!buf) return "";
+    if (!buf) return salivo_empty_str;
     snprintf(buf, 32, "%lld", val);
     return buf;
 }
@@ -3512,6 +3595,61 @@ char* salivo_crypto_sha256_str(const char* s) {
     }
     hex[64] = '\0';
     return hex;
+}
+
+/* UTF-8 encoding of one code point as a fresh heap string (U+FFFD when invalid) */
+char* salivo_codepoint_str(long long cp) {
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+    char* out = (char*)malloc(5);
+    if (!out) return "";
+    int n = salivo_utf8_encode_cp(cp, out);
+    out[n] = 0;
+    return out;
+}
+
+/* RFC 2104 HMAC-SHA256 of msg under key, as 64 lowercase hex chars */
+char* salivo_crypto_hmac_sha256_str(const char* key, const char* msg) {
+    if (!key) key = "";
+    if (!msg) msg = "";
+    uint8_t k[64] = {0}, ipad[64], opad[64], inner[32], digest[32];
+    size_t klen = strlen(key);
+    SalivoSha256 ctx;
+    if (klen > 64) {
+        salivo_sha256_init(&ctx);
+        salivo_sha256_update(&ctx, (const uint8_t*)key, klen);
+        salivo_sha256_final(&ctx, k);
+    } else {
+        memcpy(k, key, klen);
+    }
+    for (int i = 0; i < 64; i++) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
+    salivo_sha256_init(&ctx);
+    salivo_sha256_update(&ctx, ipad, 64);
+    salivo_sha256_update(&ctx, (const uint8_t*)msg, strlen(msg));
+    salivo_sha256_final(&ctx, inner);
+    salivo_sha256_init(&ctx);
+    salivo_sha256_update(&ctx, opad, 64);
+    salivo_sha256_update(&ctx, inner, 32);
+    salivo_sha256_final(&ctx, digest);
+    char* hex = (char*)malloc(65);
+    if (!hex) return "";
+    static const char hex_digits[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2] = hex_digits[digest[i] >> 4];
+        hex[i * 2 + 1] = hex_digits[digest[i] & 0x0F];
+    }
+    hex[64] = '\0';
+    return hex;
+}
+
+/* 1 if equal; time depends only on the lengths, not on where the strings differ */
+long long salivo_crypto_ct_equal(const char* a, const char* b) {
+    if (!a) a = "";
+    if (!b) b = "";
+    size_t la = strlen(a), lb = strlen(b);
+    unsigned char diff = (unsigned char)(la != lb);
+    size_t n = la < lb ? la : lb;
+    for (size_t i = 0; i < n; i++) diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0 ? 1 : 0;
 }
 
 long long salivo_crypto_sha256_buf(long long in_addr, long long in_len, long long out_addr) {

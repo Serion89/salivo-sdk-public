@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -192,7 +193,7 @@ static void* sa_fiber_new(size_t reserve, sa_fiber_entry entry) {
                      , -1, 0);
     if (mem == MAP_FAILED) return NULL;
     mprotect(mem, page, PROT_NONE); /* stack overflow faults instead of corrupting memory */
-    SaFiberCtx* f = (SaFiberCtx*)calloc(1, sizeof(SaFiberCtx));
+    SaFiberCtx* volatile f = (SaFiberCtx*)calloc(1, sizeof(SaFiberCtx)); /* getcontext returns twice */
     if (!f) {
         munmap(mem, size);
         return NULL;
