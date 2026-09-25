@@ -69,7 +69,7 @@ enum {
     SA_EFAILED = -17
 };
 
-#define SA_ABI_VERSION 36200
+#define SA_ABI_VERSION 36300
 
 /* ============================================================================================
  * Atomics. Relaxed counters use RELAXED; state machines use ACQ_REL; the two sleep/wake
@@ -1182,6 +1182,13 @@ static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) { return sa_s
 /* Like spawn, but the task owns `h` (the argument): if the task is cancelled before it ever runs,
  * the runtime closes/releases h, so a handle handed to a task never leaks. On error the caller
  * still owns h. */
+/* Stage 36.3: synchronous indirect call of a Salivo `func(int) -> int` (the function value an
+ * application passes as a handler or middleware); InvalidArgument for a null function. */
+int64_t salivo_aio_call(int64_t fn, int64_t arg) {
+    if (!fn) return SA_EINVAL;
+    return ((int64_t (*)(int64_t))(intptr_t)fn)(arg);
+}
+
 int64_t salivo_aio_spawn_owning(int64_t fn, int64_t h) {
     int64_t err = SA_ESHUTDOWN;
     SaRuntime* rt = sa_ctx_rt(&err);

@@ -1,0 +1,3 @@
+module salivo.std.web;
+pub struct Slot { int v; string s; }
+pub func probeCall(fn: int, x: Slot) -> int { return rtaiocall(fn, x); }

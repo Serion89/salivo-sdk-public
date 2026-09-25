@@ -1,4 +1,4 @@
-# Salivo Stage 36.1 async runtime + Stage 36.2 HTTP transport ABI - the single canonical definition.
+# Salivo Stage 36.1 async runtime + Stage 36.2 HTTP transport + Stage 36.3 framework ABI - the single canonical definition.
 #
 # Consumers (none of them keep a second copy of this table):
 #   crates/salivo_semantic   declares every intrinsic from it (include_str!)
@@ -13,7 +13,7 @@
 # aggregate layout crosses it. Negative `int` results are error codes (see AIO_ERRORS).
 #
 # Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
-@abi_version 36200
+@abi_version 36300
 @errors 0:Ok,-1:WouldBlock,-2:Eof,-3:ConnectionReset,-4:Timeout,-5:Cancelled,-6:Closed,-7:InvalidArgument,-8:Os,-9:Shutdown,-10:InvalidHandle,-11:Full,-12:Unsupported,-13:NotInTask,-14:ConnectionRefused,-15:AddressInUse,-16:Truncated,-17:TaskFailed,-18:BadMessage,-19:InvalidHeader,-20:InvalidFraming,-21:HeaderTooLarge,-22:BodyTooLarge,-23:VersionNotSupported,-24:ProtocolError,-25:StreamReset,-26:FlowControl,-27:Compression,-28:Refused,-29:GoingAway
 rtaioabiversion|salivo_aio_abi_version|int||never|any thread|none
 rtaiocreate|salivo_aio_create|int|int|never|any thread; up to 32 live runtimes|caller owns the runtime handle until rtaiodestroy
@@ -113,3 +113,5 @@ rtaiohttpping|salivo_aio_http_ping|int|int|suspends until the PING ACK|any threa
 rtaiohttpclose|salivo_aio_http_close|int|int|never|any thread|consumes the connection handle and closes the socket; waiting exchanges fail with Closed; errors: InvalidHandle; platform: identical on every 36.1 backend (no platform code)
 rtaiohttpauthority|salivo_aio_http_authority|int|int,string|never|any thread|copies the default Host / :authority of a client connection; errors: InvalidArgument (server connection, invalid text), InvalidHandle; platform: identical on every 36.1 backend (no platform code)
 rtaiohttpstat|salivo_aio_http_stat|int|int|never|any thread|process-wide HTTP counters (copies, pool, live objects); errors: InvalidArgument (key); platform: identical on every 36.1 backend (no platform code)
+rtaiocall|salivo_aio_call|int|int,int|whatever the called function does|any thread|synchronous call of a Salivo func(int) -> int value (Stage 36.3 handlers and middleware); errors: InvalidArgument (null function); platform: identical everywhere (no platform code)
+rtaiohttppeer|salivo_aio_http_peer_str|string|int|never|any thread|textual IP address of the peer of an exchange or connection; new string owned by the caller; errors: none ("" when unknown); platform: getpeername on every 36.1 backend

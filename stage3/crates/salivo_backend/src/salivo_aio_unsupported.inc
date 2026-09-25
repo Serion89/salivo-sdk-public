@@ -111,3 +111,5 @@ int64_t salivo_aio_http_ping(int64_t a0) { (void)a0; return sa_unsupported(); }
 int64_t salivo_aio_http_close(int64_t a0) { (void)a0; return sa_unsupported(); }
 int64_t salivo_aio_http_authority(int64_t a0, const char* a1) { (void)a0; (void)a1; return sa_unsupported(); }
 int64_t salivo_aio_http_stat(int64_t a0) { (void)a0; return sa_unsupported(); }
+int64_t salivo_aio_call(int64_t a0, int64_t a1) { (void)a0; (void)a1; return sa_unsupported(); }
+char* salivo_aio_http_peer_str(int64_t a0) { (void)a0; sa_unsupported(); return (char*)"Unsupported"; }

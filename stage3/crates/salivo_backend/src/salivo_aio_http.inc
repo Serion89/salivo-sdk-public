@@ -728,6 +728,35 @@ static void h_conn_tokens(const unsigned char* v, uint32_t n, int* close, int* k
 
 /* Framing and connection semantics after a complete head (request or response). One framing
  * interpretation only: anything ambiguous fails closed. */
+/* RFC 9110 9.3.6: a CONNECT target is authority-form `host:port` with a non-empty host and a
+   decimal port in 1..65535; an IPv6 host is bracketed ("[::1]:443"). */
+static int h_valid_connect_authority(const unsigned char* t, uint32_t tl) {
+    if (tl < 3) return 0;
+    uint32_t colon;
+    if (t[0] == '[') {
+        const unsigned char* rb = (const unsigned char*)memchr(t, ']', tl);
+        if (!rb || rb == t + 1) return 0;
+        colon = (uint32_t)(rb - t) + 1;
+        if (colon >= tl || t[colon] != ':') return 0;
+    } else {
+        colon = tl;
+        while (colon > 0 && t[colon - 1] != ':') colon--;
+        if (colon == 0) return 0;
+        colon--;
+        if (colon == 0 || memchr(t, ':', colon)) return 0; /* empty host, or a bare IPv6 literal */
+        for (uint32_t k = 0; k < colon; k++)
+            if (t[k] <= ' ' || t[k] == '/' || t[k] == '@' || t[k] == 0x7f) return 0;
+    }
+    uint32_t digits = tl - colon - 1;
+    if (digits == 0 || digits > 5) return 0;
+    uint32_t port = 0;
+    for (uint32_t k = colon + 1; k < tl; k++) {
+        if (t[k] < '0' || t[k] > '9') return 0;
+        port = port * 10 + (uint32_t)(t[k] - '0');
+    }
+    return port >= 1 && port <= 65535;
+}
+
 static int64_t h1_semantics(HConn* c, HEx* e) {
     const unsigned char* b = e->hbase;
     const unsigned char* v = b + e->pm[PM_VERSION].voff;
@@ -771,8 +800,11 @@ static int64_t h1_semantics(HConn* c, HEx* e) {
             if (!(ml == 7 && memcmp(m, "OPTIONS", 7) == 0)) return HE_BADMSG;
             e->tform = 3;
         } else if (connect) {
-            if (t[0] == '/' || !memchr(t, ':', tl)) return HE_BADMSG;
-            e->tform = 2;
+            if (!h_valid_connect_authority(t, tl)) return HE_BADMSG;
+            /* An HTTP/1.1 CONNECT would switch the connection to a raw tunnel after a 2xx response
+               (no Content-Length / Transfer-Encoding); that mode is not implemented, so decline it. */
+            c->p.err_status = 501;
+            return HE_BADMSG;
         } else if (t[0] == '/') e->tform = 0;
         else {
             uint32_t k = 0;
@@ -795,7 +827,7 @@ static int64_t h1_semantics(HConn* c, HEx* e) {
         h_digits(b + e->pm[PM_STATUS].voff, 3, &st);
         if (st < 100) return HE_BADMSG;
         e->status = (int32_t)st;
-        if (e->is_head_req || st < 200 || st == 204 || st == 304) e->bmode = BM_NONE;
+        if (e->is_head_req || st < 200 || st == 204 || st == 205 || st == 304) e->bmode = BM_NONE;
         else if (tes) e->bmode = te_chunked ? BM_CHUNKED : BM_CLOSE;
         else if (cls) {
             e->bmode = clen ? BM_FIXED : BM_NONE;
@@ -1123,7 +1155,7 @@ static int64_t h1_send(HConn* c, HEx* e, int64_t status, int64_t len) {
     if (interim && status == 101) return SA_EINVAL; /* protocol upgrades are not supported */
     if (!interim) {
         if (!e->client) {
-            e->out_nobody = e->is_head_req || status == 204 || status == 304;
+            e->out_nobody = e->is_head_req || status == 204 || status == 205 || status == 304;
             if (len < 0 && e->version == 10) c->h1_close = 1; /* close-delimited body */
             if (!e->keepalive || e->out_close) c->h1_close = 1;
         } else if (e->out_close) c->h1_close = 1;
@@ -1157,6 +1189,8 @@ static int64_t h1_send(HConn* c, HEx* e, int64_t status, int64_t len) {
             i += (uint32_t)(nl + vl + 2);
         }
         if (e->out_chunked) n += snprintf((char*)w + n, cap - (size_t)n, "transfer-encoding: chunked\r\n");
+        else if (!e->client && status == 205) /* no content; an explicit 0 keeps the connection reusable */
+            n += snprintf((char*)w + n, cap - (size_t)n, "content-length: 0\r\n");
         else if (len >= 0 && status != 204 && status != 304 && (len > 0 || !e->client))
             n += snprintf((char*)w + n, cap - (size_t)n, "content-length: %lld\r\n", (long long)len);
         if (!e->client && c->h1_close) n += snprintf((char*)w + n, cap - (size_t)n, "connection: close\r\n");
@@ -1768,6 +1802,7 @@ static int h2_check(HConn* c, HDec* d, HEx* e, int trailer) {
         int connect = m->vlen == 7 && memcmp(d->out + m->voff, "CONNECT", 7) == 0;
         if (connect) {
             if (!e->pm[PM_AUTH].nlen || e->pm[PM_TARGET].nlen || e->pm[PM_SCHEME].nlen) return -1;
+            if (!h_valid_connect_authority(d->out + e->pm[PM_AUTH].voff, e->pm[PM_AUTH].vlen)) return -1;
             e->tform = 2;
         } else {
             if (!e->pm[PM_SCHEME].nlen || !e->pm[PM_TARGET].nlen || !e->pm[PM_TARGET].vlen) return -1;
@@ -2436,7 +2471,7 @@ static int64_t h2_encode(HConn* c, HEx* e, int64_t status, int64_t len, uint32_t
         /* RFC 9113 8.5: CONNECT carries :method and :authority (host:port, the request target) only */
         const char* t = e->tout && e->tout[0] && e->tout[0] != '/' ? e->tout : (const char*)authority;
         uint32_t tl = t == (const char*)authority ? alen : (uint32_t)strlen(t);
-        if (!t || !tl) return SA_EINVAL;
+        if (!t || !tl || !h_valid_connect_authority((const unsigned char*)t, tl)) return SA_EINVAL;
         o += hp_enc_field(p + o, (const unsigned char*)":method", 7, (const unsigned char*)"CONNECT", 7);
         o += hp_enc_field(p + o, (const unsigned char*)":authority", 10, (const unsigned char*)t, tl);
     } else if (e->client) {
@@ -2459,7 +2494,7 @@ static int64_t h2_encode(HConn* c, HEx* e, int64_t status, int64_t len, uint32_t
             continue; /* connection-specific fields do not exist in HTTP/2 */
         o += hp_enc_field(p + o, nm, nl, v, vl);
     }
-    if (len >= 0 && status != 204 && status != 304 && (len > 0 || !e->client)) {
+    if (len >= 0 && status != 204 && status != 205 && status != 304 && (len > 0 || !e->client)) {
         snprintf(num, sizeof num, "%lld", (long long)len);
         o += hp_enc_field(p + o, (const unsigned char*)"content-length", 14, (const unsigned char*)num, (uint32_t)strlen(num));
     }
@@ -2476,7 +2511,7 @@ static int64_t h2_send(HConn* c, HEx* e, int64_t status, int64_t len) {
     H2* h = c->h2;
     int interim = !e->client && status < 200, end;
     if (interim && status == 101) return SA_EINVAL;
-    if (!e->client) e->out_nobody = e->is_head_req || status == 204 || status == 304;
+    if (!e->client) e->out_nobody = e->is_head_req || status == 204 || status == 205 || status == 304;
     end = !interim && (e->out_nobody || len == 0);
     int64_t r;
     for (;;) {
@@ -2822,6 +2857,10 @@ int64_t salivo_aio_http_request(int64_t conn, const char* method, const char* ta
     if (!c->client || c->dead) r = c->dead ? c->dead_err : SA_EINVAL;
     else if (c->proto == 1 && c->cur && !(c->cur->in_done && c->cur->out_state == 2 && c->cur->head_ready)) r = SA_EINVAL;
     else if (c->proto == 1 && c->h1_close) r = SA_ECLOSED;
+    /* HTTP/1.1 CONNECT tunnels are not implemented (the 2xx would switch the connection to raw bytes) */
+    else if (c->proto == 1 && strcmp(method, "CONNECT") == 0) r = SA_EUNSUPPORTED;
+    /* CONNECT needs an authority-form host:port target; reject it before a stream id is spent */
+    else if (strcmp(method, "CONNECT") == 0 && !h_valid_connect_authority((const unsigned char*)target, (uint32_t)strlen(target))) r = SA_EINVAL;
     else if (c->proto == 2 && !A_LOAD(&c->h2_ready)) r = h2_start_once(c);
     if (r) {
         sa_obj_unref(&c->obj);
@@ -2880,7 +2919,7 @@ int64_t salivo_aio_http_add_header(int64_t ex, const char* name, const char* val
             }
         }
         if (!r) {
-            memcpy(e->oh + e->ohn, name, nl + 1);
+            memcpy(e->oh + e->ohn, name, nl + 1); /* HTTP/2: hp_enc_str lowercases names on the wire */
             memcpy(e->oh + e->ohn + nl + 1, value, vl + 1);
             e->ohn += (uint32_t)(nl + vl + 2);
         }
@@ -2917,7 +2956,7 @@ int64_t salivo_aio_http_send(int64_t ex, int64_t status, int64_t len) {
 
 static int64_t h_write(HConn* c, HEx* e, const unsigned char* p, int64_t n) {
     if (e->out_state != 1 || n < 0) return SA_EINVAL;
-    if (e->out_nobody) return SA_OK; /* HEAD / 204 / 304: the body is not sent */
+    if (e->out_nobody) return SA_OK; /* HEAD / 204 / 205 / 304: the body is not sent */
     if (e->out_len >= 0 && e->out_sent + n > e->out_len) return SA_EINVAL;
     if (n == 0) return SA_OK;
     int64_t r;
@@ -3310,4 +3349,35 @@ static void sa_release_owned(int64_t h) {
         salivo_aio_cancel(h);
         salivo_aio_release(h);
     } else salivo_aio_close(h);
+}
+
+/* Stage 36.3: textual IP address ("127.0.0.1", "::1") of the peer of an exchange's or a
+ * connection's socket, for rate limiting and logging; "" when unknown. */
+char* salivo_aio_http_peer_str(int64_t h) {
+    char text[SA_PEER_TEXT] = "";
+    SaObj* o = sa_lookup(h, 0);
+    if (o) {
+        int64_t ch = o->type == OT_HTTP_EX ? ((HEx*)o)->conn_h : (o->type == OT_HTTP_CONN ? h : 0);
+        HConn* c = ch ? (HConn*)sa_lookup(ch, OT_HTTP_CONN) : NULL;
+        SaSock* k = c && c->sock ? (SaSock*)sa_lookup(c->sock, OT_TCP_STREAM) : NULL;
+        if (k) {
+            struct sockaddr_storage ss;
+            memset(&ss, 0, sizeof(ss));
+#if defined(_WIN32)
+            int sl = (int)sizeof(ss);
+            int got = !k->closed && getpeername(k->s, (struct sockaddr*)&ss, &sl) == 0;
+#else
+            socklen_t sl = (socklen_t)sizeof(ss);
+            int got = !k->closed && getpeername(k->fd, (struct sockaddr*)&ss, &sl) == 0;
+#endif
+            if (got && ss.ss_family == AF_INET6)
+                inet_ntop(AF_INET6, (void*)&((struct sockaddr_in6*)&ss)->sin6_addr, text, sizeof(text));
+            else if (got && ss.ss_family == AF_INET)
+                inet_ntop(AF_INET, (void*)&((struct sockaddr_in*)&ss)->sin_addr, text, sizeof(text));
+            sa_obj_unref(&k->obj);
+        }
+        if (c) sa_obj_unref(&c->obj);
+        sa_obj_unref(o);
+    }
+    return h_strdup((const unsigned char*)text, strlen(text));
 }
