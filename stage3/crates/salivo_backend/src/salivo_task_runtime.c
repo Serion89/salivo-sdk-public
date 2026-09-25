@@ -107,11 +107,16 @@ static void salivo_print_alloc_stats(void) {
         fprintf(stderr, "ALLOCSTAT %s calls=%lld bytes=%lld\n", salivo_stat_names[i], salivo_stat_calls[i], salivo_stat_bytes[i]);
     }
 }
+static int salivo_stats_on = 0;
 static void salivo_stat(int kind, long long bytes) {
     if (!salivo_stats_registered) {
         salivo_stats_registered = 1;
-        if (getenv("SALIVO_ALLOC_STATS")) atexit(salivo_print_alloc_stats);
+        if (getenv("SALIVO_ALLOC_STATS")) {
+            salivo_stats_on = 1;
+            atexit(salivo_print_alloc_stats);
+        }
     }
+    if (!salivo_stats_on) return;
 #ifdef _WIN32
     InterlockedIncrement64(&salivo_stat_calls[kind]);
     InterlockedExchangeAdd64(&salivo_stat_bytes[kind], bytes);
@@ -1964,6 +1969,7 @@ typedef struct {
     int id;
     int is_active;
     FILE* fp;
+    int dirty;
 } SalivoFileSlot;
 
 static int g_next_file_id = 1;
@@ -1987,7 +1993,144 @@ static void salivo_spin_unlock(volatile long* l) {
 #endif
 }
 
+/* Writes are buffered by stdio. A handle with unflushed writes is dirty: it is flushed before its
+   own reads, seeks and position queries (as C requires when an update stream switches from
+   writing to reading), and every dirty handle is flushed before any operation that reaches the
+   file by path or starts a process, so readers in this process and children see the data. */
+static volatile long g_files_dirty = 0;
+
+static void salivo_file_settle(long long handle) {
+    if (handle < 1 || handle > MAX_FILES) return;
+    SalivoFileSlot* f = &g_file_table[handle];
+    if (f->is_active && f->fp && f->dirty) {
+        fflush(f->fp);
+        f->dirty = 0;
+    }
+}
+
+static void salivo_file_mark_dirty(long long handle) {
+    g_file_table[handle].dirty = 1;
+#ifdef _WIN32
+    InterlockedExchange(&g_files_dirty, 1);
+#else
+    __atomic_store_n(&g_files_dirty, 1, __ATOMIC_RELEASE);
+#endif
+}
+
+void salivo_flush_dirty_files(void) {
+#ifdef _WIN32
+    if (!InterlockedExchange(&g_files_dirty, 0)) return;
+#else
+    if (!__atomic_exchange_n(&g_files_dirty, 0, __ATOMIC_ACQ_REL)) return;
+#endif
+    salivo_spin_lock(&g_file_lock);
+    for (int i = 1; i <= MAX_FILES; i++) salivo_file_settle(i);
+    salivo_spin_unlock(&g_file_lock);
+}
+
+/* Legacy handle tables grow in lazily allocated chunks: slot addresses are stable, handles are
+   dense indices, and capacity is SALIVO_CHUNK_SIZE * SALIVO_MAX_CHUNKS - 1. Slots are claimed
+   under the table lock; readers load chunk pointers with acquire ordering. Handles of never
+   allocated chunks resolve to a zeroed, inactive slot. */
+#define SALIVO_CHUNK_BITS 10
+#define SALIVO_CHUNK_SIZE (1 << SALIVO_CHUNK_BITS)
+#define SALIVO_MAX_CHUNKS 1024
+#define SALIVO_TABLE_MAX ((long long)SALIVO_CHUNK_SIZE * SALIVO_MAX_CHUNKS - 1)
+
+static void* salivo_load_ptr(void* volatile* p) {
+#ifdef _WIN32
+    return InterlockedCompareExchangePointer(p, NULL, NULL);
+#else
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+#endif
+}
+
+static void salivo_store_ptr(void* volatile* p, void* v) {
+#ifdef _WIN32
+    InterlockedExchangePointer(p, v);
+#else
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+#endif
+}
+
+/* Handles are (generation << SALIVO_IDX_BITS) | index. Destroying a handle bumps its slot's
+   generation and recycles the slot, so a stale handle never reaches the slot's next owner. */
+#define SALIVO_IDX_BITS 20
+#define SALIVO_HANDLE_IDX(h) ((h) & ((1LL << SALIVO_IDX_BITS) - 1))
+#define SALIVO_HANDLE_GEN(h) ((h) >> SALIVO_IDX_BITS)
+
+#define SALIVO_CHUNKED_TABLE(name, T)                                                              \
+    typedef struct { T v; long long gen; } name##_Cell;                                           \
+    static name##_Cell* volatile name##_chunks[SALIVO_MAX_CHUNKS];                               \
+    static T name##_empty;                                                                        \
+    static long long name##_next = 1;                                                             \
+    static long long* name##_free;                                                                \
+    static long long name##_nfree = 0, name##_free_cap = 0;                                       \
+    static volatile long name##_lock = 0;                                                         \
+    static name##_Cell* name##_cell(long long idx) {                                              \
+        if (idx < 1 || idx > SALIVO_TABLE_MAX) return NULL;                                       \
+        name##_Cell* c = (name##_Cell*)salivo_load_ptr((void* volatile*)&name##_chunks[idx >> SALIVO_CHUNK_BITS]); \
+        return c ? &c[idx & (SALIVO_CHUNK_SIZE - 1)] : NULL;                                      \
+    }                                                                                             \
+    static T* name##_slot(long long h) {                                                          \
+        if (h < 1) return &name##_empty;                                                          \
+        name##_Cell* c = name##_cell(SALIVO_HANDLE_IDX(h));                                       \
+        return c && c->gen == SALIVO_HANDLE_GEN(h) ? &c->v : &name##_empty;                       \
+    }                                                                                             \
+    static long long name##_claim(void) {                                                         \
+        long long idx = -1;                                                                       \
+        salivo_spin_lock(&name##_lock);                                                           \
+        if (name##_nfree > 0) {                                                                   \
+            idx = name##_free[--name##_nfree];                                                    \
+        } else if (name##_next <= SALIVO_TABLE_MAX) {                                             \
+            long long ci = name##_next >> SALIVO_CHUNK_BITS;                                      \
+            if (!name##_chunks[ci]) {                                                             \
+                name##_Cell* c = (name##_Cell*)calloc(SALIVO_CHUNK_SIZE, sizeof(name##_Cell));    \
+                if (c) salivo_store_ptr((void* volatile*)&name##_chunks[ci], c);                  \
+            }                                                                                     \
+            if (name##_chunks[ci]) idx = name##_next++;                                           \
+        }                                                                                         \
+        long long h = idx < 0 ? -1 : (name##_cell(idx)->gen << SALIVO_IDX_BITS) | idx;            \
+        salivo_spin_unlock(&name##_lock);                                                         \
+        return h;                                                                                 \
+    }                                                                                             \
+    /* Marks the slot inactive if `h` still names a live, idle one (busy(v) == 0); 1 on success */ \
+    static int name##_retire(long long h, int (*busy)(T*)) {                                      \
+        int ok = 0;                                                                               \
+        salivo_spin_lock(&name##_lock);                                                           \
+        name##_Cell* c = h > 0 ? name##_cell(SALIVO_HANDLE_IDX(h)) : NULL;                        \
+        if (c && c->gen == SALIVO_HANDLE_GEN(h) && c->v.is_active && !(busy && busy(&c->v))) {   \
+            c->v.is_active = 0;                                                                   \
+            ok = 1;                                                                               \
+        }                                                                                         \
+        salivo_spin_unlock(&name##_lock);                                                         \
+        return ok;                                                                                \
+    }                                                                                             \
+    /* After the OS object is torn down: new generation, slot back on the free list */            \
+    static void name##_recycle(long long h) {                                                     \
+        salivo_spin_lock(&name##_lock);                                                           \
+        name##_Cell* c = name##_cell(SALIVO_HANDLE_IDX(h));                                       \
+        memset(&c->v, 0, sizeof(T));                                                              \
+        c->gen++;                                                                                 \
+        if (name##_nfree == name##_free_cap) {                                                    \
+            long long cap = name##_free_cap ? name##_free_cap * 2 : 64;                           \
+            long long* f = (long long*)realloc(name##_free, (size_t)cap * sizeof(long long));    \
+            if (f) { name##_free = f; name##_free_cap = cap; }                                    \
+        }                                                                                         \
+        if (name##_nfree < name##_free_cap) name##_free[name##_nfree++] = SALIVO_HANDLE_IDX(h);   \
+        salivo_spin_unlock(&name##_lock);                                                         \
+    }
+
+static void salivo_atomic_add_int(volatile int* p, int d) {
+#ifdef _WIN32
+    InterlockedExchangeAdd((volatile LONG*)p, d);
+#else
+    __atomic_add_fetch(p, d, __ATOMIC_SEQ_CST);
+#endif
+}
+
 long long salivo_c_file_open(const char* path, const char* mode) {
+    salivo_flush_dirty_files();
     if (!path) path = "";
     if (!mode) mode = "rb";
     FILE* f = fopen(path, mode);
@@ -2001,6 +2144,7 @@ long long salivo_c_file_open(const char* path, const char* mode) {
             g_next_file_id = i;
             g_file_table[i].id = i;
             g_file_table[i].fp = f;
+            g_file_table[i].dirty = 0;
             g_file_table[i].is_active = 1;
             handle = i;
             break;
@@ -2020,6 +2164,7 @@ long long salivo_c_file_close(long long handle) {
     int was_active = g_file_table[handle].is_active;
     FILE* fp = was_active ? g_file_table[handle].fp : NULL;
     g_file_table[handle].fp = NULL;
+    g_file_table[handle].dirty = 0;
     g_file_table[handle].is_active = 0;
     salivo_spin_unlock(&g_file_lock);
     if (!was_active) return -1;
@@ -2035,6 +2180,7 @@ long long salivo_c_file_is_open(long long handle) {
 }
 
 long long salivo_c_file_read(long long handle, char* buf, long long max_bytes) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) {
         return -1;
     }
@@ -2049,11 +2195,12 @@ long long salivo_c_file_write(long long handle, const char* buf, long long count
     }
     if (!buf || count_bytes <= 0) return 0;
     size_t written = fwrite(buf, 1, (size_t)count_bytes, g_file_table[handle].fp);
-    fflush(g_file_table[handle].fp);
+    salivo_file_mark_dirty(handle);
     return (long long)written;
 }
 
 long long salivo_c_file_seek(long long handle, long long offset, long long whence) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return -1;
     int origin = SEEK_SET;
     if (whence == 1) origin = SEEK_CUR;
@@ -2062,11 +2209,13 @@ long long salivo_c_file_seek(long long handle, long long offset, long long whenc
 }
 
 long long salivo_c_file_tell(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return -1;
     return (long long)ftell(g_file_table[handle].fp);
 }
 
 long long salivo_c_file_read_byte(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) {
         return -1;
     }
@@ -2082,20 +2231,22 @@ long long salivo_c_file_write_byte(long long handle, long long byte_val) {
     }
     unsigned char b = (unsigned char)(byte_val & 0xFF);
     size_t written = fwrite(&b, 1, 1, g_file_table[handle].fp);
+    salivo_file_mark_dirty(handle);
     return (long long)written;
 }
 
 long long salivo_c_file_eof(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 1;
     if (feof(g_file_table[handle].fp)) return 1;
-    long cur = ftell(g_file_table[handle].fp);
-    fseek(g_file_table[handle].fp, 0, SEEK_END);
-    long end = ftell(g_file_table[handle].fp);
-    fseek(g_file_table[handle].fp, cur, SEEK_SET);
-    return (cur >= end) ? 1 : 0;
+    int c = fgetc(g_file_table[handle].fp);
+    if (c == EOF) return 1;
+    ungetc(c, g_file_table[handle].fp);
+    return 0;
 }
 
 long long salivo_c_file_copy(const char* src_path, const char* dest_path) {
+    salivo_flush_dirty_files();
     if (!src_path || !dest_path) return -1;
     FILE* src = fopen(src_path, "rb");
     if (!src) return -1;
@@ -2112,6 +2263,7 @@ long long salivo_c_file_copy(const char* src_path, const char* dest_path) {
 }
 
 long long salivo_system(const char* cmd) {
+    salivo_flush_dirty_files();
     if (!cmd) return -1;
     return (long long)system(cmd);
 }
@@ -2334,6 +2486,7 @@ long long salivo_split_ir_module(const char* path, long long parts) {
 
 /* Runs newline-separated commands concurrently; 0 when all succeed, else the first failing exit code. */
 long long salivo_run_parallel(const char* cmds) {
+    salivo_flush_dirty_files();
     if (!cmds) return 0;
     char* all = strdup(cmds);
     char* list[256];
@@ -2381,6 +2534,7 @@ long long salivo_run_parallel(const char* cmds) {
 }
 
 char* salivo_c_file_read_string(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) {
         char* empty = (char*)malloc(1);
         empty[0] = '\0';
@@ -2412,6 +2566,7 @@ long long salivo_c_file_write_buf(long long handle, const char* buf, long long c
 }
 
 long long salivo_c_file_sync(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return -1;
     FILE* fp = g_file_table[handle].fp;
     fflush(fp);
@@ -2425,6 +2580,7 @@ long long salivo_c_file_sync(long long handle) {
 }
 
 long long salivo_c_file_truncate(long long handle, long long size) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return -1;
     FILE* fp = g_file_table[handle].fp;
     fflush(fp);
@@ -2438,6 +2594,7 @@ long long salivo_c_file_truncate(long long handle, long long size) {
 }
 
 long long salivo_c_file_metadata_size(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2453,6 +2610,7 @@ long long salivo_c_file_metadata_size(long long handle) {
 }
 
 long long salivo_c_file_metadata_mtime(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2468,6 +2626,7 @@ long long salivo_c_file_metadata_mtime(long long handle) {
 }
 
 long long salivo_c_file_metadata_ctime(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2483,6 +2642,7 @@ long long salivo_c_file_metadata_ctime(long long handle) {
 }
 
 long long salivo_c_file_metadata_permissions(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2498,6 +2658,7 @@ long long salivo_c_file_metadata_permissions(long long handle) {
 }
 
 long long salivo_c_file_metadata_type(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2519,6 +2680,7 @@ long long salivo_c_file_metadata_type(long long handle) {
 }
 
 long long salivo_c_file_metadata_is_dir(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) return 0;
     FILE* fp = g_file_table[handle].fp;
 #ifdef _WIN32
@@ -2534,6 +2696,7 @@ long long salivo_c_file_metadata_is_dir(long long handle) {
 }
 
 long long salivo_c_dir_list(const char* path) {
+    salivo_flush_dirty_files();
     if (!path) return 0;
     int count = 0;
 #ifdef _WIN32
@@ -2561,6 +2724,7 @@ long long salivo_c_dir_list(const char* path) {
 }
 
 char* salivo_c_dir_list_string(const char* path) {
+    salivo_flush_dirty_files();
     if (!path || path[0] == '\0') path = ".";
     size_t cap = 1024;
     size_t len = 0;
@@ -2650,6 +2814,20 @@ long long salivo_get_active_allocations(void) {
     return salivo_active_allocations;
 }
 
+/* Small blocks (<= SALIVO_TC_MAX bytes, 16-byte classes) are recycled through a per-thread cache
+   of at most SALIVO_TC_DEPTH blocks per class instead of round-tripping through malloc/free.
+   The class is kept in the header (`reserved` = class + 1), so an in-place shrink by
+   salivo_reallocate never moves a block to a smaller class. Blocks keep their full header. */
+#define SALIVO_TC_MAX 512
+#define SALIVO_TC_CLASSES (SALIVO_TC_MAX / 16)
+#define SALIVO_TC_DEPTH 64
+typedef struct { void* head[SALIVO_TC_CLASSES]; int count[SALIVO_TC_CLASSES]; } SalivoTCache;
+#ifdef _WIN32
+static __declspec(thread) SalivoTCache g_tcache;
+#else
+static __thread SalivoTCache g_tcache;
+#endif
+
 long long salivo_alloc(long long size_bytes, long long alignment) {
     salivo_stat(3, size_bytes);
     if (size_bytes <= 0) {
@@ -2663,7 +2841,21 @@ long long salivo_alloc(long long size_bytes, long long alignment) {
     // Fast path: standard alignment (<= 16 bytes)
     // On 64-bit systems, malloc returns 16-byte aligned memory.
     if (alignment <= 16) {
-        void* raw = malloc(header_size + (size_t)size_bytes);
+        size_t cls = 0;
+        void* raw = NULL;
+        if (size_bytes <= SALIVO_TC_MAX) {
+            cls = ((size_t)size_bytes + 15) / 16; /* 1..SALIVO_TC_CLASSES */
+            SalivoTCache* tc = &g_tcache;
+            raw = tc->head[cls - 1];
+            if (raw) {
+                tc->head[cls - 1] = *(void**)raw;
+                tc->count[cls - 1]--;
+            } else {
+                raw = malloc(header_size + cls * 16);
+            }
+        } else {
+            raw = malloc(header_size + (size_t)size_bytes);
+        }
         if (!raw) return 0;
         uintptr_t user_addr = (uintptr_t)raw + header_size;
         SalivoMemHeader* hdr = (SalivoMemHeader*)raw;
@@ -2672,6 +2864,7 @@ long long salivo_alloc(long long size_bytes, long long alignment) {
         hdr->size = (size_t)size_bytes;
         hdr->alignment = (size_t)alignment;
         hdr->magic = SALIVO_MEM_MAGIC;
+        hdr->reserved = cls;
         SALIVO_COUNTER_ADD(salivo_active_allocations, 1);
         return (long long)user_addr;
     }
@@ -2700,6 +2893,7 @@ long long salivo_alloc(long long size_bytes, long long alignment) {
     hdr->size = (size_t)size_bytes;
     hdr->alignment = align;
     hdr->magic = SALIVO_MEM_MAGIC;
+    hdr->reserved = 0;
     
     SALIVO_COUNTER_ADD(salivo_active_allocations, 1);
     return (long long)user_addr;
@@ -2722,7 +2916,15 @@ void salivo_deallocate(long long addr, long long size_bytes, long long alignment
     SalivoMemHeader* hdr = salivo_get_valid_header(addr);
     if (hdr) {
         hdr->magic = 0; // Invalidate magic on deallocation
-        free(hdr->raw_ptr);
+        size_t cls = (size_t)hdr->reserved;
+        SalivoTCache* tc = &g_tcache;
+        if (cls >= 1 && cls <= SALIVO_TC_CLASSES && hdr->raw_ptr == (void*)hdr && tc->count[cls - 1] < SALIVO_TC_DEPTH) {
+            *(void**)hdr = tc->head[cls - 1]; /* reuse raw_ptr's slot as the list link */
+            tc->head[cls - 1] = hdr;
+            tc->count[cls - 1]++;
+        } else {
+            free(hdr->raw_ptr);
+        }
         SALIVO_COUNTER_ADD(salivo_active_allocations, -1);
     }
 }
@@ -2733,10 +2935,8 @@ void salivo_free_format_temp(void* ptr) {
     if (!ptr) {
         return;
     }
-    SalivoMemHeader* hdr = salivo_get_valid_header((long long)(uintptr_t)ptr);
-    if (hdr) {
-        hdr->magic = 0;
-        free(hdr->raw_ptr);
+    if (salivo_get_valid_header((long long)(uintptr_t)ptr)) {
+        salivo_deallocate((long long)(uintptr_t)ptr, 0, 1);
         salivo_fmt_temp_free_counter++;
     }
 }
@@ -2875,62 +3075,92 @@ void salivo_free(void* ptr) {
     }
 }
 
-void salivo_arc_retain(void* ptr) {
-    if (!ptr) return;
-    long long* counts = (long long*)ptr;
+/* ARC control block: strong count at offset 0, weak count at offset 8. Strong references jointly
+   hold one weak reference, so the block outlives every Weak and is freed when the weak count hits 0. */
+static long long salivo_atomic_add64(long long* p, long long d) {
 #ifdef _WIN32
-    InterlockedIncrement64(counts);
+    return InterlockedExchangeAdd64(p, d) + d;
 #else
-    __atomic_add_fetch(counts, 1, __ATOMIC_SEQ_CST);
+    return __atomic_add_fetch(p, d, __ATOMIC_SEQ_CST);
 #endif
+}
+
+static long long salivo_atomic_load64(long long* p) {
+#ifdef _WIN32
+    return InterlockedCompareExchange64(p, 0, 0);
+#else
+    return __atomic_load_n(p, __ATOMIC_SEQ_CST);
+#endif
+}
+
+long long salivo_arc_weak_release_i(long long addr) {
+    if (!addr) return 0;
+    long long w = salivo_atomic_add64((long long*)(uintptr_t)addr + 1, -1);
+    if (w == 0) salivo_deallocate(addr, 0, 8);
+    return w < 0 ? 0 : w;
+}
+
+void salivo_arc_retain(void* ptr) {
+    if (ptr) salivo_atomic_add64((long long*)ptr, 1);
 }
 
 void salivo_arc_release(void* ptr) {
     if (!ptr) return;
-    long long* counts = (long long*)ptr;
-#ifdef _WIN32
-    long long remaining = InterlockedDecrement64(counts);
-#else
-    long long remaining = __atomic_sub_fetch(counts, 1, __ATOMIC_SEQ_CST);
-#endif
-    if (remaining <= 0) {
-        salivo_deallocate((long long)(uintptr_t)ptr, 0, 8);
-    }
+    if (salivo_atomic_add64((long long*)ptr, -1) == 0) salivo_arc_weak_release_i((long long)(uintptr_t)ptr);
 }
 
-/* Salivo-facing ARC ops on the control block address (strong count at offset 0) */
+/* Salivo-facing ARC ops on the control block address */
 long long salivo_arc_init_i(long long addr) {
-    if (addr) *(volatile long long*)(uintptr_t)addr = 1;
+    if (addr) {
+        long long* c = (long long*)(uintptr_t)addr;
+        c[0] = 1;
+        c[1] = 1;
+    }
     return addr;
 }
 
 long long salivo_arc_retain_i(long long addr) {
-    if (!addr) return 0;
-#ifdef _WIN32
-    return InterlockedIncrement64((long long*)(uintptr_t)addr);
-#else
-    return __atomic_add_fetch((long long*)(uintptr_t)addr, 1, __ATOMIC_SEQ_CST);
-#endif
+    return addr ? salivo_atomic_add64((long long*)(uintptr_t)addr, 1) : 0;
 }
 
 long long salivo_arc_release_i(long long addr) {
     if (!addr) return 0;
-#ifdef _WIN32
-    long long remaining = InterlockedDecrement64((long long*)(uintptr_t)addr);
-#else
-    long long remaining = __atomic_sub_fetch((long long*)(uintptr_t)addr, 1, __ATOMIC_SEQ_CST);
-#endif
-    if (remaining <= 0) salivo_deallocate(addr, 0, 8);
+    long long remaining = salivo_atomic_add64((long long*)(uintptr_t)addr, -1);
+    if (remaining == 0) salivo_arc_weak_release_i(addr);
     return remaining < 0 ? 0 : remaining;
 }
 
 long long salivo_arc_count_i(long long addr) {
+    return addr ? salivo_atomic_load64((long long*)(uintptr_t)addr) : 0;
+}
+
+long long salivo_arc_downgrade_i(long long addr) {
     if (!addr) return 0;
+    salivo_atomic_add64((long long*)(uintptr_t)addr + 1, 1);
+    return addr;
+}
+
+/* Takes a strong reference only while one still exists; returns the new strong count or 0 */
+long long salivo_arc_upgrade_i(long long addr) {
+    if (!addr) return 0;
+    long long* sc = (long long*)(uintptr_t)addr;
+    for (;;) {
+        long long cur = salivo_atomic_load64(sc);
+        if (cur <= 0) return 0;
 #ifdef _WIN32
-    return InterlockedCompareExchange64((long long*)(uintptr_t)addr, 0, 0);
+        if (InterlockedCompareExchange64(sc, cur + 1, cur) == cur) return cur + 1;
 #else
-    return __atomic_load_n((long long*)(uintptr_t)addr, __ATOMIC_SEQ_CST);
+        if (__atomic_compare_exchange_n(sc, &cur, cur + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return cur + 1;
 #endif
+    }
+}
+
+/* Weak references excluding the one held jointly by the strong references */
+long long salivo_arc_weak_count_i(long long addr) {
+    if (!addr) return 0;
+    long long* c = (long long*)(uintptr_t)addr;
+    long long w = salivo_atomic_load64(c + 1) - (salivo_atomic_load64(c) > 0 ? 1 : 0);
+    return w < 0 ? 0 : w;
 }
 
 /* Forward declaration — defined below, needed for PRNG auto-seeding */
@@ -2996,6 +3226,7 @@ char* salivo_process_cwd(void) {
 }
 
 long long salivo_c_file_exists(const char* path) {
+    salivo_flush_dirty_files();
     if (!path || strlen(path) == 0) return 0;
 #ifdef _WIN32
     struct _stat64 st;
@@ -3124,6 +3355,7 @@ long long salivo_c_dir_remove(const char* path) {
 }
 
 long long salivo_c_file_remove(const char* path) {
+    salivo_flush_dirty_files();
     if (!path || strlen(path) == 0) return -1;
     return remove(path) == 0 ? 0 : -1;
 }
@@ -3237,6 +3469,7 @@ double rtreadfloat(void) {
 }
 
 long long salivo_c_file_flush(long long handle) {
+    salivo_file_settle(handle);
     if (handle < 1 || handle > MAX_FILES || !g_file_table[handle].is_active || !g_file_table[handle].fp) {
         return -1;
     }
@@ -3253,6 +3486,7 @@ long long salivo_c_dir_change_directory(const char* path) {
 }
 
 long long salivo_c_file_size(const char* path) {
+    salivo_flush_dirty_files();
     if (!path || strlen(path) == 0) return 0;
 #ifdef _WIN32
     struct _stat64 st;
@@ -3266,8 +3500,8 @@ long long salivo_c_file_size(const char* path) {
 
 
 
-#define MAX_MUTEXES 1024
-#define MAX_ATOMICS 1024
+#define MAX_MUTEXES LLONG_MAX
+#define MAX_ATOMICS LLONG_MAX
 
 #ifdef _WIN32
 typedef CRITICAL_SECTION salivo_mutex_t;
@@ -3283,19 +3517,20 @@ typedef struct {
     long long owner_thread_id;
 } SalivoMutexSlot;
 
-static SalivoMutexSlot g_mutex_table[MAX_MUTEXES + 1];
+SALIVO_CHUNKED_TABLE(g_mutex, SalivoMutexSlot)
 
 long long salivo_mutex_create(void) {
-    for (int i = 1; i <= MAX_MUTEXES; i++) {
-        if (!g_mutex_table[i].is_active) {
+    long long i = g_mutex_claim();
+    if (i > 0) {
+        {
 #ifdef _WIN32
-            InitializeCriticalSection(&g_mutex_table[i].handle);
+            InitializeCriticalSection(&(*g_mutex_slot(i)).handle);
 #else
-            pthread_mutex_init(&g_mutex_table[i].handle, NULL);
+            pthread_mutex_init(&(*g_mutex_slot(i)).handle, NULL);
 #endif
-            g_mutex_table[i].is_active = 1;
-            g_mutex_table[i].is_locked = 0;
-            g_mutex_table[i].owner_thread_id = 0;
+            (*g_mutex_slot(i)).is_active = 1;
+            (*g_mutex_slot(i)).is_locked = 0;
+            (*g_mutex_slot(i)).owner_thread_id = 0;
             return (long long)i;
         }
     }
@@ -3304,33 +3539,33 @@ long long salivo_mutex_create(void) {
 
 long long salivo_mutex_lock(long long handle) {
     SALIVO_BLOCKING("mutex_lock");
-    if (handle < 1 || handle > MAX_MUTEXES || !g_mutex_table[handle].is_active) return -1;
+    if (handle < 1 || handle > MAX_MUTEXES || !(*g_mutex_slot(handle)).is_active) return -1;
 #ifdef _WIN32
-    EnterCriticalSection(&g_mutex_table[handle].handle);
-    g_mutex_table[handle].is_locked = 1;
-    g_mutex_table[handle].owner_thread_id = (long long)GetCurrentThreadId();
+    EnterCriticalSection(&(*g_mutex_slot(handle)).handle);
+    (*g_mutex_slot(handle)).is_locked = 1;
+    (*g_mutex_slot(handle)).owner_thread_id = (long long)GetCurrentThreadId();
 #else
-    pthread_mutex_lock(&g_mutex_table[handle].handle);
-    g_mutex_table[handle].is_locked = 1;
-    g_mutex_table[handle].owner_thread_id = (long long)pthread_self();
+    pthread_mutex_lock(&(*g_mutex_slot(handle)).handle);
+    (*g_mutex_slot(handle)).is_locked = 1;
+    (*g_mutex_slot(handle)).owner_thread_id = (long long)pthread_self();
 #endif
     return 0;
 }
 
 long long salivo_mutex_try_lock(long long handle) {
-    if (handle < 1 || handle > MAX_MUTEXES || !g_mutex_table[handle].is_active) return 0;
-    if (g_mutex_table[handle].is_locked) return 0;
+    if (handle < 1 || handle > MAX_MUTEXES || !(*g_mutex_slot(handle)).is_active) return 0;
+    if ((*g_mutex_slot(handle)).is_locked) return 0;
 #ifdef _WIN32
-    if (TryEnterCriticalSection(&g_mutex_table[handle].handle)) {
-        g_mutex_table[handle].is_locked = 1;
-        g_mutex_table[handle].owner_thread_id = (long long)GetCurrentThreadId();
+    if (TryEnterCriticalSection(&(*g_mutex_slot(handle)).handle)) {
+        (*g_mutex_slot(handle)).is_locked = 1;
+        (*g_mutex_slot(handle)).owner_thread_id = (long long)GetCurrentThreadId();
         return 1;
     }
     return 0;
 #else
-    if (pthread_mutex_trylock(&g_mutex_table[handle].handle) == 0) {
-        g_mutex_table[handle].is_locked = 1;
-        g_mutex_table[handle].owner_thread_id = (long long)pthread_self();
+    if (pthread_mutex_trylock(&(*g_mutex_slot(handle)).handle) == 0) {
+        (*g_mutex_slot(handle)).is_locked = 1;
+        (*g_mutex_slot(handle)).owner_thread_id = (long long)pthread_self();
         return 1;
     }
     return 0;
@@ -3338,25 +3573,25 @@ long long salivo_mutex_try_lock(long long handle) {
 }
 
 long long salivo_mutex_unlock(long long handle) {
-    if (handle < 1 || handle > MAX_MUTEXES || !g_mutex_table[handle].is_active) return -1;
-    g_mutex_table[handle].is_locked = 0;
-    g_mutex_table[handle].owner_thread_id = 0;
+    if (handle < 1 || handle > MAX_MUTEXES || !(*g_mutex_slot(handle)).is_active) return -1;
+    (*g_mutex_slot(handle)).is_locked = 0;
+    (*g_mutex_slot(handle)).owner_thread_id = 0;
 #ifdef _WIN32
-    LeaveCriticalSection(&g_mutex_table[handle].handle);
+    LeaveCriticalSection(&(*g_mutex_slot(handle)).handle);
 #else
-    pthread_mutex_unlock(&g_mutex_table[handle].handle);
+    pthread_mutex_unlock(&(*g_mutex_slot(handle)).handle);
 #endif
     return 0;
 }
 
 long long salivo_mutex_is_locked(long long handle) {
-    if (handle < 1 || handle > MAX_MUTEXES || !g_mutex_table[handle].is_active) return 0;
-    return (long long)g_mutex_table[handle].is_locked;
+    if (handle < 1 || handle > MAX_MUTEXES || !(*g_mutex_slot(handle)).is_active) return 0;
+    return (long long)(*g_mutex_slot(handle)).is_locked;
 }
 
 long long salivo_mutex_owner(long long handle) {
-    if (handle < 1 || handle > MAX_MUTEXES || !g_mutex_table[handle].is_active) return 0;
-    return g_mutex_table[handle].owner_thread_id;
+    if (handle < 1 || handle > MAX_MUTEXES || !(*g_mutex_slot(handle)).is_active) return 0;
+    return (*g_mutex_slot(handle)).owner_thread_id;
 }
 
 typedef struct {
@@ -3364,13 +3599,14 @@ typedef struct {
     int is_active;
 } SalivoAtomicSlot;
 
-static SalivoAtomicSlot g_atomic_table[MAX_ATOMICS + 1];
+SALIVO_CHUNKED_TABLE(g_atomic, SalivoAtomicSlot)
 
 long long salivo_atomic_int_create(long long initial) {
-    for (int i = 1; i <= MAX_ATOMICS; i++) {
-        if (!g_atomic_table[i].is_active) {
-            g_atomic_table[i].value = initial;
-            g_atomic_table[i].is_active = 1;
+    long long i = g_atomic_claim();
+    if (i > 0) {
+        {
+            (*g_atomic_slot(i)).value = initial;
+            (*g_atomic_slot(i)).is_active = 1;
             return (long long)i;
         }
     }
@@ -3378,61 +3614,61 @@ long long salivo_atomic_int_create(long long initial) {
 }
 
 long long salivo_atomic_int_load(long long handle) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return 0;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return 0;
 #ifdef _MSC_VER
-    return _InterlockedCompareExchange64(&g_atomic_table[handle].value, 0, 0);
+    return _InterlockedCompareExchange64(&(*g_atomic_slot(handle)).value, 0, 0);
 #else
-    return (long long)__atomic_load_n(&g_atomic_table[handle].value, __ATOMIC_SEQ_CST);
+    return (long long)__atomic_load_n(&(*g_atomic_slot(handle)).value, __ATOMIC_SEQ_CST);
 #endif
 }
 
 void salivo_atomic_int_store(long long handle, long long val) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return;
 #ifdef _MSC_VER
-    _InterlockedExchange64(&g_atomic_table[handle].value, val);
+    _InterlockedExchange64(&(*g_atomic_slot(handle)).value, val);
 #else
-    __atomic_store_n(&g_atomic_table[handle].value, val, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&(*g_atomic_slot(handle)).value, val, __ATOMIC_SEQ_CST);
 #endif
 }
 
 long long salivo_atomic_int_fetch_add(long long handle, long long val) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return 0;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return 0;
 #ifdef _MSC_VER
-    return (long long)_InterlockedExchangeAdd64((__int64 volatile*)&g_atomic_table[handle].value, (__int64)val);
+    return (long long)_InterlockedExchangeAdd64((__int64 volatile*)&(*g_atomic_slot(handle)).value, (__int64)val);
 #else
-    return (long long)__atomic_fetch_add(&g_atomic_table[handle].value, val, __ATOMIC_SEQ_CST);
+    return (long long)__atomic_fetch_add(&(*g_atomic_slot(handle)).value, val, __ATOMIC_SEQ_CST);
 #endif
 }
 
 long long salivo_atomic_int_swap(long long handle, long long val) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return 0;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return 0;
 #ifdef _MSC_VER
-    return _InterlockedExchange64(&g_atomic_table[handle].value, val);
+    return _InterlockedExchange64(&(*g_atomic_slot(handle)).value, val);
 #else
-    return (long long)__atomic_exchange_n(&g_atomic_table[handle].value, val, __ATOMIC_SEQ_CST);
+    return (long long)__atomic_exchange_n(&(*g_atomic_slot(handle)).value, val, __ATOMIC_SEQ_CST);
 #endif
 }
 
 long long salivo_atomic_int_compare_exchange(long long handle, long long expected, long long desired) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return 0;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return 0;
 #ifdef _MSC_VER
-    long long old = _InterlockedCompareExchange64(&g_atomic_table[handle].value, desired, expected);
+    long long old = _InterlockedCompareExchange64(&(*g_atomic_slot(handle)).value, desired, expected);
     return (old == expected) ? 1 : 0;
 #else
     long long exp_copy = expected;
     int success = __atomic_compare_exchange_n(
-        &g_atomic_table[handle].value, &exp_copy, desired,
+        &(*g_atomic_slot(handle)).value, &exp_copy, desired,
         0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     return success ? 1 : 0;
 #endif
 }
 
 long long salivo_atomic_int_fetch_sub(long long handle, long long val) {
-    if (handle < 1 || handle > MAX_ATOMICS || !g_atomic_table[handle].is_active) return 0;
+    if (handle < 1 || handle > MAX_ATOMICS || !(*g_atomic_slot(handle)).is_active) return 0;
 #ifdef _MSC_VER
-    return (long long)_InterlockedExchangeAdd64((__int64 volatile*)&g_atomic_table[handle].value, (__int64)(-val));
+    return (long long)_InterlockedExchangeAdd64((__int64 volatile*)&(*g_atomic_slot(handle)).value, (__int64)(-val));
 #else
-    return (long long)__atomic_fetch_sub(&g_atomic_table[handle].value, val, __ATOMIC_SEQ_CST);
+    return (long long)__atomic_fetch_sub(&(*g_atomic_slot(handle)).value, val, __ATOMIC_SEQ_CST);
 #endif
 }
 
@@ -3872,8 +4108,8 @@ long long salivo_crypto_aes256_decrypt(long long key_addr, long long cipher_addr
 // REAL OS CONDVAR & RWLOCK THREAD SYNCHRONIZATION
 // =============================================================================
 
-#define MAX_CONDVARS 1024
-#define MAX_RWLOCKS 1024
+#define MAX_CONDVARS LLONG_MAX
+#define MAX_RWLOCKS LLONG_MAX
 
 #ifdef _WIN32
 typedef CONDITION_VARIABLE salivo_cv_t;
@@ -3896,19 +4132,20 @@ typedef struct {
     int is_write_locked;
 } SalivoRwLockSlot;
 
-static SalivoCvSlot g_cv_table[MAX_CONDVARS + 1];
-static SalivoRwLockSlot g_rwlock_table[MAX_RWLOCKS + 1];
+SALIVO_CHUNKED_TABLE(g_cv, SalivoCvSlot)
+SALIVO_CHUNKED_TABLE(g_rwlock, SalivoRwLockSlot)
 
 long long salivo_condvar_create(void) {
-    for (int i = 1; i <= MAX_CONDVARS; i++) {
-        if (!g_cv_table[i].is_active) {
+    long long i = g_cv_claim();
+    if (i > 0) {
+        {
 #ifdef _WIN32
-            InitializeConditionVariable(&g_cv_table[i].handle);
+            InitializeConditionVariable(&(*g_cv_slot(i)).handle);
 #else
-            pthread_cond_init(&g_cv_table[i].handle, NULL);
+            pthread_cond_init(&(*g_cv_slot(i)).handle, NULL);
 #endif
-            g_cv_table[i].is_active = 1;
-            g_cv_table[i].waiter_count = 0;
+            (*g_cv_slot(i)).is_active = 1;
+            (*g_cv_slot(i)).waiter_count = 0;
             return (long long)i;
         }
     }
@@ -3917,54 +4154,55 @@ long long salivo_condvar_create(void) {
 
 long long salivo_condvar_wait(long long cv_handle, long long mutex_handle) {
     SALIVO_BLOCKING("condvar_wait");
-    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !g_cv_table[cv_handle].is_active) return -1;
-    if (mutex_handle < 1 || mutex_handle > MAX_MUTEXES || !g_mutex_table[mutex_handle].is_active) return -1;
-    g_cv_table[cv_handle].waiter_count++;
+    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !(*g_cv_slot(cv_handle)).is_active) return -1;
+    if (mutex_handle < 1 || mutex_handle > MAX_MUTEXES || !(*g_mutex_slot(mutex_handle)).is_active) return -1;
+    (*g_cv_slot(cv_handle)).waiter_count++;
 #ifdef _WIN32
-    SleepConditionVariableCS(&g_cv_table[cv_handle].handle, &g_mutex_table[mutex_handle].handle, INFINITE);
+    SleepConditionVariableCS(&(*g_cv_slot(cv_handle)).handle, &(*g_mutex_slot(mutex_handle)).handle, INFINITE);
 #else
-    pthread_cond_wait(&g_cv_table[cv_handle].handle, &g_mutex_table[mutex_handle].handle);
+    pthread_cond_wait(&(*g_cv_slot(cv_handle)).handle, &(*g_mutex_slot(mutex_handle)).handle);
 #endif
-    g_cv_table[cv_handle].waiter_count--;
+    (*g_cv_slot(cv_handle)).waiter_count--;
     return 0;
 }
 
 long long salivo_condvar_notify_one(long long cv_handle) {
-    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !g_cv_table[cv_handle].is_active) return -1;
+    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !(*g_cv_slot(cv_handle)).is_active) return -1;
 #ifdef _WIN32
-    WakeConditionVariable(&g_cv_table[cv_handle].handle);
+    WakeConditionVariable(&(*g_cv_slot(cv_handle)).handle);
 #else
-    pthread_cond_signal(&g_cv_table[cv_handle].handle);
+    pthread_cond_signal(&(*g_cv_slot(cv_handle)).handle);
 #endif
     return 0;
 }
 
 long long salivo_condvar_notify_all(long long cv_handle) {
-    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !g_cv_table[cv_handle].is_active) return -1;
+    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !(*g_cv_slot(cv_handle)).is_active) return -1;
 #ifdef _WIN32
-    WakeAllConditionVariable(&g_cv_table[cv_handle].handle);
+    WakeAllConditionVariable(&(*g_cv_slot(cv_handle)).handle);
 #else
-    pthread_cond_broadcast(&g_cv_table[cv_handle].handle);
+    pthread_cond_broadcast(&(*g_cv_slot(cv_handle)).handle);
 #endif
     return 0;
 }
 
 long long salivo_condvar_waiter_count(long long cv_handle) {
-    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !g_cv_table[cv_handle].is_active) return 0;
-    return (long long)g_cv_table[cv_handle].waiter_count;
+    if (cv_handle < 1 || cv_handle > MAX_CONDVARS || !(*g_cv_slot(cv_handle)).is_active) return 0;
+    return (long long)(*g_cv_slot(cv_handle)).waiter_count;
 }
 
 long long salivo_rwlock_create(void) {
-    for (int i = 1; i <= MAX_RWLOCKS; i++) {
-        if (!g_rwlock_table[i].is_active) {
+    long long i = g_rwlock_claim();
+    if (i > 0) {
+        {
 #ifdef _WIN32
-            InitializeSRWLock(&g_rwlock_table[i].handle);
+            InitializeSRWLock(&(*g_rwlock_slot(i)).handle);
 #else
-            pthread_rwlock_init(&g_rwlock_table[i].handle, NULL);
+            pthread_rwlock_init(&(*g_rwlock_slot(i)).handle, NULL);
 #endif
-            g_rwlock_table[i].is_active = 1;
-            g_rwlock_table[i].reader_count = 0;
-            g_rwlock_table[i].is_write_locked = 0;
+            (*g_rwlock_slot(i)).is_active = 1;
+            (*g_rwlock_slot(i)).reader_count = 0;
+            (*g_rwlock_slot(i)).is_write_locked = 0;
             return (long long)i;
         }
     }
@@ -3972,28 +4210,28 @@ long long salivo_rwlock_create(void) {
 }
 
 long long salivo_rwlock_read(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return -1;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return -1;
 #ifdef _WIN32
-    AcquireSRWLockShared(&g_rwlock_table[handle].handle);
+    AcquireSRWLockShared(&(*g_rwlock_slot(handle)).handle);
 #else
-    pthread_rwlock_rdlock(&g_rwlock_table[handle].handle);
+    pthread_rwlock_rdlock(&(*g_rwlock_slot(handle)).handle);
 #endif
-    g_rwlock_table[handle].reader_count++;
+    salivo_atomic_add_int(&(*g_rwlock_slot(handle)).reader_count, 1);
     return 0;
 }
 
 long long salivo_rwlock_try_read(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return 0;
-    if (g_rwlock_table[handle].is_write_locked) return 0;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return 0;
+    if ((*g_rwlock_slot(handle)).is_write_locked) return 0;
 #ifdef _WIN32
-    if (TryAcquireSRWLockShared(&g_rwlock_table[handle].handle)) {
-        g_rwlock_table[handle].reader_count++;
+    if (TryAcquireSRWLockShared(&(*g_rwlock_slot(handle)).handle)) {
+        salivo_atomic_add_int(&(*g_rwlock_slot(handle)).reader_count, 1);
         return 1;
     }
     return 0;
 #else
-    if (pthread_rwlock_tryrdlock(&g_rwlock_table[handle].handle) == 0) {
-        g_rwlock_table[handle].reader_count++;
+    if (pthread_rwlock_tryrdlock(&(*g_rwlock_slot(handle)).handle) == 0) {
+        salivo_atomic_add_int(&(*g_rwlock_slot(handle)).reader_count, 1);
         return 1;
     }
     return 0;
@@ -4001,28 +4239,28 @@ long long salivo_rwlock_try_read(long long handle) {
 }
 
 long long salivo_rwlock_write(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return -1;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return -1;
 #ifdef _WIN32
-    AcquireSRWLockExclusive(&g_rwlock_table[handle].handle);
+    AcquireSRWLockExclusive(&(*g_rwlock_slot(handle)).handle);
 #else
-    pthread_rwlock_wrlock(&g_rwlock_table[handle].handle);
+    pthread_rwlock_wrlock(&(*g_rwlock_slot(handle)).handle);
 #endif
-    g_rwlock_table[handle].is_write_locked = 1;
+    (*g_rwlock_slot(handle)).is_write_locked = 1;
     return 0;
 }
 
 long long salivo_rwlock_try_write(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return 0;
-    if (g_rwlock_table[handle].reader_count > 0 || g_rwlock_table[handle].is_write_locked) return 0;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return 0;
+    if ((*g_rwlock_slot(handle)).reader_count > 0 || (*g_rwlock_slot(handle)).is_write_locked) return 0;
 #ifdef _WIN32
-    if (TryAcquireSRWLockExclusive(&g_rwlock_table[handle].handle)) {
-        g_rwlock_table[handle].is_write_locked = 1;
+    if (TryAcquireSRWLockExclusive(&(*g_rwlock_slot(handle)).handle)) {
+        (*g_rwlock_slot(handle)).is_write_locked = 1;
         return 1;
     }
     return 0;
 #else
-    if (pthread_rwlock_trywrlock(&g_rwlock_table[handle].handle) == 0) {
-        g_rwlock_table[handle].is_write_locked = 1;
+    if (pthread_rwlock_trywrlock(&(*g_rwlock_slot(handle)).handle) == 0) {
+        (*g_rwlock_slot(handle)).is_write_locked = 1;
         return 1;
     }
     return 0;
@@ -4030,37 +4268,77 @@ long long salivo_rwlock_try_write(long long handle) {
 }
 
 long long salivo_rwlock_unlock_read(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return -1;
-    if (g_rwlock_table[handle].reader_count > 0) {
-        g_rwlock_table[handle].reader_count--;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return -1;
+    if ((*g_rwlock_slot(handle)).reader_count > 0) {
+        salivo_atomic_add_int(&(*g_rwlock_slot(handle)).reader_count, -1);
     }
 #ifdef _WIN32
-    ReleaseSRWLockShared(&g_rwlock_table[handle].handle);
+    ReleaseSRWLockShared(&(*g_rwlock_slot(handle)).handle);
 #else
-    pthread_rwlock_unlock(&g_rwlock_table[handle].handle);
+    pthread_rwlock_unlock(&(*g_rwlock_slot(handle)).handle);
 #endif
     return 0;
 }
 
 long long salivo_rwlock_unlock_write(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return -1;
-    g_rwlock_table[handle].is_write_locked = 0;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return -1;
+    (*g_rwlock_slot(handle)).is_write_locked = 0;
 #ifdef _WIN32
-    ReleaseSRWLockExclusive(&g_rwlock_table[handle].handle);
+    ReleaseSRWLockExclusive(&(*g_rwlock_slot(handle)).handle);
 #else
-    pthread_rwlock_unlock(&g_rwlock_table[handle].handle);
+    pthread_rwlock_unlock(&(*g_rwlock_slot(handle)).handle);
 #endif
     return 0;
 }
 
 long long salivo_rwlock_reader_count(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return 0;
-    return (long long)g_rwlock_table[handle].reader_count;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return 0;
+    return (long long)(*g_rwlock_slot(handle)).reader_count;
 }
 
 long long salivo_rwlock_is_write_locked(long long handle) {
-    if (handle < 1 || handle > MAX_RWLOCKS || !g_rwlock_table[handle].is_active) return 0;
-    return (long long)g_rwlock_table[handle].is_write_locked;
+    if (handle < 1 || handle > MAX_RWLOCKS || !(*g_rwlock_slot(handle)).is_active) return 0;
+    return (long long)(*g_rwlock_slot(handle)).is_write_locked;
+}
+
+/* Destroy: fails (-1) on a stale, invalid or in-use handle; the slot is then recycled */
+static int salivo_mutex_busy(SalivoMutexSlot* m) { return m->is_locked; }
+static int salivo_cv_busy(SalivoCvSlot* c) { return c->waiter_count > 0; }
+static int salivo_rwlock_busy(SalivoRwLockSlot* r) { return r->reader_count > 0 || r->is_write_locked; }
+
+long long salivo_mutex_destroy(long long handle) {
+    if (!g_mutex_retire(handle, salivo_mutex_busy)) return -1;
+#ifdef _WIN32
+    DeleteCriticalSection(&(*g_mutex_slot(handle)).handle);
+#else
+    pthread_mutex_destroy(&(*g_mutex_slot(handle)).handle);
+#endif
+    g_mutex_recycle(handle);
+    return 0;
+}
+
+long long salivo_atomic_destroy(long long handle) {
+    if (!g_atomic_retire(handle, NULL)) return -1;
+    g_atomic_recycle(handle);
+    return 0;
+}
+
+long long salivo_condvar_destroy(long long handle) {
+    if (!g_cv_retire(handle, salivo_cv_busy)) return -1;
+#ifndef _WIN32
+    pthread_cond_destroy(&(*g_cv_slot(handle)).handle);
+#endif
+    g_cv_recycle(handle);
+    return 0;
+}
+
+long long salivo_rwlock_destroy(long long handle) {
+    if (!g_rwlock_retire(handle, salivo_rwlock_busy)) return -1;
+#ifndef _WIN32
+    pthread_rwlock_destroy(&(*g_rwlock_slot(handle)).handle);
+#endif
+    g_rwlock_recycle(handle);
+    return 0;
 }
 
 // =============================================================================

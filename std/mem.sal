@@ -389,22 +389,35 @@ pub func strongcount<T>(Arc<T> ptr) -> int {
 }
 
 pub func weakcount<T>(Arc<T> ptr) -> int {
-    return ptr.weak_ref_count;
+    return rtarcweakcount(ptr.address);
 }
 
+/// Creates a weak reference; it keeps the control block (not the value) alive until weakrelease
 pub func downgrade<T>(Arc<T> ptr) -> Weak<T> {
     return Weak<T> {
-        address: ptr.address,
+        address: rtarcdowngrade(ptr.address),
         weak_id: 1,
     };
 }
 
+/// A new strong reference while any strong reference is still alive, otherwise none.
+/// `original` supplies the value; ownership is decided by the shared control block.
 pub func upgrade<T>(Weak<T> ptr, Arc<T> original) -> Option<Arc<T>> {
-    if (original.strong_ref_count > 0) {
-        let retained = retain<T>(original);
-        return some<Arc<T>>(retained);
+    let strong = rtarcupgrade(ptr.address);
+    if (strong > 0) {
+        return some<Arc<T>>(Arc<T> {
+            address: ptr.address,
+            value: original.value,
+            strong_ref_count: strong,
+            weak_ref_count: original.weak_ref_count,
+        });
     }
     return none<Arc<T>>();
+}
+
+/// Releases a weak reference; frees the control block once no strong or weak reference remains
+pub func weakrelease<T>(Weak<T> ptr) {
+    rtarcweakrelease(ptr.address);
 }
 
 // -----------------------------------------------------------------------------

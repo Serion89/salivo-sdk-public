@@ -41,6 +41,15 @@ pub func owner(Mutex m) -> int {
     return rtmutexowner(m.id);
 }
 
+/// Frees the mutex; false if it is locked or already destroyed. Copies of `m` become invalid.
+pub func mutexDestroy(Mutex m) -> bool {
+    return rtmutexdestroy(m.id) == 0;
+}
+
+pub func mutexdestroy(Mutex m) -> bool {
+    return mutexDestroy(m);
+}
+
 // ─────────────────────────── RwLock ───────────────────────────
 
 pub struct RwLock {
@@ -97,6 +106,15 @@ pub func iswritelocked(RwLock rw) -> bool {
     return res == 1;
 }
 
+/// Frees the lock; false while it is held or if already destroyed
+pub func rwlockDestroy(RwLock rw) -> bool {
+    return rtrwlockdestroy(rw.id) == 0;
+}
+
+pub func rwlockdestroy(RwLock rw) -> bool {
+    return rwlockDestroy(rw);
+}
+
 // ─────────────────────────── Condvar ───────────────────────────
 
 pub struct Condvar {
@@ -124,6 +142,15 @@ pub func signal(Condvar cv) -> bool {
 
 pub func waitercount(Condvar cv) -> int {
     return rtcondvarwaitercount(cv.id);
+}
+
+/// Frees the condition variable; false while tasks wait on it or if already destroyed
+pub func condvarDestroy(Condvar cv) -> bool {
+    return rtcondvardestroy(cv.id) == 0;
+}
+
+pub func condvardestroy(Condvar cv) -> bool {
+    return condvarDestroy(cv);
 }
 
 // ─────────────────────────── Channel ───────────────────────────
@@ -239,6 +266,23 @@ pub func storebool(AtomicBool a, bool value) {
 
 pub func swapbool(AtomicBool a, bool value) -> bool {
     return rtatomicboolswap(a.id, value);
+}
+
+/// Frees the atomic; false if already destroyed
+pub func atomicDestroy(AtomicInt a) -> bool {
+    return rtatomicdestroy(a.id) == 0;
+}
+
+pub func atomicdestroy(AtomicInt a) -> bool {
+    return atomicDestroy(a);
+}
+
+pub func atomicBoolDestroy(AtomicBool a) -> bool {
+    return rtatomicdestroy(a.id) == 0;
+}
+
+pub func atomicbooldestroy(AtomicBool a) -> bool {
+    return atomicBoolDestroy(a);
 }
 
 pub func testsync() -> bool {

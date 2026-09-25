@@ -1678,7 +1678,16 @@ static void h2_consumed(HConn* c, HEx* e, uint32_t n) {
     }
 }
 
-static void h2_deliver(HConn* c, HEx* e, unsigned char* p, uint32_t n, HSeg* seg) {
+/* Queues received body bytes for the stream's reader. Returns 0, or SA_EOS when no memory is left:
+   the caller then resets the stream so no DATA is ever silently dropped. */
+/* Test hook (native harness only): the next delivery fails as if out of memory */
+static int h_fault_deliver_oom = 0;
+
+static int h2_deliver(HConn* c, HEx* e, unsigned char* p, uint32_t n, HSeg* seg) {
+    if (h_fault_deliver_oom) {
+        h_fault_deliver_oom = 0;
+        return SA_EOS;
+    }
     HChunk* t = e->dq_t;
     e->data_total += n;
     if (n < H_SMALL && t && !t->seg && t->p + t->len + n <= (unsigned char*)(t + 1) + t->cap) {
@@ -1689,7 +1698,7 @@ static void h2_deliver(HConn* c, HEx* e, unsigned char* p, uint32_t n, HSeg* seg
         HChunk* k;
         if (n < H_SMALL) {
             k = (HChunk*)malloc(sizeof(HChunk) + H_SMALL);
-            if (!k) return;
+            if (!k) return SA_EOS;
             k->seg = NULL;
             k->p = (unsigned char*)(k + 1);
             k->cap = H_SMALL;
@@ -1697,7 +1706,7 @@ static void h2_deliver(HConn* c, HEx* e, unsigned char* p, uint32_t n, HSeg* seg
             HSTX(HS_BODY_COPY, n);
         } else {
             k = (HChunk*)malloc(sizeof(HChunk));
-            if (!k) return;
+            if (!k) return SA_EOS;
             hseg_ref(seg);
             k->seg = seg;
             k->p = p;
@@ -1710,6 +1719,7 @@ static void h2_deliver(HConn* c, HEx* e, unsigned char* p, uint32_t n, HSeg* seg
         e->dq_t = k;
     }
     h_fire(&e->w);
+    return 0;
 }
 
 /* Validates a decoded header list (RFC 9113 8.2-8.3) and records the pseudo fields. */
@@ -1719,6 +1729,9 @@ static int h2_check(HConn* c, HDec* d, HEx* e, int trailer) {
         HField* f = &d->f[i];
         const unsigned char *n = d->out + f->noff, *v = d->out + f->voff;
         if (!f->nlen) return -1;
+        /* RFC 9113 8.2.1: uppercase in any field name (pseudo-headers included) is malformed */
+        for (uint32_t k = 0; k < f->nlen; k++)
+            if (n[k] >= 'A' && n[k] <= 'Z') return -1;
         for (uint32_t k = 0; k < f->vlen; k++)
             if (v[k] == 0 || v[k] == '\r' || v[k] == '\n') return -1;
         if (f->vlen && (v[0] == ' ' || v[0] == '\t' || v[f->vlen - 1] == ' ' || v[f->vlen - 1] == '\t')) return -1;
@@ -2141,7 +2154,8 @@ static int h2_feed(HConn* c, HSeg* seg, unsigned char* p, uint32_t n) {
                 uint32_t data_end = h->flen - h->pad, pos = h->fgot + used;
                 if (pos < data_end && used < m) {
                     uint32_t k = m - used < data_end - pos ? m - used : data_end - pos;
-                    if (h->fex && !h->fex->reset) h2_deliver(c, h->fex, p + used, k, seg);
+                    if (h->fex && !h->fex->reset && h2_deliver(c, h->fex, p + used, k, seg))
+                        h2_stream_reset(c, h->fex, E_INTERNAL, SA_EOS, 1); /* OOM: fail the stream, visibly */
                     h->fdata += k;
                 }
             } else if (h->ftype <= F_CONT) memcpy(h->fbuf + h->fgot, p, m);
@@ -2418,7 +2432,14 @@ static int64_t h2_encode(HConn* c, HEx* e, int64_t status, int64_t len, uint32_t
         i += nl + 1 + (uint32_t)strlen((const char*)nm + nl + 1) + 1;
     }
     char num[24];
-    if (e->client) {
+    if (e->client && strcmp(e->mout, "CONNECT") == 0) {
+        /* RFC 9113 8.5: CONNECT carries :method and :authority (host:port, the request target) only */
+        const char* t = e->tout && e->tout[0] && e->tout[0] != '/' ? e->tout : (const char*)authority;
+        uint32_t tl = t == (const char*)authority ? alen : (uint32_t)strlen(t);
+        if (!t || !tl) return SA_EINVAL;
+        o += hp_enc_field(p + o, (const unsigned char*)":method", 7, (const unsigned char*)"CONNECT", 7);
+        o += hp_enc_field(p + o, (const unsigned char*)":authority", 10, (const unsigned char*)t, tl);
+    } else if (e->client) {
         o += hp_enc_field(p + o, (const unsigned char*)":method", 7, (const unsigned char*)e->mout, (uint32_t)strlen(e->mout));
         o += hp_enc_field(p + o, (const unsigned char*)":scheme", 7, (const unsigned char*)"http", 4);
         if (authority) o += hp_enc_field(p + o, (const unsigned char*)":authority", 10, authority, alen);
@@ -2567,7 +2588,8 @@ static int64_t h2_write(HConn* c, HEx* e, const unsigned char* p, int64_t n, int
                 return r;
             }
         }
-        uint32_t m = (uint32_t)(n < avail ? n : avail);
+        /* An empty END_STREAM consumes no credit; never derive its length from a (possibly negative) window */
+        uint32_t m = n == 0 ? 0 : (uint32_t)(n < avail ? n : avail);
         h->conn_send -= m;
         e->send_win -= m;
         int last = end && m == n;

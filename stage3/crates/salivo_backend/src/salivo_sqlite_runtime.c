@@ -4,6 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Diagnostics only with SALIVO_SQLITE_TRACE=1, on stderr: SQL text never reaches stdout by default */
+static int sqlite_trace_on(void) {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("SALIVO_SQLITE_TRACE"); v = e && e[0] == '1'; }
+    return v;
+}
+#define SQLITE_TRACE(...) do { if (sqlite_trace_on()) fprintf(stderr, __VA_ARGS__); } while (0)
+
 #define MAX_DB_HANDLES 128
 #define MAX_STMT_HANDLES 512
 
@@ -61,19 +69,19 @@ long long salivo_sqlite_open(const char* path) {
     sqlite3* db = NULL;
     int rc = sqlite3_open(path, &db);
     if (rc != SQLITE_OK) {
-        printf("[SQLITE_RT] Failed to open DB '%s': %s\n", path, sqlite3_errmsg(db));
+        SQLITE_TRACE("[SQLITE_RT] Failed to open DB '%s': %s\n", path, sqlite3_errmsg(db));
         fflush(stdout);
         if (db) sqlite3_close(db);
         return -1;
     }
     long long handle = alloc_db_handle(db);
     if (handle < 0) {
-        printf("[SQLITE_RT] Failed to allocate handle slot for DB '%s'\n", path);
+        SQLITE_TRACE("[SQLITE_RT] Failed to allocate handle slot for DB '%s'\n", path);
         fflush(stdout);
         sqlite3_close(db);
         return -1;
     }
-    printf("[SQLITE_RT] Opened database '%s' -> handle %lld\n", path, handle);
+    SQLITE_TRACE("[SQLITE_RT] Opened database '%s' -> handle %lld\n", path, handle);
     fflush(stdout);
     return handle;
 }
@@ -81,7 +89,7 @@ long long salivo_sqlite_open(const char* path) {
 long long salivo_sqlite_close(long long db_handle) {
     sqlite3* db = get_db_by_handle(db_handle);
     if (!db) {
-        printf("[SQLITE_RT] Close warning: invalid db handle %lld\n", db_handle);
+        SQLITE_TRACE("[SQLITE_RT] Close warning: invalid db handle %lld\n", db_handle);
         fflush(stdout);
         return -1;
     }
@@ -89,9 +97,9 @@ long long salivo_sqlite_close(long long db_handle) {
     if (rc == SQLITE_OK || rc == SQLITE_DONE) {
         g_db_table[db_handle].is_active = 0;
         g_db_table[db_handle].db = NULL;
-        printf("[SQLITE_RT] Closed db handle %lld\n", db_handle);
+        SQLITE_TRACE("[SQLITE_RT] Closed db handle %lld\n", db_handle);
     } else {
-        printf("[SQLITE_RT] sqlite3_close returned error code %d for handle %lld\n", rc, db_handle);
+        SQLITE_TRACE("[SQLITE_RT] sqlite3_close returned error code %d for handle %lld\n", rc, db_handle);
     }
     fflush(stdout);
     return (rc == SQLITE_OK || rc == SQLITE_DONE) ? 0 : -1;
@@ -103,13 +111,13 @@ long long salivo_sqlite_execute(long long db_handle, const char* sql) {
     char* err_msg = NULL;
     int rc = sqlite3_exec(db, sql, NULL, NULL, &err_msg);
     if (rc != SQLITE_OK) {
-        printf("[SQLITE_RT] Execute error on SQL '%s': %s\n", sql, err_msg ? err_msg : "unknown error");
+        SQLITE_TRACE("[SQLITE_RT] Execute error on SQL '%s': %s\n", sql, err_msg ? err_msg : "unknown error");
         fflush(stdout);
         if (err_msg) sqlite3_free(err_msg);
         return -1;
     }
     int changes = sqlite3_changes(db);
-    printf("[SQLITE_RT] Execute SQL '%s' -> affected rows: %d\n", sql, changes);
+    SQLITE_TRACE("[SQLITE_RT] Execute SQL '%s' -> affected rows: %d\n", sql, changes);
     fflush(stdout);
     return (long long)changes;
 }
@@ -120,18 +128,18 @@ long long salivo_sqlite_prepare(long long db_handle, const char* sql) {
     sqlite3_stmt* stmt = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        printf("[SQLITE_RT] Prepare error on SQL '%s': %s\n", sql, sqlite3_errmsg(db));
+        SQLITE_TRACE("[SQLITE_RT] Prepare error on SQL '%s': %s\n", sql, sqlite3_errmsg(db));
         fflush(stdout);
         return -1;
     }
     long long stmt_handle = alloc_stmt_handle(stmt);
     if (stmt_handle < 0) {
-        printf("[SQLITE_RT] Failed to allocate statement handle slot\n");
+        SQLITE_TRACE("[SQLITE_RT] Failed to allocate statement handle slot\n");
         fflush(stdout);
         sqlite3_finalize(stmt);
         return -1;
     }
-    printf("[SQLITE_RT] Prepared statement -> handle %lld\n", stmt_handle);
+    SQLITE_TRACE("[SQLITE_RT] Prepared statement -> handle %lld\n", stmt_handle);
     fflush(stdout);
     return stmt_handle;
 }
@@ -142,7 +150,7 @@ long long salivo_sqlite_step(long long stmt_handle) {
     int rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) return 1;
     if (rc == SQLITE_DONE) return 0;
-    printf("[SQLITE_RT] Step error on stmt %lld: code %d\n", stmt_handle, rc);
+    SQLITE_TRACE("[SQLITE_RT] Step error on stmt %lld: code %d\n", stmt_handle, rc);
     fflush(stdout);
     return -1;
 }
@@ -209,7 +217,7 @@ long long salivo_sqlite_finalize(long long stmt_handle) {
     sqlite3_finalize(stmt);
     g_stmt_table[stmt_handle].is_active = 0;
     g_stmt_table[stmt_handle].stmt = NULL;
-    printf("[SQLITE_RT] Finalized stmt handle %lld\n", stmt_handle);
+    SQLITE_TRACE("[SQLITE_RT] Finalized stmt handle %lld\n", stmt_handle);
     fflush(stdout);
     return 0;
 }

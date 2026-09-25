@@ -341,6 +341,10 @@ pub func httpConnect(host: string, port: int, proto: int) -> Result<HttpConn, Ht
         return err<HttpConn, HttpError>(httpErrorFromCode(c));
     }
     let a = rtaiohttpauthority(c, host + $":{port}");
+    if (a < 0) {
+        let x = rtaiohttpclose(c);
+        return err<HttpConn, HttpError>(httpErrorFromCode(a));
+    }
     return ok<HttpConn, HttpError>(HttpConn { handle: c });
 }
 

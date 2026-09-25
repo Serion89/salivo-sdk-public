@@ -346,6 +346,15 @@ long long salivo_net_recv_buf(long long handle, char* buf_ptr, long long max_byt
     return (long long)recvd;
 }
 
+/* Peer IPv4 address packed as a.b.c.d -> (a << 24) | (b << 16) | (c << 8) | d; -1 if unknown.
+   Allocation-free counterpart of salivo_net_get_peer_ip. */
+long long salivo_net_get_peer_ipv4(long long handle) {
+    if (handle < 1 || handle > MAX_SOCKET_HANDLES || !g_socket_table[handle].is_active) return -1;
+    unsigned a, b, c, d;
+    if (sscanf(g_socket_table[handle].peer_ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4 || a > 255 || b > 255 || c > 255 || d > 255) return -1;
+    return ((long long)a << 24) | ((long long)b << 16) | ((long long)c << 8) | (long long)d;
+}
+
 char* salivo_net_get_peer_ip(long long handle) {
     if (handle < 1 || handle > MAX_SOCKET_HANDLES || !g_socket_table[handle].is_active) {
         char* unknown = (char*)malloc(8);

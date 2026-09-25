@@ -1,6 +1,6 @@
 module salivo.std.io;
 ><salivo.std.core::{panic, assert, asserteq, Option, some, none, Result, ok, err};
-><salivo.std.mem::{allocate, deallocate, reallocate, arcnew, retain, release, Arc};
+><salivo.std.mem::{allocate, deallocate, reallocate};
 ><salivo.std.strings::{String};
 
 /// =============================================================================
@@ -80,7 +80,6 @@ pub struct File {
     int handle_id;
     int position;
     bool is_open;
-    Arc<int> arc_ref;
 }
 
 pub struct Directory {
@@ -105,12 +104,10 @@ pub func open(path: string) -> Result<File, IoError> {
     if (h < 0) {
         return err<File, IoError>(ioerror(IoErrorKind::NotFound, "Failed to open file"));
     }
-    let arc_ref = arcnew<int>(1, 8);
     return ok<File, IoError>(File {
         handle_id: h,
         position: 0,
         is_open: true,
-        arc_ref: arc_ref,
     });
 }
 
@@ -122,12 +119,10 @@ pub func create(path: string) -> Result<File, IoError> {
     if (h < 0) {
         return err<File, IoError>(ioerror(IoErrorKind::PermissionDenied, "Failed to create file"));
     }
-    let arc_ref = arcnew<int>(1, 8);
     return ok<File, IoError>(File {
         handle_id: h,
         position: 0,
         is_open: true,
-        arc_ref: arc_ref,
     });
 }
 

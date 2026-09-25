@@ -185,8 +185,13 @@ pub func tcpaccept(stream_listener: TcpListener) -> Result<TcpStream, NetworkErr
         provider: platform(true, 1),
     };
     let peer_port = rtnetgetpeerport(client_fd);
+    let packed = rtnetgetpeeripv4(client_fd);
+    let mut peer = ipv4(0, 0, 0, 0);
+    if (packed >= 0) {
+        peer = ipv4((packed / 16777216) % 256, (packed / 65536) % 256, (packed / 256) % 256, packed % 256);
+    }
     let addr = SocketAddress {
-        ip: parseip(rtnetgetpeerip(client_fd)),
+        ip: peer,
         port: peer_port,
     };
     return ok<TcpStream, NetworkError>(TcpStream {
