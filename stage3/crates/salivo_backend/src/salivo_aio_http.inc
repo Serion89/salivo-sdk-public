@@ -3350,34 +3350,3 @@ static void sa_release_owned(int64_t h) {
         salivo_aio_release(h);
     } else salivo_aio_close(h);
 }
-
-/* Stage 36.3: textual IP address ("127.0.0.1", "::1") of the peer of an exchange's or a
- * connection's socket, for rate limiting and logging; "" when unknown. */
-char* salivo_aio_http_peer_str(int64_t h) {
-    char text[SA_PEER_TEXT] = "";
-    SaObj* o = sa_lookup(h, 0);
-    if (o) {
-        int64_t ch = o->type == OT_HTTP_EX ? ((HEx*)o)->conn_h : (o->type == OT_HTTP_CONN ? h : 0);
-        HConn* c = ch ? (HConn*)sa_lookup(ch, OT_HTTP_CONN) : NULL;
-        SaSock* k = c && c->sock ? (SaSock*)sa_lookup(c->sock, OT_TCP_STREAM) : NULL;
-        if (k) {
-            struct sockaddr_storage ss;
-            memset(&ss, 0, sizeof(ss));
-#if defined(_WIN32)
-            int sl = (int)sizeof(ss);
-            int got = !k->closed && getpeername(k->s, (struct sockaddr*)&ss, &sl) == 0;
-#else
-            socklen_t sl = (socklen_t)sizeof(ss);
-            int got = !k->closed && getpeername(k->fd, (struct sockaddr*)&ss, &sl) == 0;
-#endif
-            if (got && ss.ss_family == AF_INET6)
-                inet_ntop(AF_INET6, (void*)&((struct sockaddr_in6*)&ss)->sin6_addr, text, sizeof(text));
-            else if (got && ss.ss_family == AF_INET)
-                inet_ntop(AF_INET, (void*)&((struct sockaddr_in*)&ss)->sin_addr, text, sizeof(text));
-            sa_obj_unref(&k->obj);
-        }
-        if (c) sa_obj_unref(&c->obj);
-        sa_obj_unref(o);
-    }
-    return h_strdup((const unsigned char*)text, strlen(text));
-}
