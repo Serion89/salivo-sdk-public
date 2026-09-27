@@ -65,7 +65,7 @@ function Register-SalivoFiles {
     $classes = 'Registry::HKEY_CURRENT_USER\Software\Classes'
     foreach ($key in @("$classes\.sal", "$classes\.sal\OpenWithProgids", "$classes\Salivo.File",
                        "$classes\Salivo.File\DefaultIcon", "$classes\Salivo.File\shell\open\command")) {
-        if (-not (Test-Path $key)) { New-Item -Path $key | Out-Null }
+        if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
     }
     $previous = (Get-ItemProperty -Path "$classes\.sal" -ErrorAction SilentlyContinue).'(default)'
     Set-ItemProperty -Path "$classes\.sal" -Name '(default)' -Value 'Salivo.File'
@@ -177,21 +177,42 @@ if ($NoSystemChanges) {
 
 # 6. VS Code extension -------------------------------------------------------------------------
 Step 6 'Installing the Salivo VS Code extension (syntax highlighting, snippets, run and build commands)'
-$vsix = Get-ChildItem (Join-Path $src 'vscode') -Filter 'salivo-*.vsix' | Select-Object -First 1
+# The newest extension by version: names sort 1.0.10 before 1.0.9, so order by the parsed version
+$vsix = Get-ChildItem (Join-Path $src 'vscode') -Filter 'salivo-*.vsix' |
+    Sort-Object { try { [version]($_.BaseName -replace '^salivo-', '') } catch { [version]'0.0' } } -Descending |
+    Select-Object -First 1
 if ($NoSystemChanges) {
     Ok 'skipped (-NoSystemChanges)'
+} elseif (-not $vsix) {
+    Warn "No salivo-*.vsix found in $(Join-Path $src 'vscode')."
 } else {
+    # VS Code's command-line launcher: user install, system install, Insiders, then PATH
     $codeCli = $null
-    $cmd = Get-Command code -ErrorAction SilentlyContinue
-    if ($cmd) { $codeCli = $cmd.Source }
-    foreach ($candidate in @((Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin\code.cmd'), (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin\code.cmd'))) {
-        if (-not $codeCli -and (Test-Path $candidate)) { $codeCli = $candidate }
+    foreach ($candidate in @(
+            (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin\code.cmd'),
+            (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin\code.cmd'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft VS Code\bin\code.cmd'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code Insiders\bin\code-insiders.cmd'))) {
+        if (-not $codeCli -and $candidate -and (Test-Path $candidate)) { $codeCli = $candidate }
     }
-    if ($codeCli -and $vsix) {
-        & $codeCli --install-extension $vsix.FullName --force | Out-Null
-        if ($LASTEXITCODE -eq 0) { Ok "installed $($vsix.Name)" } else { Warn "VS Code could not install $($vsix.Name); install it from the Extensions view (... > Install from VSIX)." }
+    if (-not $codeCli) {
+        $cmd = Get-Command code.cmd, code -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd) { $codeCli = $cmd.Source }
+    }
+    if (-not $codeCli) {
+        Warn "VS Code was not found. After installing it, open Extensions > ... > Install from VSIX and pick $($vsix.FullName)."
     } else {
-        Warn "VS Code was not found. After installing it, open Extensions > ... > Install from VSIX and pick vscode\$($vsix.Name)."
+        # cmd /c gives a reliable exit code for the .cmd launcher; its output is shown when it fails
+        $output = & cmd.exe /d /c "`"$codeCli`" --install-extension `"$($vsix.FullName)`" --force 2>&1"
+        $installed = & cmd.exe /d /c "`"$codeCli`" --list-extensions --show-versions 2>&1"
+        $want = 'salivo.salivo@' + ($vsix.BaseName -replace '^salivo-', '')
+        if ($installed -match [regex]::Escape($want)) {
+            Ok "installed $($vsix.Name) into VS Code (reload open VS Code windows to activate it)"
+        } else {
+            Warn "VS Code did not install $($vsix.Name):"
+            $output | ForEach-Object { Write-Host "      $_" }
+            Warn "Install it from the Extensions view (... > Install from VSIX) and pick $($vsix.FullName)."
+        }
     }
 }
 
