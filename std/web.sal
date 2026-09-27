@@ -1,0 +1,2517 @@
+module salivo.std.web;
+
+// Salivo Stage 36.3 - production web framework on the Stage 36.2 HTTP/1.1 + HTTP/2 transport.
+//
+// One WebServer holds the configuration, the router, the middleware chain and the shared state
+// (rate-limit table, connection registry, metrics). Every request gets its own WebCtx. Handlers
+// and middleware are ordinary functions `func f(ctx: WebCtx) -> int`, called through the runtime's
+// indirect call (rtaiocall). HTTP/1.1 and HTTP/2 run through the same code path.
+//
+// Design, guarantees and limits: docs/STAGE_36_3_WEB.md.
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+><salivo.std.runtime::{TcpListener, TcpStream, tcpListen, listenerPort, tcpAccept, listenerClose, tcpClose, tcpShutdown, sleep, nowMicros};
+><salivo.std.http::{
+    HttpStream, HttpConn, httpServer, nextRequest, setLimit, goaway, httpClose, freeStream, resetStream,
+    addHeader, respond, writeText, finish, protoAuto, connProtocol, limitRequestLine, limitHeaderCount,
+    limitHeaderBytes, limitBodySize, timeoutHeader, timeoutIdle, timeoutRead, timeoutWrite
+};
+
+pub enum WebError {
+    InvalidConfig,
+    InvalidArgument,
+    InvalidRoute,
+    DuplicateRoute,
+    InvalidHeader,
+    AlreadyResponded,
+    BodyTooLarge,
+    BadRequest,
+    Transport,
+    Listen,
+}
+
+pub enum JwtError {
+    Config,
+    Malformed,
+    BadEncoding,
+    UnsupportedAlgorithm,
+    UnsupportedHeader,
+    UnknownKey,
+    KeyMismatch,
+    BadSignature,
+    Expired,
+    NotYetValid,
+    IssuerMismatch,
+    AudienceMismatch,
+    IssuedInFuture,
+    MissingClaim,
+    InvalidClaim,
+}
+
+pub struct Route {
+    string method;
+    string pattern;
+    string canon;
+    Vec<string> segs;
+    Vec<int> kinds;
+    int handler;
+    bool auth;
+    string scope;
+    string role;
+    int policy;
+}
+
+/// HS256 key set and claim policy for JWS/JWT verification. Built with jwtVerifier / jwtAddKey.
+pub struct JwtVerifier {
+    Vec<string> kids;
+    Vec<string> algs;
+    Vec<string> secrets;
+    Vec<string> allowed;
+    string issuerName;
+    string audience;
+    int leeway;
+    int maxFutureIat;
+    bool requireExp;
+    int maxTokenBytes;
+    string error;
+}
+
+/// Verified claims of a JWT. Only produced by jwtVerify after signature and claim checks.
+pub struct JwtClaims {
+    string alg;
+    string kid;
+    string sub;
+    string iss;
+    Vec<string> aud;
+    string jti;
+    int exp;
+    int nbf;
+    int iat;
+    string scope;
+    Vec<string> roles;
+    Vec<string> names;
+    Vec<string> values;
+}
+
+pub struct WebServer {
+    Vec<Route> routes;
+    Vec<int> middleware;
+    int errorFn;
+    int clockFn;
+    string cfgError;
+    // limits
+    int maxBody;
+    int maxHeaders;
+    int maxHeaderBytes;
+    int maxUri;
+    int maxParams;
+    int maxJsonDepth;
+    int maxConcurrent;
+    // timeouts (ms)
+    int headerTimeout;
+    int idleTimeout;
+    int readTimeout;
+    int writeTimeout;
+    int requestTimeout;
+    int shutdownTimeout;
+    // CORS
+    bool corsEnabled;
+    Vec<string> corsOrigins;
+    bool corsAnyOrigin;
+    bool corsCredentials;
+    Vec<string> corsMethods;
+    Vec<string> corsHeaders;
+    string corsExpose;
+    int corsMaxAge;
+    // rate limiting (fixed window)
+    int rlLimit;
+    int rlWindowMs;
+    int rlIdentity;
+    string rlHeader;
+    int rlCustomFn;
+    int rlCapacity;
+    int rlLock;
+    Vec<int> rlHash;
+    Vec<int> rlStart;
+    Vec<int> rlCount;
+    // authentication
+    JwtVerifier jwt;
+    bool authEnabled;
+    // security headers
+    bool secNosniff;
+    string secFrame;
+    string secReferrer;
+    string secCsp;
+    int hstsMaxAge;
+    bool hstsSubdomains;
+    bool hstsPreload;
+    // runtime state
+    int listener;
+    int port;
+    int lock;
+    int draining;
+    Vec<int> connSocks;
+    Vec<int> connHandles;
+    Vec<int> connBusy;
+    Vec<int> tasks;
+    int taskCursor;
+    string idPrefix;
+    int idCounter;
+    // metrics (atomic counters)
+    int mRequests;
+    int mActive;
+    int m2xx;
+    int m3xx;
+    int m4xx;
+    int m5xx;
+    int mRateLimited;
+    int mAuthFailures;
+    int mLatencyTotal;
+    int mLatencyMax;
+    int mTimeouts;
+    int mConnections;
+}
+
+/// Request-local state. One per request; never shared between requests.
+pub struct WebCtx {
+    WebServer srv;
+    int sh;
+    int inflight;
+    int heap;
+    string method;
+    string path;
+    string query;
+    string rid;
+    string peer;
+    Vec<string> paramNames;
+    Vec<string> paramValues;
+    Vec<string> outNames;
+    Vec<string> outValues;
+    int routeIndex;
+    int routeStatus;
+    string allow;
+    int mwIndex;
+    bool done;
+    bool streaming;
+    int status;
+    bool expired;
+    string rateKey;
+    string errMsg;
+    int startMicros;
+    bool authenticated;
+    JwtClaims claims;
+}
+
+// Metric keys for metric(srv, key).
+pub func metricRequests() -> int { return 0; }
+pub func metricActive() -> int { return 1; }
+pub func metric2xx() -> int { return 2; }
+pub func metric3xx() -> int { return 3; }
+pub func metric4xx() -> int { return 4; }
+pub func metric5xx() -> int { return 5; }
+pub func metricRateLimited() -> int { return 6; }
+pub func metricAuthFailures() -> int { return 7; }
+pub func metricLatencyTotalMicros() -> int { return 8; }
+pub func metricLatencyMaxMicros() -> int { return 9; }
+pub func metricTimeouts() -> int { return 10; }
+pub func metricConnections() -> int { return 11; }
+
+// Rate-limit identities for rateLimit(srv, ...).
+pub func identityIp() -> int { return 0; }
+pub func identitySubject() -> int { return 1; }
+pub func identityHeader() -> int { return 2; }
+pub func identityCustom() -> int { return 3; }
+
+// ---------------------------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------------------------
+
+func byteAt(s: string, i: int) -> int {
+    let b = rtcharat(s, i);
+    if (b < 0) { return b + 256; }
+    return b;
+}
+
+func lowerAscii(s: string) -> string { return lower(s); }
+
+func vecHasStr(v: Vec<string>, s: string) -> bool {
+    let n = veclen<string>(v);
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<string>(v, i) == s) { return true; }
+    }
+    return false;
+}
+
+/// Splits a comma-separated list, trims items and drops empty ones.
+func splitList(s: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let n = len(s);
+    let mut start = 0;
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || byteAt(s, i) == 44) {
+            let item = trim(slice(s, start, i));
+            if (item != "") { out = push<string>(out, item); }
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+func joinList(v: Vec<string>, sep: string) -> string {
+    let mut out = "";
+    let n = veclen<string>(v);
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (i > 0) { out = out + sep; }
+        out = out + get<string>(v, i);
+    }
+    return out;
+}
+
+func isTchar(ch: int) -> bool {
+    if (ch >= 97 && ch <= 122) { return true; }
+    if (ch >= 65 && ch <= 90) { return true; }
+    if (ch >= 48 && ch <= 57) { return true; }
+    return ch == 33 || ch == 35 || ch == 36 || ch == 37 || ch == 38 || ch == 39 || ch == 42 || ch == 43 ||
+        ch == 45 || ch == 46 || ch == 94 || ch == 95 || ch == 96 || ch == 124 || ch == 126;
+}
+
+/// RFC 9110 field-name (token), at most 256 bytes.
+pub func validHeaderName(name: string) -> bool {
+    let n = len(name);
+    if (n == 0 || n > 256) { return false; }
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (!isTchar(byteAt(name, i))) { return false; }
+    }
+    return true;
+}
+
+/// RFC 9110 field-value: no CR, LF, NUL or other control bytes except HTAB (blocks header injection).
+pub func validHeaderValue(v: string) -> bool {
+    let n = len(v);
+    if (n > 8192) { return false; }
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(v, i);
+        if ((ch < 32 && ch != 9) || ch == 127) { return false; }
+    }
+    return true;
+}
+
+func hexDigit(v: int) -> string { return slice("0123456789abcdef", v, v + 1); }
+
+func hexValue(ch: int) -> int {
+    if (ch >= 48 && ch <= 57) { return ch - 48; }
+    if (ch >= 97 && ch <= 102) { return ch - 87; }
+    if (ch >= 65 && ch <= 70) { return ch - 55; }
+    return 0 - 1;
+}
+
+/// Text from raw bytes (none of them 0).
+func bytesText(b: Vec<int>) -> string {
+    let n = veclen<int>(b);
+    if (n == 0) { return ""; }
+    let a = rtaiobufnew(n);
+    if (a <= 0) { return ""; }
+    for (let mut i = 0; i < n; i = i + 1) { let x = rtaiobufset(a, i, get<int>(b, i)); }
+    let t = rtaiobufstr(a, n);
+    let f = rtaiobuffree(a);
+    return t;
+}
+
+func textBytes(s: string) -> Vec<int> {
+    let mut out = vecNew<int>();
+    let n = len(s);
+    for (let mut i = 0; i < n; i = i + 1) { out = push<int>(out, byteAt(s, i)); }
+    return out;
+}
+
+func bytesHex(b: Vec<int>) -> string {
+    let mut out = "";
+    let n = veclen<int>(b);
+    for (let mut i = 0; i < n; i = i + 1) {
+        let v = get<int>(b, i);
+        out = out + hexDigit(v / 16) + hexDigit(v % 16);
+    }
+    return out;
+}
+
+func hexBytes(h: string) -> Vec<int> {
+    let mut out = vecNew<int>();
+    let n = len(h);
+    for (let mut i = 0; i + 1 < n; i = i + 2) {
+        out = push<int>(out, hexValue(byteAt(h, i)) * 16 + hexValue(byteAt(h, i + 1)));
+    }
+    return out;
+}
+
+/// Percent-decoding. Fails on malformed escapes and on %00; plusSpace decodes '+' (query strings).
+pub func percentDecode(s: string, plusSpace: bool) -> Result<string, WebError> {
+    let n = len(s);
+    if (find(s, "%") < 0 && (!plusSpace || find(s, "+") < 0)) { return ok<string, WebError>(s); }
+    let mut out = vecNew<int>();
+    let mut i = 0;
+    while (i < n) {
+        let ch = byteAt(s, i);
+        if (ch == 37) {
+            if (i + 2 >= n) { return err<string, WebError>(WebError::BadRequest); }
+            let hi = hexValue(byteAt(s, i + 1));
+            let lo = hexValue(byteAt(s, i + 2));
+            if (hi < 0 || lo < 0) { return err<string, WebError>(WebError::BadRequest); }
+            let v = hi * 16 + lo;
+            if (v == 0) { return err<string, WebError>(WebError::BadRequest); }
+            out = push<int>(out, v);
+            i = i + 3;
+        } else {
+            if (plusSpace && ch == 43) { out = push<int>(out, 32); } else { out = push<int>(out, ch); }
+            i = i + 1;
+        }
+    }
+    return ok<string, WebError>(bytesText(out));
+}
+
+/// JSON string body (without quotes) for s.
+pub func jsonEscape(s: string) -> string {
+    let n = len(s);
+    let mut out = "";
+    let mut start = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(s, i);
+        if (ch == 34 || ch == 92 || ch < 32) {
+            out = out + slice(s, start, i);
+            if (ch == 34) { out = out + "\\\""; }
+            if (ch == 92) { out = out + "\\\\"; }
+            if (ch == 10) { out = out + "\\n"; }
+            if (ch == 13) { out = out + "\\r"; }
+            if (ch == 9) { out = out + "\\t"; }
+            if (ch < 32 && ch != 10 && ch != 13 && ch != 9) { out = out + "\\u00" + hexDigit(ch / 16) + hexDigit(ch % 16); }
+            start = i + 1;
+        }
+    }
+    return out + slice(s, start, n);
+}
+
+// ---------------------------------------------------------------------------------------------
+// base64url (RFC 4648 section 5, unpadded, canonical)
+// ---------------------------------------------------------------------------------------------
+
+func b64Value(ch: int) -> int {
+    if (ch >= 65 && ch <= 90) { return ch - 65; }
+    if (ch >= 97 && ch <= 122) { return ch - 71; }
+    if (ch >= 48 && ch <= 57) { return ch + 4; }
+    if (ch == 45) { return 62; }
+    if (ch == 95) { return 63; }
+    return 0 - 1;
+}
+
+func b64Char(v: int) -> string {
+    return slice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", v, v + 1);
+}
+
+func pow2(bits: int) -> int {
+    let mut p = 1;
+    for (let mut i = 0; i < bits; i = i + 1) { p = p * 2; }
+    return p;
+}
+
+pub struct Bytes { bool valid; Vec<int> data; }
+
+/// Strict decoding: base64url alphabet only, no padding, zero unused bits.
+pub func base64UrlDecode(s: string) -> Bytes {
+    let mut out = vecNew<int>();
+    let n = len(s);
+    if (n % 4 == 1) { return Bytes { valid: false, data: out }; }
+    let mut acc = 0;
+    let mut bits = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        let v = b64Value(byteAt(s, i));
+        if (v < 0) { return Bytes { valid: false, data: out }; }
+        acc = acc * 64 + v;
+        bits = bits + 6;
+        if (bits >= 8) {
+            bits = bits - 8;
+            let p = pow2(bits);
+            out = push<int>(out, acc / p);
+            acc = acc % p;
+        }
+    }
+    if (acc != 0) { return Bytes { valid: false, data: out }; }
+    return Bytes { valid: true, data: out };
+}
+
+pub func base64UrlEncodeBytes(b: Vec<int>) -> string {
+    let n = veclen<int>(b);
+    let mut out = "";
+    let mut i = 0;
+    while (i + 2 < n) {
+        let v = get<int>(b, i) * 65536 + get<int>(b, i + 1) * 256 + get<int>(b, i + 2);
+        out = out + b64Char(v / 262144) + b64Char((v / 4096) % 64) + b64Char((v / 64) % 64) + b64Char(v % 64);
+        i = i + 3;
+    }
+    if (n - i == 1) {
+        let v = get<int>(b, i);
+        out = out + b64Char(v / 4) + b64Char((v % 4) * 16);
+    }
+    if (n - i == 2) {
+        let v = get<int>(b, i) * 256 + get<int>(b, i + 1);
+        out = out + b64Char(v / 1024) + b64Char((v / 16) % 64) + b64Char((v % 16) * 4);
+    }
+    return out;
+}
+
+pub func base64UrlEncode(text: string) -> string { return base64UrlEncodeBytes(textBytes(text)); }
+
+// ---------------------------------------------------------------------------------------------
+// JSON (RFC 8259): validation with a depth limit, and the members of a top-level object
+// ---------------------------------------------------------------------------------------------
+
+/// Member kinds: 1 string, 2 number, 3 true, 4 false, 5 null, 6 array of strings, 7 other array, 8 object.
+pub struct JsonDoc {
+    string s;
+    int n;
+    int pos;
+    int maxDepth;
+    bool valid;
+    Vec<string> keys;
+    Vec<int> kinds;
+    Vec<string> values;
+    string text;
+    Vec<string> items;
+    bool itemsAllStrings;
+}
+
+func jsonWs(d: JsonDoc) {
+    while (d.pos < d.n) {
+        let ch = byteAt(d.s, d.pos);
+        if (ch != 32 && ch != 9 && ch != 10 && ch != 13) { return; }
+        d.pos = d.pos + 1;
+    }
+}
+
+func utf8Push(out: Vec<int>, cp: int) -> Vec<int> {
+    let mut o = out;
+    if (cp < 128) { return push<int>(o, cp); }
+    if (cp < 2048) {
+        o = push<int>(o, 192 + cp / 64);
+        return push<int>(o, 128 + cp % 64);
+    }
+    if (cp < 65536) {
+        o = push<int>(o, 224 + cp / 4096);
+        o = push<int>(o, 128 + (cp / 64) % 64);
+        return push<int>(o, 128 + cp % 64);
+    }
+    o = push<int>(o, 240 + cp / 262144);
+    o = push<int>(o, 128 + (cp / 4096) % 64);
+    o = push<int>(o, 128 + (cp / 64) % 64);
+    return push<int>(o, 128 + cp % 64);
+}
+
+func jsonHex4(d: JsonDoc, at: int) -> int {
+    if (at + 4 > d.n) { return 0 - 1; }
+    let mut v = 0;
+    for (let mut i = 0; i < 4; i = i + 1) {
+        let h = hexValue(byteAt(d.s, at + i));
+        if (h < 0) { return 0 - 1; }
+        v = v * 16 + h;
+    }
+    return v;
+}
+
+/// Parses a string at d.pos into d.text. False on malformed input, raw control bytes or \u0000.
+func jsonString(d: JsonDoc) -> bool {
+    if (d.pos >= d.n || byteAt(d.s, d.pos) != 34) { return false; }
+    d.pos = d.pos + 1;
+    let start = d.pos;
+    let mut plain = true;
+    let mut out = vecNew<int>();
+    while (d.pos < d.n) {
+        let ch = byteAt(d.s, d.pos);
+        if (ch == 34) {
+            if (plain) { d.text = slice(d.s, start, d.pos); } else { d.text = bytesText(out); }
+            d.pos = d.pos + 1;
+            return true;
+        }
+        if (ch < 32) { return false; }
+        if (ch == 92) {
+            if (plain) {
+                plain = false;
+                for (let mut k = start; k < d.pos; k = k + 1) { out = push<int>(out, byteAt(d.s, k)); }
+            }
+            if (d.pos + 1 >= d.n) { return false; }
+            let e = byteAt(d.s, d.pos + 1);
+            d.pos = d.pos + 2;
+            if (e == 34 || e == 92 || e == 47) { out = push<int>(out, e); }
+            else if (e == 98) { out = push<int>(out, 8); }
+            else if (e == 102) { out = push<int>(out, 12); }
+            else if (e == 110) { out = push<int>(out, 10); }
+            else if (e == 114) { out = push<int>(out, 13); }
+            else if (e == 116) { out = push<int>(out, 9); }
+            else if (e == 117) {
+                let mut cp = jsonHex4(d, d.pos);
+                if (cp <= 0) { return false; }
+                d.pos = d.pos + 4;
+                if (cp >= 56320 && cp <= 57343) { return false; }
+                if (cp >= 55296 && cp <= 56319) {
+                    if (d.pos + 6 > d.n || byteAt(d.s, d.pos) != 92 || byteAt(d.s, d.pos + 1) != 117) { return false; }
+                    let lo = jsonHex4(d, d.pos + 2);
+                    if (lo < 56320 || lo > 57343) { return false; }
+                    d.pos = d.pos + 6;
+                    cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+                }
+                out = utf8Push(out, cp);
+            } else {
+                return false;
+            }
+        } else {
+            if (!plain) { out = push<int>(out, ch); }
+            d.pos = d.pos + 1;
+        }
+    }
+    return false;
+}
+
+func isDigitByte(ch: int) -> bool { return ch >= 48 && ch <= 57; }
+
+func jsonNumber(d: JsonDoc) -> bool {
+    let start = d.pos;
+    if (d.pos < d.n && byteAt(d.s, d.pos) == 45) { d.pos = d.pos + 1; }
+    if (d.pos >= d.n || !isDigitByte(byteAt(d.s, d.pos))) { return false; }
+    if (byteAt(d.s, d.pos) == 48) {
+        d.pos = d.pos + 1;
+    } else {
+        while (d.pos < d.n && isDigitByte(byteAt(d.s, d.pos))) { d.pos = d.pos + 1; }
+    }
+    if (d.pos < d.n && byteAt(d.s, d.pos) == 46) {
+        d.pos = d.pos + 1;
+        if (d.pos >= d.n || !isDigitByte(byteAt(d.s, d.pos))) { return false; }
+        while (d.pos < d.n && isDigitByte(byteAt(d.s, d.pos))) { d.pos = d.pos + 1; }
+    }
+    if (d.pos < d.n && (byteAt(d.s, d.pos) == 101 || byteAt(d.s, d.pos) == 69)) {
+        d.pos = d.pos + 1;
+        if (d.pos < d.n && (byteAt(d.s, d.pos) == 43 || byteAt(d.s, d.pos) == 45)) { d.pos = d.pos + 1; }
+        if (d.pos >= d.n || !isDigitByte(byteAt(d.s, d.pos))) { return false; }
+        while (d.pos < d.n && isDigitByte(byteAt(d.s, d.pos))) { d.pos = d.pos + 1; }
+    }
+    d.text = slice(d.s, start, d.pos);
+    return true;
+}
+
+func jsonWord(d: JsonDoc, w: string) -> bool {
+    let n = len(w);
+    if (d.pos + n > d.n || slice(d.s, d.pos, d.pos + n) != w) { return false; }
+    d.pos = d.pos + n;
+    return true;
+}
+
+/// Parses one value; returns its kind (see JsonDoc) or 0. depth counts enclosing containers.
+/// collect: record the members of this object (top level) / the string items of this array.
+func jsonValue(d: JsonDoc, depth: int, collect: bool) -> int {
+    jsonWs(d);
+    if (d.pos >= d.n) { return 0; }
+    let ch = byteAt(d.s, d.pos);
+    if (ch == 34) { if (jsonString(d)) { return 1; } return 0; }
+    if (ch == 116) { if (jsonWord(d, "true")) { return 3; } return 0; }
+    if (ch == 102) { if (jsonWord(d, "false")) { return 4; } return 0; }
+    if (ch == 110) { if (jsonWord(d, "null")) { return 5; } return 0; }
+    if (ch == 45 || isDigitByte(ch)) { if (jsonNumber(d)) { return 2; } return 0; }
+    if (depth + 1 > d.maxDepth) { return 0; }
+    if (ch == 91) {
+        d.pos = d.pos + 1;
+        if (collect) { d.items = vecNew<string>(); d.itemsAllStrings = true; }
+        jsonWs(d);
+        if (d.pos < d.n && byteAt(d.s, d.pos) == 93) { d.pos = d.pos + 1; return 6; }
+        while (true) {
+            let k = jsonValue(d, depth + 1, false);
+            if (k == 0) { return 0; }
+            if (collect) {
+                if (k == 1) { d.items = push<string>(d.items, d.text); } else { d.itemsAllStrings = false; }
+            }
+            jsonWs(d);
+            if (d.pos >= d.n) { return 0; }
+            let cb = byteAt(d.s, d.pos);
+            d.pos = d.pos + 1;
+            if (cb == 93) {
+                if (collect && !d.itemsAllStrings) { return 7; }
+                return 6;
+            }
+            if (cb != 44) { return 0; }
+        }
+    }
+    if (ch == 123) {
+        d.pos = d.pos + 1;
+        jsonWs(d);
+        if (d.pos < d.n && byteAt(d.s, d.pos) == 125) { d.pos = d.pos + 1; return 8; }
+        while (true) {
+            jsonWs(d);
+            if (!jsonString(d)) { return 0; }
+            let key = d.text;
+            jsonWs(d);
+            if (d.pos >= d.n || byteAt(d.s, d.pos) != 58) { return 0; }
+            d.pos = d.pos + 1;
+            // Only the top-level object's own members are recorded (a nested "exp" or "alg" is data,
+            // not a claim or header parameter); arrays directly under it keep their string items
+            let top = collect && depth == 0;
+            let k = jsonValue(d, depth + 1, top);
+            if (k == 0) { return 0; }
+            if (top) {
+                // Duplicate member names are ambiguous (RFC 8259 4); reject them (RFC 7515 5.2)
+                if (vecHasStr(d.keys, key)) { return 0; }
+                d.keys = push<string>(d.keys, key);
+                d.kinds = push<int>(d.kinds, k);
+                if (k == 6) { d.values = push<string>(d.values, joinList(d.items, "\n")); }
+                else if (k == 1 || k == 2) { d.values = push<string>(d.values, d.text); }
+                else { d.values = push<string>(d.values, ""); }
+            }
+            jsonWs(d);
+            if (d.pos >= d.n) { return 0; }
+            let cb = byteAt(d.s, d.pos);
+            d.pos = d.pos + 1;
+            if (cb == 125) { return 8; }
+            if (cb != 44) { return 0; }
+        }
+    }
+    return 0;
+}
+
+func jsonDoc(s: string, maxDepth: int) -> JsonDoc {
+    return JsonDoc {
+        s: s, n: len(s), pos: 0, maxDepth: maxDepth, valid: false, keys: vecNew<string>(), kinds: vecNew<int>(),
+        values: vecNew<string>(), text: "", items: vecNew<string>(), itemsAllStrings: true
+    };
+}
+
+/// True when s is one well-formed JSON value nested at most maxDepth containers deep.
+pub func jsonValid(s: string, maxDepth: int) -> bool {
+    let d = jsonDoc(s, maxDepth);
+    if (jsonValue(d, 0, false) == 0) { return false; }
+    jsonWs(d);
+    return d.pos == d.n;
+}
+
+/// Parses a top-level JSON object and records its members (duplicates rejected).
+pub func jsonObject(s: string, maxDepth: int) -> JsonDoc {
+    let d = jsonDoc(s, maxDepth);
+    jsonWs(d);
+    if (d.pos >= d.n || byteAt(d.s, d.pos) != 123) { return d; }
+    if (jsonValue(d, 0, true) != 8) { return d; }
+    jsonWs(d);
+    d.valid = d.pos == d.n;
+    return d;
+}
+
+func jsonMember(d: JsonDoc, key: string) -> int {
+    let n = veclen<string>(d.keys);
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<string>(d.keys, i) == key) { return i; }
+    }
+    return 0 - 1;
+}
+
+/// Kind of member key (0 when absent).
+pub func jsonKind(d: JsonDoc, key: string) -> int {
+    let i = jsonMember(d, key);
+    if (i < 0) { return 0; }
+    return get<int>(d.kinds, i);
+}
+
+/// String / number text of member key ("" when absent).
+pub func jsonText(d: JsonDoc, key: string) -> string {
+    let i = jsonMember(d, key);
+    if (i < 0) { return ""; }
+    return get<string>(d.values, i);
+}
+
+// NumericDate (RFC 7519 2) as accepted here: non-negative integer seconds; fractions and exponents are rejected.
+func numericDate(raw: string) -> int {
+    let n = len(raw);
+    if (n == 0 || n > 18) { return 0 - 1; }
+    let mut i = 0;
+    let mut neg = false;
+    if (byteAt(raw, 0) == 45) { neg = true; i = 1; }
+    let mut v = 0;
+    let mut digits = 0;
+    while (i < n && isDigitByte(byteAt(raw, i))) {
+        v = v * 10 + byteAt(raw, i) - 48;
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if (digits == 0 || digits > 15) { return 0 - 1; }
+    if (i < n || neg) { return 0 - 1; }
+    return v;
+}
+
+// ---------------------------------------------------------------------------------------------
+// JWS (RFC 7515) compact serialization + JWT (RFC 7519) claims. Supported algorithm: HS256.
+// ---------------------------------------------------------------------------------------------
+
+/// Algorithms with a real signing + verification implementation in this runtime.
+pub func jwsSupportedAlgorithms() -> string { return "HS256"; }
+
+pub func jwtVerifier() -> JwtVerifier {
+    let mut allowed = vecNew<string>();
+    allowed = push<string>(allowed, "HS256");
+    return JwtVerifier {
+        kids: vecNew<string>(), algs: vecNew<string>(), secrets: vecNew<string>(), allowed: allowed,
+        issuerName: "", audience: "", leeway: 0, maxFutureIat: 0, requireExp: true, maxTokenBytes: 8192, error: ""
+    };
+}
+
+func jwtFail(v: JwtVerifier, msg: string) -> Result<int, JwtError> {
+    if (v.error == "") { v.error = msg; }
+    return err<int, JwtError>(JwtError::Config);
+}
+
+/// Adds a verification key. alg must be HS256; secret is the JWK "k" value (base64url, at least
+/// 32 bytes, RFC 7518 3.2). kid is the key identifier ("" only for a single-key set).
+pub func jwtAddKey(v: JwtVerifier, kid: string, alg: string, secretB64: string) -> Result<int, JwtError> {
+    if (alg != "HS256") { return jwtFail(v, "unsupported key algorithm " + alg); }
+    if (len(kid) > 128 || !validHeaderValue(kid)) { return jwtFail(v, "invalid kid"); }
+    if (vecHasStr(v.kids, kid)) { return jwtFail(v, "duplicate kid"); }
+    let b = base64UrlDecode(secretB64);
+    if (!b.valid) { return jwtFail(v, "key is not base64url"); }
+    if (veclen<int>(b.data) < 32) { return jwtFail(v, "HS256 key shorter than 32 bytes"); }
+    for (let mut i = 0; i < veclen<int>(b.data); i = i + 1) {
+        if (get<int>(b.data, i) == 0) { return jwtFail(v, "key bytes containing 0 are not supported"); }
+    }
+    v.kids = push<string>(v.kids, kid);
+    v.algs = push<string>(v.algs, alg);
+    v.secrets = push<string>(v.secrets, bytesText(b.data));
+    return ok<int, JwtError>(veclen<string>(v.kids));
+}
+
+/// Replaces the algorithm allowlist (comma-separated). Every entry must be supported.
+pub func jwtAllow(v: JwtVerifier, algs: string) -> Result<int, JwtError> {
+    let list = splitList(algs);
+    if (veclen<string>(list) == 0) { return jwtFail(v, "empty algorithm allowlist"); }
+    for (let mut i = 0; i < veclen<string>(list); i = i + 1) {
+        if (get<string>(list, i) != "HS256") { return jwtFail(v, "algorithm not supported: " + get<string>(list, i)); }
+    }
+    v.allowed = list;
+    return ok<int, JwtError>(0);
+}
+
+pub func jwtIssuer(v: JwtVerifier, iss: string) { v.issuerName = iss; }
+pub func jwtAudience(v: JwtVerifier, aud: string) { v.audience = aud; }
+pub func jwtRequireExp(v: JwtVerifier, required: bool) { v.requireExp = required; }
+
+/// Clock skew in seconds applied to exp, nbf and iat (0..300).
+pub func jwtLeeway(v: JwtVerifier, seconds: int) -> Result<int, JwtError> {
+    if (seconds < 0 || seconds > 300) { return jwtFail(v, "leeway out of range"); }
+    v.leeway = seconds;
+    return ok<int, JwtError>(0);
+}
+
+/// Largest accepted distance of iat into the future beyond the leeway (seconds, 0..86400).
+pub func jwtMaxFutureIat(v: JwtVerifier, seconds: int) -> Result<int, JwtError> {
+    if (seconds < 0 || seconds > 86400) { return jwtFail(v, "iat window out of range"); }
+    v.maxFutureIat = seconds;
+    return ok<int, JwtError>(0);
+}
+
+pub func jwtConfigError(v: JwtVerifier) -> string { return v.error; }
+
+pub func jwtErrorName(e: JwtError) -> string {
+    if (e == JwtError::Config) { return "Config"; }
+    if (e == JwtError::Malformed) { return "Malformed"; }
+    if (e == JwtError::BadEncoding) { return "BadEncoding"; }
+    if (e == JwtError::UnsupportedAlgorithm) { return "UnsupportedAlgorithm"; }
+    if (e == JwtError::UnsupportedHeader) { return "UnsupportedHeader"; }
+    if (e == JwtError::UnknownKey) { return "UnknownKey"; }
+    if (e == JwtError::KeyMismatch) { return "KeyMismatch"; }
+    if (e == JwtError::BadSignature) { return "BadSignature"; }
+    if (e == JwtError::Expired) { return "Expired"; }
+    if (e == JwtError::NotYetValid) { return "NotYetValid"; }
+    if (e == JwtError::IssuerMismatch) { return "IssuerMismatch"; }
+    if (e == JwtError::AudienceMismatch) { return "AudienceMismatch"; }
+    if (e == JwtError::IssuedInFuture) { return "IssuedInFuture"; }
+    if (e == JwtError::MissingClaim) { return "MissingClaim"; }
+    return "InvalidClaim";
+}
+
+func keyIndex(v: JwtVerifier, kid: string, hasKid: bool) -> int {
+    let n = veclen<string>(v.kids);
+    if (!hasKid) {
+        if (n == 1) { return 0; }
+        return 0 - 1;
+    }
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<string>(v.kids, i) == kid) { return i; }
+    }
+    return 0 - 1;
+}
+
+func hs256(secret: string, input: string) -> string { return rtcryptohmacsha256str(secret, input); }
+
+func jwtErr(e: JwtError) -> Result<JwtClaims, JwtError> { return err<JwtClaims, JwtError>(e); }
+
+func emptyClaims() -> JwtClaims {
+    return JwtClaims {
+        alg: "", kid: "", sub: "", iss: "", aud: vecNew<string>(), jti: "", exp: 0 - 1, nbf: 0 - 1, iat: 0 - 1,
+        scope: "", roles: vecNew<string>(), names: vecNew<string>(), values: vecNew<string>()
+    };
+}
+
+func decodeSegment(seg: string) -> Bytes {
+    let b = base64UrlDecode(seg);
+    if (!b.valid) { return b; }
+    for (let mut i = 0; i < veclen<int>(b.data); i = i + 1) {
+        if (get<int>(b.data, i) == 0) { return Bytes { valid: false, data: b.data }; }
+    }
+    return b;
+}
+
+func splitLines(s: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    if (s == "") { return out; }
+    let n = len(s);
+    let mut start = 0;
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || byteAt(s, i) == 10) {
+            out = push<string>(out, slice(s, start, i));
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+/// Verifies a compact JWS and validates its JWT claims at time now (seconds since the epoch).
+/// The algorithm comes from the verifier's allowlist and key set, never from the token alone.
+pub func jwtVerify(v: JwtVerifier, token: string, now: int) -> Result<JwtClaims, JwtError> {
+    if (v.error != "" || veclen<string>(v.kids) == 0) { return jwtErr(JwtError::Config); }
+    let n = len(token);
+    if (n == 0 || n > v.maxTokenBytes) { return jwtErr(JwtError::Malformed); }
+    let mut d1 = 0 - 1;
+    let mut d2 = 0 - 1;
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(token, i);
+        if (ch == 46) {
+            if (d1 < 0) { d1 = i; } else if (d2 < 0) { d2 = i; } else { return jwtErr(JwtError::Malformed); }
+        } else if (b64Value(ch) < 0) {
+            return jwtErr(JwtError::BadEncoding);
+        }
+    }
+    if (d1 <= 0 || d2 <= d1 + 1 || d2 >= n - 1) { return jwtErr(JwtError::Malformed); }
+    let hb = decodeSegment(slice(token, 0, d1));
+    if (!hb.valid) { return jwtErr(JwtError::BadEncoding); }
+    let h = jsonObject(bytesText(hb.data), 4);
+    if (!h.valid) { return jwtErr(JwtError::Malformed); }
+    if (jsonKind(h, "alg") != 1) { return jwtErr(JwtError::Malformed); }
+    let alg = jsonText(h, "alg");
+    // "none" and anything outside the allowlist are refused before any key is consulted
+    if (lower(alg) == "none" || !vecHasStr(v.allowed, alg)) { return jwtErr(JwtError::UnsupportedAlgorithm); }
+    if (jsonKind(h, "crit") != 0 || jsonKind(h, "jku") != 0 || jsonKind(h, "jwk") != 0 || jsonKind(h, "x5u") != 0 || jsonKind(h, "x5c") != 0) {
+        return jwtErr(JwtError::UnsupportedHeader);
+    }
+    let tk = jsonKind(h, "typ");
+    if (tk != 0) {
+        let typ = lower(jsonText(h, "typ"));
+        if (tk != 1 || (typ != "jwt" && typ != "at+jwt" && typ != "application/jwt")) { return jwtErr(JwtError::UnsupportedHeader); }
+    }
+    let kk = jsonKind(h, "kid");
+    if (kk != 0 && kk != 1) { return jwtErr(JwtError::Malformed); }
+    let kid = jsonText(h, "kid");
+    let ki = keyIndex(v, kid, kk == 1);
+    if (ki < 0) { return jwtErr(JwtError::UnknownKey); }
+    // The key's own algorithm must be the token's: no key is ever used with another algorithm
+    if (get<string>(v.algs, ki) != alg) { return jwtErr(JwtError::KeyMismatch); }
+    let sb = base64UrlDecode(slice(token, d2 + 1, n));
+    if (!sb.valid) { return jwtErr(JwtError::BadEncoding); }
+    if (veclen<int>(sb.data) != 32) { return jwtErr(JwtError::BadSignature); }
+    let expected = hs256(get<string>(v.secrets, ki), slice(token, 0, d2));
+    if (rtcryptoctequal(expected, bytesHex(sb.data)) != 1) { return jwtErr(JwtError::BadSignature); }
+
+    // Signature is valid; the claims are still untrusted until each one is checked
+    let pb = decodeSegment(slice(token, d1 + 1, d2));
+    if (!pb.valid) { return jwtErr(JwtError::BadEncoding); }
+    let p = jsonObject(bytesText(pb.data), 16);
+    if (!p.valid) { return jwtErr(JwtError::Malformed); }
+    let cl = emptyClaims();
+    cl.alg = alg;
+    cl.kid = kid;
+    let ek = jsonKind(p, "exp");
+    if (ek == 0 && v.requireExp) { return jwtErr(JwtError::MissingClaim); }
+    if (ek != 0) {
+        if (ek != 2) { return jwtErr(JwtError::InvalidClaim); }
+        cl.exp = numericDate(jsonText(p, "exp"));
+        if (cl.exp < 0) { return jwtErr(JwtError::InvalidClaim); }
+        if (now - v.leeway >= cl.exp) { return jwtErr(JwtError::Expired); }
+    }
+    let nk = jsonKind(p, "nbf");
+    if (nk != 0) {
+        if (nk != 2) { return jwtErr(JwtError::InvalidClaim); }
+        cl.nbf = numericDate(jsonText(p, "nbf"));
+        if (cl.nbf < 0) { return jwtErr(JwtError::InvalidClaim); }
+        if (now + v.leeway < cl.nbf) { return jwtErr(JwtError::NotYetValid); }
+    }
+    let ik = jsonKind(p, "iat");
+    if (ik != 0) {
+        if (ik != 2) { return jwtErr(JwtError::InvalidClaim); }
+        cl.iat = numericDate(jsonText(p, "iat"));
+        if (cl.iat < 0) { return jwtErr(JwtError::InvalidClaim); }
+        if (cl.iat > now + v.leeway + v.maxFutureIat) { return jwtErr(JwtError::IssuedInFuture); }
+    }
+    let isk = jsonKind(p, "iss");
+    if (isk != 0 && isk != 1) { return jwtErr(JwtError::InvalidClaim); }
+    cl.iss = jsonText(p, "iss");
+    if (v.issuerName != "" && (isk != 1 || cl.iss != v.issuerName)) { return jwtErr(JwtError::IssuerMismatch); }
+    let ak = jsonKind(p, "aud");
+    if (ak != 0 && ak != 1 && ak != 6) { return jwtErr(JwtError::InvalidClaim); }
+    if (ak == 1) { cl.aud = push<string>(cl.aud, jsonText(p, "aud")); }
+    if (ak == 6) { cl.aud = splitLines(jsonText(p, "aud")); }
+    if (v.audience != "" && !vecHasStr(cl.aud, v.audience)) { return jwtErr(JwtError::AudienceMismatch); }
+    let sk = jsonKind(p, "sub");
+    let jk = jsonKind(p, "jti");
+    if ((sk != 0 && sk != 1) || (jk != 0 && jk != 1)) { return jwtErr(JwtError::InvalidClaim); }
+    cl.sub = jsonText(p, "sub");
+    cl.jti = jsonText(p, "jti");
+    let sck = jsonKind(p, "scope");
+    if (sck != 0 && sck != 1) { return jwtErr(JwtError::InvalidClaim); }
+    cl.scope = jsonText(p, "scope");
+    let rk = jsonKind(p, "roles");
+    if (rk != 0 && rk != 1 && rk != 6) { return jwtErr(JwtError::InvalidClaim); }
+    if (rk == 1) { cl.roles = push<string>(cl.roles, jsonText(p, "roles")); }
+    if (rk == 6) { cl.roles = splitLines(jsonText(p, "roles")); }
+    for (let mut i = 0; i < veclen<string>(p.keys); i = i + 1) {
+        if (get<int>(p.kinds, i) == 1) {
+            cl.names = push<string>(cl.names, get<string>(p.keys, i));
+            cl.values = push<string>(cl.values, get<string>(p.values, i));
+        }
+    }
+    return ok<JwtClaims, JwtError>(cl);
+}
+
+/// Signs claimsJson (a JSON object) as a compact HS256 JWS with the key kid of the verifier's set.
+pub func jwtSign(v: JwtVerifier, kid: string, claimsJson: string) -> Result<string, JwtError> {
+    if (v.error != "") { return err<string, JwtError>(JwtError::Config); }
+    let ki = keyIndex(v, kid, kid != "");
+    if (ki < 0) { return err<string, JwtError>(JwtError::UnknownKey); }
+    if (!jsonObject(claimsJson, 16).valid) { return err<string, JwtError>(JwtError::Malformed); }
+    let mut header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"";
+    if (kid != "") { header = header + ",\"kid\":\"" + jsonEscape(kid) + "\""; }
+    header = header + "}";
+    let input = base64UrlEncode(header) + "." + base64UrlEncode(claimsJson);
+    return ok<string, JwtError>(input + "." + base64UrlEncodeBytes(hexBytes(hs256(get<string>(v.secrets, ki), input))));
+}
+
+/// Signs with an explicit protected header (tests and interop); the header must be a JSON object.
+pub func jwsSignRaw(v: JwtVerifier, kid: string, headerJson: string, payloadJson: string) -> Result<string, JwtError> {
+    let ki = keyIndex(v, kid, kid != "");
+    if (ki < 0) { return err<string, JwtError>(JwtError::UnknownKey); }
+    let input = base64UrlEncode(headerJson) + "." + base64UrlEncode(payloadJson);
+    return ok<string, JwtError>(input + "." + base64UrlEncodeBytes(hexBytes(hs256(get<string>(v.secrets, ki), input))));
+}
+
+/// Default clock: seconds since the Unix epoch. Replace with setClock for deterministic tests.
+pub func systemClock(unused: int) -> int { return rttimenowms() / 1000; }
+
+// ---------------------------------------------------------------------------------------------
+// Server configuration
+// ---------------------------------------------------------------------------------------------
+
+pub func webServer() -> WebServer {
+    let mut methods = vecNew<string>();
+    methods = push<string>(methods, "GET");
+    methods = push<string>(methods, "HEAD");
+    methods = push<string>(methods, "POST");
+    let srv = WebServer {
+        routes: vecNew<Route>(), middleware: vecNew<int>(), errorFn: 0, clockFn: 0, cfgError: "",
+        maxBody: 1048576, maxHeaders: 100, maxHeaderBytes: 16384, maxUri: 8192, maxParams: 16, maxJsonDepth: 32,
+        maxConcurrent: 10000,
+        headerTimeout: 10000, idleTimeout: 60000, readTimeout: 30000, writeTimeout: 30000, requestTimeout: 30000,
+        shutdownTimeout: 10000,
+        corsEnabled: false, corsOrigins: vecNew<string>(), corsAnyOrigin: false, corsCredentials: false,
+        corsMethods: methods, corsHeaders: vecNew<string>(), corsExpose: "", corsMaxAge: 0 - 1,
+        rlLimit: 0, rlWindowMs: 0, rlIdentity: 0, rlHeader: "", rlCustomFn: 0, rlCapacity: 0, rlLock: rtmutexcreate(),
+        rlHash: vecNew<int>(), rlStart: vecNew<int>(), rlCount: vecNew<int>(),
+        jwt: jwtVerifier(), authEnabled: false,
+        secNosniff: true, secFrame: "DENY", secReferrer: "no-referrer", secCsp: "", hstsMaxAge: 0,
+        hstsSubdomains: false, hstsPreload: false,
+        listener: 0, port: 0, lock: rtmutexcreate(), draining: rtatomicintcreate(0), connSocks: vecNew<int>(),
+        connHandles: vecNew<int>(), connBusy: vecNew<int>(), tasks: vecNew<int>(), taskCursor: 0,
+        idPrefix: slice(rtcryptosha256str(str(nowMicros()) + ":" + str(rtrandomint())), 0, 12),
+        idCounter: rtatomicintcreate(0),
+        mRequests: rtatomicintcreate(0), mActive: rtatomicintcreate(0), m2xx: rtatomicintcreate(0),
+        m3xx: rtatomicintcreate(0), m4xx: rtatomicintcreate(0), m5xx: rtatomicintcreate(0),
+        mRateLimited: rtatomicintcreate(0), mAuthFailures: rtatomicintcreate(0), mLatencyTotal: rtatomicintcreate(0),
+        mLatencyMax: rtatomicintcreate(0), mTimeouts: rtatomicintcreate(0), mConnections: rtatomicintcreate(0)
+    };
+    return srv;
+}
+
+func configFail(srv: WebServer, msg: string) -> Result<int, WebError> {
+    if (srv.cfgError == "") { srv.cfgError = msg; }
+    return err<int, WebError>(WebError::InvalidConfig);
+}
+
+/// First configuration error recorded by a setter ("" when the configuration is valid).
+pub func configError(srv: WebServer) -> string { return srv.cfgError; }
+
+/// Request limits. Every value must be positive; they are enforced before any body allocation.
+pub func setLimits(srv: WebServer, maxBody: int, maxHeaders: int, maxHeaderBytes: int, maxUri: int) -> Result<int, WebError> {
+    if (maxBody < 0 || maxBody > 1073741824) { return configFail(srv, "maxBody out of range"); }
+    if (maxHeaders < 1 || maxHeaders > 10000) { return configFail(srv, "maxHeaders out of range"); }
+    if (maxHeaderBytes < 256 || maxHeaderBytes > 1048576) { return configFail(srv, "maxHeaderBytes out of range"); }
+    if (maxUri < 16 || maxUri > 1048576) { return configFail(srv, "maxUri out of range"); }
+    srv.maxBody = maxBody;
+    srv.maxHeaders = maxHeaders;
+    srv.maxHeaderBytes = maxHeaderBytes;
+    srv.maxUri = maxUri;
+    return ok<int, WebError>(0);
+}
+
+/// Route-parameter count per pattern, JSON nesting depth, concurrently executing requests.
+pub func setParseLimits(srv: WebServer, maxParams: int, maxJsonDepth: int, maxConcurrent: int) -> Result<int, WebError> {
+    if (maxParams < 0 || maxParams > 64) { return configFail(srv, "maxParams out of range"); }
+    if (maxJsonDepth < 1 || maxJsonDepth > 512) { return configFail(srv, "maxJsonDepth out of range"); }
+    if (maxConcurrent < 1 || maxConcurrent > 1000000) { return configFail(srv, "maxConcurrent out of range"); }
+    srv.maxParams = maxParams;
+    srv.maxJsonDepth = maxJsonDepth;
+    srv.maxConcurrent = maxConcurrent;
+    return ok<int, WebError>(0);
+}
+
+/// Timeouts in milliseconds. request bounds the handler (0 disables); it is enforced by cancelling
+/// the handler task. shutdown bounds shutdown().
+pub func setTimeouts(srv: WebServer, header: int, idle: int, read: int, write: int, request: int, shutdown: int) -> Result<int, WebError> {
+    if (header < 1 || idle < 1 || read < 1 || write < 1) { return configFail(srv, "transport timeouts must be positive"); }
+    if (request < 0 || shutdown < 0) { return configFail(srv, "negative timeout"); }
+    srv.headerTimeout = header;
+    srv.idleTimeout = idle;
+    srv.readTimeout = read;
+    srv.writeTimeout = write;
+    srv.requestTimeout = request;
+    srv.shutdownTimeout = shutdown;
+    return ok<int, WebError>(0);
+}
+
+/// Clock for JWT claim validation: func f(unused: int) -> int returning seconds since the epoch
+/// (0 restores the system clock).
+pub func setClock(srv: WebServer, clockFn: int) { srv.clockFn = clockFn; }
+
+/// Custom error renderer: func f(ctx: WebCtx) -> int, called with errorStatus(c) / errorMessage(c).
+pub func onError(srv: WebServer, errorFn: int) { srv.errorFn = errorFn; }
+
+/// Appends a middleware func f(ctx: WebCtx) -> int. First registered runs first inbound and last
+/// outbound (onion model); a middleware continues the chain with next(c).
+pub func useMiddleware(srv: WebServer, mw: int) -> Result<int, WebError> {
+    if (mw == 0) { return err<int, WebError>(WebError::InvalidArgument); }
+    srv.middleware = push<int>(srv.middleware, mw);
+    return ok<int, WebError>(veclen<int>(srv.middleware));
+}
+
+// ---- CORS configuration --------------------------------------------------------------------
+
+func validOrigin(o: string) -> bool {
+    let n = len(o);
+    if (n < 8 || n > 512 || o != lower(o)) { return false; }
+    let mut rest = "";
+    if (startswith(o, "https://")) { rest = slice(o, 8, n); }
+    else if (startswith(o, "http://")) { rest = slice(o, 7, n); }
+    else { return false; }
+    if (rest == "") { return false; }
+    for (let mut i = 0; i < len(rest); i = i + 1) {
+        let ch = byteAt(rest, i);
+        let okc = (ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57) || ch == 45 || ch == 46 || ch == 58 || ch == 91 || ch == 93;
+        if (!okc) { return false; }
+    }
+    return true;
+}
+
+/// Allows one exact origin ("https://app.example.com", lowercase, no path). Invalid origins fail closed.
+pub func corsAllowOrigin(srv: WebServer, origin: string) -> Result<int, WebError> {
+    if (!validOrigin(origin)) { return configFail(srv, "invalid CORS origin: " + origin); }
+    srv.corsEnabled = true;
+    if (!vecHasStr(srv.corsOrigins, origin)) { srv.corsOrigins = push<string>(srv.corsOrigins, origin); }
+    return ok<int, WebError>(0);
+}
+
+/// Allows every origin with "Access-Control-Allow-Origin: *" (never combined with credentials).
+pub func corsAllowAnyOrigin(srv: WebServer) -> Result<int, WebError> {
+    srv.corsEnabled = true;
+    srv.corsAnyOrigin = true;
+    return ok<int, WebError>(0);
+}
+
+pub func corsAllowCredentials(srv: WebServer, allow: bool) { srv.corsCredentials = allow; }
+
+/// Comma-separated methods allowed for cross-origin requests (preflight).
+pub func corsAllowMethods(srv: WebServer, methods: string) -> Result<int, WebError> {
+    let list = splitList(methods);
+    for (let mut i = 0; i < veclen<string>(list); i = i + 1) {
+        if (!validMethod(get<string>(list, i))) { return configFail(srv, "invalid CORS method"); }
+    }
+    srv.corsMethods = list;
+    return ok<int, WebError>(0);
+}
+
+/// Comma-separated request headers allowed in cross-origin requests (compared case-insensitively).
+pub func corsAllowHeaders(srv: WebServer, headers: string) -> Result<int, WebError> {
+    let list = splitList(lower(headers));
+    for (let mut i = 0; i < veclen<string>(list); i = i + 1) {
+        if (!validHeaderName(get<string>(list, i))) { return configFail(srv, "invalid CORS header"); }
+    }
+    srv.corsHeaders = list;
+    return ok<int, WebError>(0);
+}
+
+pub func corsExposeHeaders(srv: WebServer, headers: string) -> Result<int, WebError> {
+    let list = splitList(headers);
+    for (let mut i = 0; i < veclen<string>(list); i = i + 1) {
+        if (!validHeaderName(get<string>(list, i))) { return configFail(srv, "invalid CORS expose header"); }
+    }
+    srv.corsExpose = joinList(list, ", ");
+    return ok<int, WebError>(0);
+}
+
+pub func corsMaxAge(srv: WebServer, seconds: int) -> Result<int, WebError> {
+    if (seconds < 0 || seconds > 86400) { return configFail(srv, "CORS max-age out of range"); }
+    srv.corsMaxAge = seconds;
+    return ok<int, WebError>(0);
+}
+
+// ---- Rate limiting configuration -------------------------------------------------------------
+
+/// Fixed-window limiter: at most limit requests per windowMs per identity. capacity bounds the
+/// number of tracked identities; when every slot is live, new identities are refused (429).
+/// identity: identityIp(), identitySubject() (falls back to the IP when unauthenticated),
+/// identityHeader() (headerName, e.g. an API key) or identityCustom() (customFn sets setRateKey).
+pub func rateLimit(srv: WebServer, limit: int, windowMs: int, identity: int, headerName: string, customFn: int, maxIdentities: int) -> Result<int, WebError> {
+    if (limit < 1 || limit > 1000000000) { return configFail(srv, "rate limit out of range"); }
+    if (windowMs < 1 || windowMs > 86400000) { return configFail(srv, "rate window out of range"); }
+    if (maxIdentities < 1 || maxIdentities > 10000000) { return configFail(srv, "rate capacity out of range"); }
+    if (identity < 0 || identity > 3) { return configFail(srv, "unknown rate-limit identity"); }
+    if (identity == 2 && !validHeaderName(headerName)) { return configFail(srv, "rate-limit header name invalid"); }
+    if (identity == 3 && customFn == 0) { return configFail(srv, "custom rate-limit identity without a function"); }
+    srv.rlLimit = limit;
+    srv.rlWindowMs = windowMs;
+    srv.rlIdentity = identity;
+    srv.rlHeader = lower(headerName);
+    srv.rlCustomFn = customFn;
+    srv.rlCapacity = maxIdentities;
+    // The identity table is allocated once here: requests never allocate limiter state, so it
+    // outlives the per-request heaps and its memory is bounded by maxIdentities.
+    let mut hs = vecNew<int>();
+    let mut st = vecNew<int>();
+    let mut ct = vecNew<int>();
+    for (let mut i = 0; i < maxIdentities; i = i + 1) {
+        hs = push<int>(hs, 0);
+        st = push<int>(st, 0);
+        ct = push<int>(ct, 0);
+    }
+    srv.rlHash = hs;
+    srv.rlStart = st;
+    srv.rlCount = ct;
+    return ok<int, WebError>(0);
+}
+
+// ---- Authentication configuration ------------------------------------------------------------
+
+func copyStrings(v: Vec<string>) -> Vec<string> {
+    let mut out = vecNew<string>();
+    for (let mut i = 0; i < veclen<string>(v); i = i + 1) { out = push<string>(out, get<string>(v, i)); }
+    return out;
+}
+
+func copyVerifier(v: JwtVerifier) -> JwtVerifier {
+    return JwtVerifier {
+        kids: copyStrings(v.kids), algs: copyStrings(v.algs), secrets: copyStrings(v.secrets), allowed: copyStrings(v.allowed),
+        issuerName: v.issuerName, audience: v.audience, leeway: v.leeway, maxFutureIat: v.maxFutureIat,
+        requireExp: v.requireExp, maxTokenBytes: v.maxTokenBytes, error: v.error
+    };
+}
+
+/// Enables bearer-token authentication with v (keys and claim policy); v must be valid.
+pub func useJwt(srv: WebServer, v: JwtVerifier) -> Result<int, WebError> {
+    if (v.error != "") { return configFail(srv, "JWT configuration: " + v.error); }
+    if (veclen<string>(v.kids) == 0) { return configFail(srv, "JWT configuration has no key"); }
+    // The server keeps its own copy: the caller's verifier is freed when its scope ends
+    srv.jwt = copyVerifier(v);
+    srv.authEnabled = true;
+    return ok<int, WebError>(0);
+}
+
+// ---- Security headers configuration ---------------------------------------------------------
+
+/// X-Frame-Options ("DENY", "SAMEORIGIN" or "" to omit), Referrer-Policy ("" to omit) and
+/// Content-Security-Policy ("" to omit; deployment specific, so empty by default).
+pub func securityPolicy(srv: WebServer, frame: string, referrer: string, csp: string) -> Result<int, WebError> {
+    if (frame != "" && frame != "DENY" && frame != "SAMEORIGIN") { return configFail(srv, "invalid X-Frame-Options"); }
+    if (!validHeaderValue(referrer) || !validHeaderValue(csp)) { return configFail(srv, "invalid security header value"); }
+    srv.secFrame = frame;
+    srv.secReferrer = referrer;
+    srv.secCsp = csp;
+    return ok<int, WebError>(0);
+}
+
+/// Strict-Transport-Security. Off unless configured: only for deployments served over HTTPS.
+pub func hsts(srv: WebServer, maxAge: int, includeSubdomains: bool, preload: bool) -> Result<int, WebError> {
+    if (maxAge < 0 || maxAge > 63072000) { return configFail(srv, "HSTS max-age out of range"); }
+    if (preload && (maxAge < 31536000 || !includeSubdomains)) { return configFail(srv, "HSTS preload needs max-age >= 1 year and includeSubDomains"); }
+    srv.hstsMaxAge = maxAge;
+    srv.hstsSubdomains = includeSubdomains;
+    srv.hstsPreload = preload;
+    return ok<int, WebError>(0);
+}
+
+/// Checks the whole configuration; listen refuses to start on any error (fail closed).
+pub func validateConfig(srv: WebServer) -> Result<int, WebError> {
+    if (srv.cfgError != "") { return err<int, WebError>(WebError::InvalidConfig); }
+    if (srv.corsAnyOrigin && srv.corsCredentials) {
+        return configFail(srv, "CORS: a wildcard origin cannot be combined with credentials");
+    }
+    if (srv.corsEnabled && !srv.corsAnyOrigin && veclen<string>(srv.corsOrigins) == 0) {
+        return configFail(srv, "CORS enabled without origins");
+    }
+    if (srv.rlIdentity == 1 && !srv.authEnabled && srv.rlLimit > 0) {
+        return configFail(srv, "subject rate-limit identity requires authentication");
+    }
+    if (srv.authEnabled && srv.jwt.error != "") { return configFail(srv, "JWT configuration: " + srv.jwt.error); }
+    for (let mut i = 0; i < veclen<Route>(srv.routes); i = i + 1) {
+        let r: Route = get<Route>(srv.routes, i);
+        if ((r.auth || r.scope != "" || r.role != "") && !srv.authEnabled) {
+            return configFail(srv, "route " + r.pattern + " requires authentication but none is configured");
+        }
+    }
+    return ok<int, WebError>(0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------------------------
+
+pub func validMethod(m: string) -> bool {
+    return m == "GET" || m == "POST" || m == "PUT" || m == "PATCH" || m == "DELETE" || m == "HEAD" ||
+        m == "OPTIONS" || m == "CONNECT";
+}
+
+func validParamName(name: string) -> bool {
+    let n = len(name);
+    if (n == 0 || n > 64) { return false; }
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(name, i);
+        if (!((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 95)) { return false; }
+    }
+    return true;
+}
+
+func splitPath(p: string) -> Vec<string> {
+    let mut segs = vecNew<string>();
+    let n = len(p);
+    if (n <= 1) { return segs; }
+    let mut start = 1;
+    for (let mut i = 1; i <= n; i = i + 1) {
+        if (i == n || byteAt(p, i) == 47) {
+            segs = push<string>(segs, slice(p, start, i));
+            start = i + 1;
+        }
+    }
+    return segs;
+}
+
+/// Registers handler (func f(ctx: WebCtx) -> int) for method + pattern. Pattern segments are static
+/// text, ":name" parameters or a final "*name" wildcard. Precedence: static > parameter > wildcard,
+/// segment by segment. A second route with the same method and shape is refused (DuplicateRoute).
+pub func route(srv: WebServer, method: string, pattern: string, handler: int) -> Result<int, WebError> {
+    if (!validMethod(method) || handler == 0) { return err<int, WebError>(WebError::InvalidArgument); }
+    let n = len(pattern);
+    if (n == 0 || n > 1024 || byteAt(pattern, 0) != 47 || find(pattern, "?") >= 0 || find(pattern, "#") >= 0) {
+        return err<int, WebError>(WebError::InvalidRoute);
+    }
+    let segs = splitPath(pattern);
+    let mut kinds = vecNew<int>();
+    let mut names = vecNew<string>();
+    let mut canon = "";
+    let count = veclen<string>(segs);
+    for (let mut i = 0; i < count; i = i + 1) {
+        let s = get<string>(segs, i);
+        if (s == "" || s == "." || s == "..") { return err<int, WebError>(WebError::InvalidRoute); }
+        let first = byteAt(s, 0);
+        if (first == 58 || first == 42) {
+            let name = slice(s, 1, len(s));
+            if (!validParamName(name) || vecHasStr(names, name)) { return err<int, WebError>(WebError::InvalidRoute); }
+            names = push<string>(names, name);
+            if (first == 42) {
+                if (i != count - 1) { return err<int, WebError>(WebError::InvalidRoute); }
+                kinds = push<int>(kinds, 2);
+                canon = canon + "/*";
+            } else {
+                kinds = push<int>(kinds, 1);
+                canon = canon + "/:";
+            }
+        } else {
+            if (find(s, ":") >= 0 || find(s, "*") >= 0) { return err<int, WebError>(WebError::InvalidRoute); }
+            kinds = push<int>(kinds, 0);
+            canon = canon + "/" + s;
+        }
+    }
+    if (canon == "") { canon = "/"; }
+    if (veclen<string>(names) > srv.maxParams) { return err<int, WebError>(WebError::InvalidRoute); }
+    for (let mut i = 0; i < veclen<Route>(srv.routes); i = i + 1) {
+        let r: Route = get<Route>(srv.routes, i);
+        if (r.method == method && r.canon == canon) { return err<int, WebError>(WebError::DuplicateRoute); }
+    }
+    srv.routes = push<Route>(srv.routes, Route {
+        method: method, pattern: pattern, canon: canon, segs: segs, kinds: kinds, handler: handler,
+        auth: false, scope: "", role: "", policy: 0
+    });
+    return ok<int, WebError>(veclen<Route>(srv.routes) - 1);
+}
+
+func routeAt(srv: WebServer, id: int) -> Result<Route, WebError> {
+    if (id < 0 || id >= veclen<Route>(srv.routes)) { return err<Route, WebError>(WebError::InvalidArgument); }
+    return ok<Route, WebError>(get<Route>(srv.routes, id));
+}
+
+/// The route needs an authenticated identity (401 otherwise).
+pub func requireAuth(srv: WebServer, routeId: int) -> Result<int, WebError> {
+    let r = routeAt(srv, routeId);
+    if (!r.is_ok) { return err<int, WebError>(WebError::InvalidArgument); }
+    let x: Route = r.value;
+    x.auth = true;
+    return ok<int, WebError>(0);
+}
+
+/// The route needs an identity whose "scope" claim contains scope (403 otherwise).
+pub func requireScope(srv: WebServer, routeId: int, scope: string) -> Result<int, WebError> {
+    let r = routeAt(srv, routeId);
+    if (!r.is_ok || scope == "" || find(scope, " ") >= 0) { return err<int, WebError>(WebError::InvalidArgument); }
+    let x: Route = r.value;
+    x.auth = true;
+    x.scope = scope;
+    return ok<int, WebError>(0);
+}
+
+/// The route needs an identity whose "roles" claim contains role (403 otherwise).
+pub func requireRole(srv: WebServer, routeId: int, role: string) -> Result<int, WebError> {
+    let r = routeAt(srv, routeId);
+    if (!r.is_ok || role == "") { return err<int, WebError>(WebError::InvalidArgument); }
+    let x: Route = r.value;
+    x.auth = true;
+    x.role = role;
+    return ok<int, WebError>(0);
+}
+
+/// Custom authorization policy func p(ctx: WebCtx) -> int: 1 allows, anything else answers 403.
+pub func requirePolicy(srv: WebServer, routeId: int, policy: int) -> Result<int, WebError> {
+    let r = routeAt(srv, routeId);
+    if (!r.is_ok || policy == 0) { return err<int, WebError>(WebError::InvalidArgument); }
+    let x: Route = r.value;
+    x.policy = policy;
+    return ok<int, WebError>(0);
+}
+
+func routeMatches(r: Route, segs: Vec<string>) -> bool {
+    let rn = veclen<string>(r.segs);
+    let pn = veclen<string>(segs);
+    let wild = rn > 0 && get<int>(r.kinds, rn - 1) == 2;
+    if (wild) {
+        if (pn < rn) { return false; }
+    } else {
+        if (pn != rn) { return false; }
+    }
+    for (let mut i = 0; i < rn; i = i + 1) {
+        let k = get<int>(r.kinds, i);
+        let s = get<string>(segs, i);
+        if (k == 0 && s != get<string>(r.segs, i)) { return false; }
+        if (k != 0 && s == "") { return false; }
+    }
+    return true;
+}
+
+/// True when route a takes precedence over route b (static < parameter < wildcard, per segment).
+func routeBetter(a: Route, b: Route) -> bool {
+    let an = veclen<int>(a.kinds);
+    let bn = veclen<int>(b.kinds);
+    let mut i = 0;
+    while (i < an && i < bn) {
+        let ka = get<int>(a.kinds, i);
+        let kb = get<int>(b.kinds, i);
+        if (ka != kb) { return ka < kb; }
+        i = i + 1;
+    }
+    return an > bn;
+}
+
+/// Resolves the route for c; sets c.routeIndex, or c.routeStatus 404/405 (with c.allow).
+func resolveRoute(ctx: WebCtx) {
+    let srv = ctx.srv;
+    let segs = splitPath(ctx.path);
+    let mut best = 0 - 1;
+    let mut bestGet = 0 - 1;
+    let mut allow = vecNew<string>();
+    let n = veclen<Route>(srv.routes);
+    for (let mut i = 0; i < n; i = i + 1) {
+        let r: Route = get<Route>(srv.routes, i);
+        if (routeMatches(r, segs)) {
+            if (!vecHasStr(allow, r.method)) { allow = push<string>(allow, r.method); }
+            if (r.method == "GET" && !vecHasStr(allow, "HEAD")) { allow = push<string>(allow, "HEAD"); }
+            if (r.method == ctx.method) {
+                if (best < 0 || routeBetter(r, get<Route>(srv.routes, best))) { best = i; }
+            }
+            if (r.method == "GET") {
+                if (bestGet < 0 || routeBetter(r, get<Route>(srv.routes, bestGet))) { bestGet = i; }
+            }
+        }
+    }
+    // HEAD is served by the GET route when none is registered; the transport drops the body
+    if (best < 0 && ctx.method == "HEAD") { best = bestGet; }
+    if (best < 0) {
+        if (veclen<string>(allow) == 0) { ctx.routeStatus = 404; } else { ctx.routeStatus = 405; ctx.allow = joinList(allow, ", "); }
+        return;
+    }
+    ctx.routeIndex = best;
+    let r: Route = get<Route>(srv.routes, best);
+    let rn = veclen<string>(r.segs);
+    for (let mut i = 0; i < rn; i = i + 1) {
+        let k = get<int>(r.kinds, i);
+        if (k != 0) {
+            let mut raw = get<string>(segs, i);
+            if (k == 2) {
+                for (let mut j = i + 1; j < veclen<string>(segs); j = j + 1) { raw = raw + "/" + get<string>(segs, j); }
+            }
+            let dv = percentDecode(raw, false);
+            if (!dv.is_ok) { ctx.routeStatus = 400; ctx.routeIndex = 0 - 1; return; }
+            let pn = get<string>(r.segs, i);
+            ctx.paramNames = push<string>(ctx.paramNames, slice(pn, 1, len(pn)));
+            ctx.paramValues = push<string>(ctx.paramValues, dv.value);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Request access
+// ---------------------------------------------------------------------------------------------
+
+pub func reqMethod(ctx: WebCtx) -> string { return ctx.method; }
+pub func reqPath(ctx: WebCtx) -> string { return ctx.path; }
+pub func reqQuery(ctx: WebCtx) -> string { return ctx.query; }
+pub func reqHost(ctx: WebCtx) -> string { return rtaiohttptext(ctx.sh, 4); }
+pub func reqScheme(ctx: WebCtx) -> string { return rtaiohttptext(ctx.sh, 5); }
+pub func reqProtocol(ctx: WebCtx) -> string { return rtaiohttptext(ctx.sh, 7); }
+pub func reqHeader(ctx: WebCtx, name: string) -> string { return rtaiohttpheader(ctx.sh, name, 0); }
+pub func reqHeaderCount(ctx: WebCtx, name: string) -> int { return rtaiohttpheadercount(ctx.sh, name); }
+pub func reqStream(ctx: WebCtx) -> HttpStream { return HttpStream { handle: ctx.sh }; }
+pub func requestId(ctx: WebCtx) -> string { return ctx.rid; }
+pub func clientIp(ctx: WebCtx) -> string { return ctx.peer; }
+pub func server(ctx: WebCtx) -> WebServer { return ctx.srv; }
+
+/// Decoded route parameter ("" when the route has no such parameter).
+pub func param(ctx: WebCtx, name: string) -> string {
+    for (let mut i = 0; i < veclen<string>(ctx.paramNames); i = i + 1) {
+        if (get<string>(ctx.paramNames, i) == name) { return get<string>(ctx.paramValues, i); }
+    }
+    return "";
+}
+
+/// Decoded query parameter (first occurrence; "" when absent or malformed).
+pub func queryParam(ctx: WebCtx, name: string) -> string {
+    let q = ctx.query;
+    let n = len(q);
+    let mut start = 0;
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || byteAt(q, i) == 38) {
+            let pair = slice(q, start, i);
+            let eq = find(pair, "=");
+            let mut k = pair;
+            let mut v = "";
+            if (eq >= 0) { k = slice(pair, 0, eq); v = slice(pair, eq + 1, len(pair)); }
+            let dk = percentDecode(k, true);
+            if (dk.is_ok && dk.value == name) {
+                let dv = percentDecode(v, true);
+                if (dv.is_ok) { return dv.value; }
+                return "";
+            }
+            start = i + 1;
+        }
+    }
+    return "";
+}
+
+/// Reads the whole body as text, bounded by the body limit. Err(BodyTooLarge) beyond it,
+/// Err(BadRequest) for a body containing NUL bytes (use reqStream for binary bodies).
+pub func readText(ctx: WebCtx) -> Result<string, WebError> {
+    let h = ctx.sh;
+    let declared = rtaiohttpinfo(h, 3);
+    if (declared > ctx.srv.maxBody) { return err<string, WebError>(WebError::BodyTooLarge); }
+    let chunk = 16384;
+    let a = rtaiobufnew(chunk);
+    if (a <= 0) { return err<string, WebError>(WebError::Transport); }
+    let mut out = "";
+    let mut total = 0;
+    while (true) {
+        let r = rtaiohttpread(h, a, chunk);
+        if (r == 0 - 2) { let f = rtaiobuffree(a); return ok<string, WebError>(out); }
+        if (r < 0) {
+            let f = rtaiobuffree(a);
+            if (r == 0 - 22) { return err<string, WebError>(WebError::BodyTooLarge); }
+            return err<string, WebError>(WebError::Transport);
+        }
+        total = total + r;
+        if (total > ctx.srv.maxBody) { let f = rtaiobuffree(a); return err<string, WebError>(WebError::BodyTooLarge); }
+        for (let mut i = 0; i < r; i = i + 1) {
+            if (rtaiobufget(a, i) == 0) { let f = rtaiobuffree(a); return err<string, WebError>(WebError::BadRequest); }
+        }
+        // ponytail: string append per 16 KiB piece; bounded by maxBody. Use reqStream + nextChunk for large bodies
+        out = out + rtaiobufstr(a, r);
+    }
+    return ok<string, WebError>(out);
+}
+
+/// Reads and validates a JSON body (media type application/json, depth limit). Errors map to
+/// 415 / 400 / 413 with statusFor.
+pub func readJson(ctx: WebCtx) -> Result<string, WebError> {
+    let ct = lower(reqHeader(ctx, "content-type"));
+    if (ct != "application/json" && !startswith(ct, "application/json;")) { return err<string, WebError>(WebError::InvalidArgument); }
+    let t = readText(ctx);
+    if (!t.is_ok) { return t; }
+    if (!jsonValid(t.value, ctx.srv.maxJsonDepth)) { return err<string, WebError>(WebError::BadRequest); }
+    return t;
+}
+
+/// HTTP status matching a WebError from readText / readJson.
+pub func statusFor(e: WebError) -> int {
+    if (e == WebError::BodyTooLarge) { return 413; }
+    if (e == WebError::InvalidArgument) { return 415; }
+    if (e == WebError::BadRequest) { return 400; }
+    return 500;
+}
+
+// ---- identity ------------------------------------------------------------------------------
+
+pub func isAuthenticated(ctx: WebCtx) -> bool { return ctx.authenticated; }
+pub func subject(ctx: WebCtx) -> string { return ctx.claims.sub; }
+pub func issuer(ctx: WebCtx) -> string { return ctx.claims.iss; }
+/// JWT ID for application-level replay protection (the framework does not track it).
+pub func tokenId(ctx: WebCtx) -> string { return ctx.claims.jti; }
+pub func tokenExpires(ctx: WebCtx) -> int { return ctx.claims.exp; }
+pub func tokenKeyId(ctx: WebCtx) -> string { return ctx.claims.kid; }
+
+/// String claim of the verified token ("" when absent or not a string).
+pub func claim(ctx: WebCtx, name: string) -> string {
+    for (let mut i = 0; i < veclen<string>(ctx.claims.names); i = i + 1) {
+        if (get<string>(ctx.claims.names, i) == name) { return get<string>(ctx.claims.values, i); }
+    }
+    return "";
+}
+
+pub func hasScope(ctx: WebCtx, scope: string) -> bool {
+    if (!ctx.authenticated) { return false; }
+    let s = ctx.claims.scope;
+    let n = len(s);
+    let mut start = 0;
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || byteAt(s, i) == 32) {
+            if (slice(s, start, i) == scope) { return true; }
+            start = i + 1;
+        }
+    }
+    return false;
+}
+
+pub func hasRole(ctx: WebCtx, role: string) -> bool {
+    if (!ctx.authenticated) { return false; }
+    return vecHasStr(ctx.claims.roles, role);
+}
+
+/// Copies s out of the request heap so it can outlive the request (a global cache, a value
+/// handed to a background task). Everything else a request allocates is freed when it ends.
+pub func keepText(ctx: WebCtx, s: string) -> string {
+    if (ctx.heap <= 0) { return s; }
+    let d = rtaioheap(1, 0);
+    let copy = slice(s, 0, len(s));
+    let a = rtaioheap(2, ctx.heap);
+    return copy;
+}
+
+/// Rate-limit identity chosen by an identityCustom() function.
+pub func setRateKey(ctx: WebCtx, key: string) { ctx.rateKey = key; }
+
+pub func errorStatus(ctx: WebCtx) -> int { return ctx.status; }
+pub func errorMessage(ctx: WebCtx) -> string { return ctx.errMsg; }
+pub func responded(ctx: WebCtx) -> bool { return ctx.done; }
+pub func responseStatus(ctx: WebCtx) -> int { return ctx.status; }
+pub func timedOut(ctx: WebCtx) -> bool { return ctx.expired; }
+
+// ---------------------------------------------------------------------------------------------
+// Responses
+// ---------------------------------------------------------------------------------------------
+
+func headerIndex(ctx: WebCtx, lname: string) -> int {
+    for (let mut i = 0; i < veclen<string>(ctx.outNames); i = i + 1) {
+        if (get<string>(ctx.outNames, i) == lname) { return i; }
+    }
+    return 0 - 1;
+}
+
+/// Sets a response header, replacing any earlier value of the same name. Names and values are
+/// validated (no CR/LF/NUL): an invalid header is refused, never sent.
+pub func setHeader(ctx: WebCtx, name: string, value: string) -> Result<int, WebError> {
+    if (!validHeaderName(name) || !validHeaderValue(value)) { return err<int, WebError>(WebError::InvalidHeader); }
+    if (ctx.done) { return err<int, WebError>(WebError::AlreadyResponded); }
+    let ln = lower(name);
+    if (ln == "content-length" || ln == "transfer-encoding" || ln == "connection" || ln == "upgrade" || ln == "keep-alive") {
+        return err<int, WebError>(WebError::InvalidHeader);
+    }
+    let i = headerIndex(ctx, ln);
+    if (i >= 0) {
+        set<string>(ctx.outValues, i, value);
+    } else {
+        ctx.outNames = push<string>(ctx.outNames, ln);
+        ctx.outValues = push<string>(ctx.outValues, value);
+    }
+    return ok<int, WebError>(0);
+}
+
+/// Adds a token to a comma-separated header such as Vary without duplicating it.
+pub func appendHeaderToken(ctx: WebCtx, name: string, token: string) -> Result<int, WebError> {
+    let ln = lower(name);
+    let i = headerIndex(ctx, ln);
+    if (i < 0) { return setHeader(ctx, name, token); }
+    let cur = get<string>(ctx.outValues, i);
+    let parts = splitList(lower(cur));
+    if (vecHasStr(parts, lower(token))) { return ok<int, WebError>(0); }
+    return setHeader(ctx, name, cur + ", " + token);
+}
+
+pub func responseHeader(ctx: WebCtx, name: string) -> string {
+    let i = headerIndex(ctx, lower(name));
+    if (i < 0) { return ""; }
+    return get<string>(ctx.outValues, i);
+}
+
+func bodyless(status: int) -> bool {
+    return status < 200 || status == 204 || status == 205 || status == 304;
+}
+
+func sendHead(ctx: WebCtx, code: int, size: int) -> int {
+    if (ctx.done) { return 0 - 7; }
+    if (code < 200 || code > 599) { return 0 - 7; }
+    ctx.done = true;
+    ctx.status = code;
+    let h = ctx.sh;
+    let a = rtaiohttpaddheader(h, "x-request-id", ctx.rid);
+    for (let mut i = 0; i < veclen<string>(ctx.outNames); i = i + 1) {
+        let r = rtaiohttpaddheader(h, get<string>(ctx.outNames, i), get<string>(ctx.outValues, i));
+        if (r < 0) { return r; }
+    }
+    if (atomicLoad(ctx.srv.draining) == 1 && rtaiohttpinfo(h, 12) == 1) {
+        let x = rtaiohttpaddheader(h, "connection", "close");
+    }
+    return rtaiohttpsend(h, code, size);
+}
+
+func atomicLoad(id: int) -> int { return rtatomicintload(id); }
+
+/// Complete response with a text body. 204, 205 and 304 never carry a body.
+pub func sendText(ctx: WebCtx, status: int, text: string) -> int {
+    if (headerIndex(ctx, "content-type") < 0 && !bodyless(status)) {
+        let x = setHeader(ctx, "content-type", "text/plain; charset=utf-8");
+    }
+    if (bodyless(status)) {
+        let r = sendHead(ctx, status, 0);
+        if (r < 0) { return r; }
+        return rtaiohttpfinish(ctx.sh);
+    }
+    let r = sendHead(ctx, status, len(text));
+    if (r < 0) { return r; }
+    let w = rtaiohttpwritetext(ctx.sh, text);
+    if (w < 0) { return w; }
+    let f = rtaiohttpfinish(ctx.sh);
+    if (f < 0) { return f; }
+    return 0;
+}
+
+/// JSON response (Content-Type: application/json). json must be valid JSON within the depth
+/// limit; otherwise nothing invalid is sent and the request fails with 500.
+pub func sendJson(ctx: WebCtx, status: int, json: string) -> int {
+    if (!jsonValid(json, ctx.srv.maxJsonDepth)) { return 500; }
+    let x = setHeader(ctx, "content-type", "application/json");
+    return sendText(ctx, status, json);
+}
+
+pub func sendStatus(ctx: WebCtx, status: int) -> int { return sendText(ctx, status, ""); }
+
+/// Starts a streamed response (chunked on HTTP/1.1, DATA frames on HTTP/2); continue with
+/// streamText / streamBuffer and end with streamEnd. The transport applies backpressure.
+pub func streamStart(ctx: WebCtx, status: int, contentType: string) -> int {
+    if (bodyless(status)) { return 0 - 7; }
+    if (contentType != "") {
+        let x = setHeader(ctx, "content-type", contentType);
+        if (!x.is_ok) { return 0 - 7; }
+    }
+    let r = sendHead(ctx, status, 0 - 1);
+    if (r >= 0) { ctx.streaming = true; }
+    return r;
+}
+
+pub func streamText(ctx: WebCtx, text: string) -> int {
+    if (!ctx.streaming) { return 0 - 7; }
+    return rtaiohttpwritetext(ctx.sh, text);
+}
+
+/// Writes n bytes from a runtime Buffer address (zero-copy from the caller's buffer above 4 KiB).
+pub func streamBuffer(ctx: WebCtx, addr: int, n: int) -> int {
+    if (!ctx.streaming) { return 0 - 7; }
+    return rtaiohttpwrite(ctx.sh, addr, n);
+}
+
+pub func streamEnd(ctx: WebCtx) -> int {
+    if (!ctx.streaming) { return 0 - 7; }
+    ctx.streaming = false;
+    return rtaiohttpfinish(ctx.sh);
+}
+
+pub func reasonPhrase(status: int) -> string {
+    if (status == 400) { return "Bad Request"; }
+    if (status == 401) { return "Unauthorized"; }
+    if (status == 403) { return "Forbidden"; }
+    if (status == 404) { return "Not Found"; }
+    if (status == 405) { return "Method Not Allowed"; }
+    if (status == 408) { return "Request Timeout"; }
+    if (status == 413) { return "Content Too Large"; }
+    if (status == 414) { return "URI Too Long"; }
+    if (status == 415) { return "Unsupported Media Type"; }
+    if (status == 429) { return "Too Many Requests"; }
+    if (status == 431) { return "Request Header Fields Too Large"; }
+    if (status == 500) { return "Internal Server Error"; }
+    if (status == 501) { return "Not Implemented"; }
+    if (status == 503) { return "Service Unavailable"; }
+    if (status >= 500) { return "Server Error"; }
+    return "Client Error";
+}
+
+/// Structured error response. message is public text (never internal details); "" uses the
+/// standard reason phrase. A custom renderer set by onError takes over when present.
+pub func sendError(ctx: WebCtx, status: int, message: string) -> int {
+    if (ctx.done) { return 0; }
+    let mut st = status;
+    if (st < 400 || st > 599) { st = 500; }
+    ctx.status = st;
+    ctx.errMsg = message;
+    if (message == "") { ctx.errMsg = reasonPhrase(st); }
+    if (ctx.srv.errorFn != 0) {
+        let r = rtaiocall(ctx.srv.errorFn, ctx);
+        if (ctx.done) { return r; }
+    }
+    let x = setHeader(ctx, "content-type", "application/json");
+    let y = setHeader(ctx, "cache-control", "no-store");
+    let body = "{\"error\":{\"status\":" + str(st) + ",\"message\":\"" + jsonEscape(ctx.errMsg) +
+        "\"},\"requestId\":\"" + jsonEscape(ctx.rid) + "\"}";
+    return sendText(ctx, st, body);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Middleware chain
+// ---------------------------------------------------------------------------------------------
+
+/// Runs the rest of the chain (the next middleware, or routing + authorization + the handler).
+/// Returns what the downstream returned: 0, an HTTP error status, or a negative transport code.
+pub func next(ctx: WebCtx) -> int {
+    let i = ctx.mwIndex;
+    ctx.mwIndex = i + 1;
+    if (i < veclen<int>(ctx.srv.middleware)) { return rtaiocall(get<int>(ctx.srv.middleware, i), ctx); }
+    return dispatch(ctx);
+}
+
+func dispatch(ctx: WebCtx) -> int {
+    if (ctx.routeStatus != 0) {
+        if (ctx.routeStatus == 405) { let x = setHeader(ctx, "allow", ctx.allow); }
+        return ctx.routeStatus;
+    }
+    let r: Route = get<Route>(ctx.srv.routes, ctx.routeIndex);
+    if (r.auth && !ctx.authenticated) {
+        let x = setHeader(ctx, "www-authenticate", "Bearer");
+        return 401;
+    }
+    if (r.scope != "" && !hasScope(ctx, r.scope)) {
+        let x = setHeader(ctx, "www-authenticate", "Bearer error=\"insufficient_scope\"");
+        return 403;
+    }
+    if (r.role != "" && !hasRole(ctx, r.role)) { return 403; }
+    if (r.policy != 0 && rtaiocall(r.policy, ctx) != 1) { return 403; }
+    return rtaiocall(r.handler, ctx);
+}
+
+// ---- built-in middleware -------------------------------------------------------------------
+
+/// Logs one line per request after it completes: id, method, path, status, latency.
+pub func requestLogger(ctx: WebCtx) -> int {
+    let r = next(ctx);
+    let mut st = ctx.status;
+    if (!ctx.done && r >= 400) { st = r; }
+    outln("web id=" + ctx.rid + " method=" + ctx.method + " path=" + ctx.path + " status=" + str(st) +
+        " micros=" + str(nowMicros() - ctx.startMicros));
+    return r;
+}
+
+/// Security headers from the server configuration (set once each; later setHeader replaces).
+pub func securityHeaders(ctx: WebCtx) -> int {
+    let srv = ctx.srv;
+    if (srv.secNosniff) { let a = setHeader(ctx, "x-content-type-options", "nosniff"); }
+    if (srv.secFrame != "") { let b = setHeader(ctx, "x-frame-options", srv.secFrame); }
+    if (srv.secReferrer != "") { let d = setHeader(ctx, "referrer-policy", srv.secReferrer); }
+    if (srv.secCsp != "") { let e = setHeader(ctx, "content-security-policy", srv.secCsp); }
+    if (srv.hstsMaxAge > 0) {
+        let mut v = "max-age=" + str(srv.hstsMaxAge);
+        if (srv.hstsSubdomains) { v = v + "; includeSubDomains"; }
+        if (srv.hstsPreload) { v = v + "; preload"; }
+        let f = setHeader(ctx, "strict-transport-security", v);
+    }
+    return next(ctx);
+}
+
+func corsOriginAllowed(srv: WebServer, origin: string) -> bool {
+    if (srv.corsAnyOrigin) { return true; }
+    return vecHasStr(srv.corsOrigins, origin);
+}
+
+/// CORS (Fetch standard). Only configured origins are granted; an origin is never reflected
+/// unless it is in the allowlist. Preflights are answered here (204, or 403 when refused).
+pub func cors(ctx: WebCtx) -> int {
+    let srv = ctx.srv;
+    let origin = reqHeader(ctx, "origin");
+    if (!srv.corsAnyOrigin || srv.corsCredentials) { let v = appendHeaderToken(ctx, "vary", "Origin"); }
+    if (origin == "") { return next(ctx); }
+    let allowed = reqHeaderCount(ctx, "origin") == 1 && corsOriginAllowed(srv, origin);
+    let preflight = ctx.method == "OPTIONS" && reqHeader(ctx, "access-control-request-method") != "";
+    if (!allowed) {
+        if (preflight) { return 403; }
+        return next(ctx);
+    }
+    if (preflight) {
+        // Method and headers are checked before anything is granted
+        let v2 = appendHeaderToken(ctx, "vary", "Access-Control-Request-Method");
+        let v3 = appendHeaderToken(ctx, "vary", "Access-Control-Request-Headers");
+        if (!vecHasStr(srv.corsMethods, reqHeader(ctx, "access-control-request-method"))) { return 403; }
+        let hs = splitList(lower(reqHeader(ctx, "access-control-request-headers")));
+        for (let mut i = 0; i < veclen<string>(hs); i = i + 1) {
+            if (!vecHasStr(srv.corsHeaders, get<string>(hs, i))) { return 403; }
+        }
+    }
+    let mut acao = origin;
+    if (srv.corsAnyOrigin && !srv.corsCredentials) { acao = "*"; }
+    let a = setHeader(ctx, "access-control-allow-origin", acao);
+    if (srv.corsCredentials) { let b = setHeader(ctx, "access-control-allow-credentials", "true"); }
+    if (!preflight) {
+        if (srv.corsExpose != "") { let e = setHeader(ctx, "access-control-expose-headers", srv.corsExpose); }
+        return next(ctx);
+    }
+    let x = setHeader(ctx, "access-control-allow-methods", joinList(srv.corsMethods, ", "));
+    if (veclen<string>(srv.corsHeaders) > 0) { let y = setHeader(ctx, "access-control-allow-headers", joinList(srv.corsHeaders, ", ")); }
+    if (srv.corsMaxAge >= 0) { let z = setHeader(ctx, "access-control-max-age", str(srv.corsMaxAge)); }
+    return sendStatus(ctx, 204);
+}
+
+func rateIdentity(ctx: WebCtx) -> string {
+    let srv = ctx.srv;
+    if (srv.rlIdentity == 1 && ctx.authenticated && ctx.claims.sub != "") { return "sub:" + ctx.claims.sub; }
+    if (srv.rlIdentity == 2) {
+        let v = reqHeader(ctx, srv.rlHeader);
+        if (v != "" && len(v) <= 256) { return "key:" + v; }
+    }
+    if (srv.rlIdentity == 3) {
+        ctx.rateKey = "";
+        let r = rtaiocall(srv.rlCustomFn, ctx);
+        if (ctx.rateKey != "" && len(ctx.rateKey) <= 256) { return "app:" + ctx.rateKey; }
+    }
+    return "ip:" + ctx.peer;
+}
+
+// Identity key as a 60-bit value (SHA-256 prefix): the table keeps no strings, so nothing a
+// request allocates outlives the request.
+func rateHash(key: string) -> int {
+    let hx = rtcryptosha256str(key);
+    let mut v = 0;
+    for (let mut i = 0; i < 15; i = i + 1) { v = v * 16 + hexValue(byteAt(hx, i)); }
+    if (v == 0) { v = 1; }
+    return v;
+}
+
+/// Counts one request for key at time now (ms). Returns remaining (>= 0) when allowed, or
+/// -(retry-after ms) - 1 when refused. Atomic under the limiter lock: concurrent requests
+/// cannot both take the last slot of a window. Open addressing over a fixed table; a slot whose
+/// window ended is reused; when every slot holds a live identity a new identity is refused
+/// (fail closed, bounded memory).
+pub func rateTake(srv: WebServer, key: string, now: int) -> int {
+    let hv = rateHash(key);
+    rtmutexlock(srv.rlLock);
+    let size = srv.rlCapacity;
+    let first = hv % size;
+    let mut slot = 0 - 1;
+    let mut spare = 0 - 1;
+    let mut k = 0;
+    while (k < size) {
+        let i = (first + k) % size;
+        let h = get<int>(srv.rlHash, i);
+        if (h == hv) {
+            slot = i;
+            k = size;
+        } else if (h == 0) {
+            if (spare < 0) { spare = i; }
+            k = size;
+        } else {
+            if (spare < 0 && now - get<int>(srv.rlStart, i) >= srv.rlWindowMs) { spare = i; }
+            k = k + 1;
+        }
+    }
+    if (slot < 0) {
+        if (spare < 0) {
+            rtmutexunlock(srv.rlLock);
+            return 0 - srv.rlWindowMs - 1;
+        }
+        slot = spare;
+        set<int>(srv.rlHash, slot, hv);
+        set<int>(srv.rlStart, slot, now);
+        set<int>(srv.rlCount, slot, 0);
+    }
+    let start = get<int>(srv.rlStart, slot);
+    if (now - start >= srv.rlWindowMs) {
+        set<int>(srv.rlStart, slot, now);
+        set<int>(srv.rlCount, slot, 0);
+    }
+    let count = get<int>(srv.rlCount, slot);
+    let resetAt = get<int>(srv.rlStart, slot) + srv.rlWindowMs;
+    if (count >= srv.rlLimit) {
+        rtmutexunlock(srv.rlLock);
+        return 0 - (resetAt - now) - 1;
+    }
+    set<int>(srv.rlCount, slot, count + 1);
+    rtmutexunlock(srv.rlLock);
+    return srv.rlLimit - count - 1;
+}
+
+/// Number of limiter slots in use (bounded by the configured identity count).
+pub func rateTracked(srv: WebServer) -> int {
+    rtmutexlock(srv.rlLock);
+    let mut n = 0;
+    for (let mut i = 0; i < veclen<int>(srv.rlHash); i = i + 1) {
+        if (get<int>(srv.rlHash, i) != 0) { n = n + 1; }
+    }
+    rtmutexunlock(srv.rlLock);
+    return n;
+}
+
+/// Fixed-window rate limiting with RateLimit-* headers; 429 + Retry-After when exceeded.
+pub func rateLimiter(ctx: WebCtx) -> int {
+    let srv = ctx.srv;
+    if (srv.rlLimit <= 0) { return next(ctx); }
+    let now = nowMicros() / 1000;
+    let r = rateTake(srv, rateIdentity(ctx), now);
+    let a = setHeader(ctx, "ratelimit-limit", str(srv.rlLimit));
+    if (r < 0) {
+        let waitMs = 0 - r - 1;
+        let secs = (waitMs + 999) / 1000;
+        let b = setHeader(ctx, "ratelimit-remaining", "0");
+        let d = setHeader(ctx, "ratelimit-reset", str(secs));
+        let e = setHeader(ctx, "retry-after", str(secs));
+        let m = rtatomicintfetchadd(srv.mRateLimited, 1);
+        return 429;
+    }
+    let b = setHeader(ctx, "ratelimit-remaining", str(r));
+    return next(ctx);
+}
+
+/// Bearer-token authentication (RFC 6750). No Authorization header: continues anonymously
+/// (routes marked requireAuth answer 401). A present but invalid credential ends the request
+/// with 401; the response never says why verification failed.
+pub func authenticate(ctx: WebCtx) -> int {
+    let srv = ctx.srv;
+    if (!srv.authEnabled) { return 500; }
+    let n = reqHeaderCount(ctx, "authorization");
+    if (n == 0) { return next(ctx); }
+    let h = reqHeader(ctx, "authorization");
+    let mut token = "";
+    if (n == 1 && len(h) > 7 && lower(slice(h, 0, 7)) == "bearer ") { token = slice(h, 7, len(h)); }
+    let mut res = jwtErr(JwtError::Malformed);
+    if (token != "" && find(token, " ") < 0) {
+        // clockFn 0 = system clock
+        let mut now = rttimenowms() / 1000;
+        if (srv.clockFn != 0) { now = rtaiocall(srv.clockFn, 0); }
+        res = jwtVerify(srv.jwt, token, now);
+    }
+    if (!res.is_ok) {
+        let m = rtatomicintfetchadd(srv.mAuthFailures, 1);
+        let x = setHeader(ctx, "www-authenticate", "Bearer error=\"invalid_token\"");
+        return 401;
+    }
+    ctx.claims = res.value;
+    ctx.authenticated = true;
+    return next(ctx);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Request lifecycle
+// ---------------------------------------------------------------------------------------------
+
+func validRequestId(id: string) -> bool {
+    let n = len(id);
+    if (n == 0 || n > 64) { return false; }
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(id, i);
+        if (!((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 45 || ch == 46 || ch == 95)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+func newCtx(srv: WebServer, h: int, inflight: int) -> WebCtx {
+    let mut path = rtaiohttptext(h, 2);
+    let method = rtaiohttptext(h, 0);
+    if (path == "" && method == "CONNECT") { path = "/"; }
+    let mut rid = rtaiohttpheader(h, "x-request-id", 0);
+    if (rtaiohttpheadercount(h, "x-request-id") != 1 || !validRequestId(rid)) {
+        rid = srv.idPrefix + "-" + str(rtatomicintfetchadd(srv.idCounter, 1) + 1);
+    }
+    return WebCtx {
+        srv: srv, sh: h, inflight: inflight, heap: 0, method: method, path: path, query: rtaiohttptext(h, 3), rid: rid,
+        peer: rtaiohttppeer(h), paramNames: vecNew<string>(), paramValues: vecNew<string>(),
+        outNames: vecNew<string>(), outValues: vecNew<string>(), routeIndex: 0 - 1, routeStatus: 0, allow: "",
+        mwIndex: 0, done: false, streaming: false, status: 0, expired: false, rateKey: "", errMsg: "",
+        startMicros: nowMicros(), authenticated: false, claims: emptyClaims()
+    };
+}
+
+/// Framework-level request checks before routing (the transport has already enforced its own
+/// limits on the wire). Returns 0 or the HTTP status to answer.
+func precheck(ctx: WebCtx) -> int {
+    let h = ctx.sh;
+    if (len(rtaiohttptext(h, 1)) > ctx.srv.maxUri) { return 414; }
+    if (rtaiohttpheadercount(h, "") > ctx.srv.maxHeaders) { return 431; }
+    if (rtaiohttpinfo(h, 3) > ctx.srv.maxBody) { return 413; }
+    if (!validMethod(ctx.method)) { return 501; }
+    if (len(ctx.path) == 0 || byteAt(ctx.path, 0) != 47) { return 400; }
+    // Dot segments (raw or percent-encoded) never reach routing: blocks traversal via parameters
+    let segs = splitPath(ctx.path);
+    for (let mut i = 0; i < veclen<string>(segs); i = i + 1) {
+        let d = percentDecode(get<string>(segs, i), false);
+        if (!d.is_ok) { return 400; }
+        if (d.value == "." || d.value == ".." || find(d.value, "\\") >= 0) { return 400; }
+    }
+    return 0;
+}
+
+/// Runs the middleware chain and handler for ctx (the handler task body).
+func runChain(ctx: WebCtx) -> int {
+    if (ctx.heap > 0) { let a = rtaioheap(2, ctx.heap); }
+    ctx.mwIndex = 0;
+    return next(ctx);
+}
+
+func trackTask(srv: WebServer, t: int) -> int {
+    rtmutexlock(srv.lock);
+    let n = veclen<int>(srv.tasks);
+    let mut slot = 0 - 1;
+    let mut k = 0;
+    while (k < n && slot < 0) {
+        let i = (srv.taskCursor + k) % n;
+        if (get<int>(srv.tasks, i) == 0) { slot = i; }
+        k = k + 1;
+    }
+    if (slot >= 0) {
+        set<int>(srv.tasks, slot, t);
+        srv.taskCursor = (slot + 1) % n;
+    }
+    rtmutexunlock(srv.lock);
+    return slot;
+}
+
+func untrackTask(srv: WebServer, slot: int) {
+    if (slot < 0) { return; }
+    rtmutexlock(srv.lock);
+    set<int>(srv.tasks, slot, 0);
+    rtmutexunlock(srv.lock);
+}
+
+func recordStatus(srv: WebServer, st: int, micros: int) {
+    let mut k = srv.m5xx;
+    if (st < 300) { k = srv.m2xx; } else if (st < 400) { k = srv.m3xx; } else if (st < 500) { k = srv.m4xx; }
+    let a = rtatomicintfetchadd(k, 1);
+    let b = rtatomicintfetchadd(srv.mLatencyTotal, micros);
+    let mut cur = rtatomicintload(srv.mLatencyMax);
+    while (micros > cur) {
+        if (rtatomicintcompareexchange(srv.mLatencyMax, cur, micros) == cur) { cur = micros; } else { cur = rtatomicintload(srv.mLatencyMax); }
+    }
+}
+
+/// Serves one request: checks, routing, the chain in its own task (so a timeout cancels it),
+/// the fallback error response, metrics. Owns the stream and frees it.
+func serveRequest(ctx: WebCtx) -> int {
+    let srv = ctx.srv;
+    let q = rtatomicintfetchadd(srv.mRequests, 1);
+    let active = rtatomicintfetchadd(srv.mActive, 1) + 1;
+    let mut result = 0;
+    if (active > srv.maxConcurrent) {
+        result = 503;
+    } else {
+        result = precheck(ctx);
+        if (result == 0) { resolveRoute(ctx); }
+    }
+    if (result == 0) {
+        // The handler task borrows the request heap; this task must not allocate until it is back
+        let dh = rtaioheap(1, 0);
+        let t = rtaiospawn(runChain, ctx);
+        if (t < 0) {
+            result = 503;
+        } else {
+            let slot = trackTask(srv, t);
+            let mut w = 0;
+            if (srv.requestTimeout > 0) { w = rtaioawaittimeout(t, srv.requestTimeout); } else { w = rtaioawait(t); }
+            if (w == 0 - 4) {
+                // Timed out: the runtime cancelled the handler; wait until it has actually stopped
+                ctx.expired = true;
+                let m = rtatomicintfetchadd(srv.mTimeouts, 1);
+                let z = rtaioawait(t);
+                result = 503;
+            } else if (w < 0) {
+                result = 500;
+            } else {
+                result = rtaiolastvalue();
+            }
+            untrackTask(srv, slot);
+            let rel = rtaiorelease(t);
+        }
+        if (ctx.heap > 0) { let ah = rtaioheap(2, ctx.heap); }
+    }
+    if (!ctx.done) {
+        let mut st = result;
+        // A handler that returns without answering is a server error, never an empty success
+        if (st < 400 || st > 599) { st = 500; }
+        if (ctx.expired) { let x = setHeader(ctx, "connection", "close"); }
+        let e = sendError(ctx, st, "");
+    } else if (ctx.streaming) {
+        // Handler ended (or was cancelled) mid-stream: the response is incomplete, so reset it
+        let x = rtaiohttpreset(ctx.sh, 2);
+    }
+    recordStatus(srv, ctx.status, nowMicros() - ctx.startMicros);
+    let d = rtatomicintfetchadd(srv.mActive, 0 - 1);
+    let f = rtaiohttpfree(ctx.sh);
+    return 0;
+}
+
+pub struct ConnState {
+    WebServer srv;
+    int sock;
+    int conn;
+    int slot;
+    int inflight;
+    int pending;
+}
+
+func registerConn(srv: WebServer, sock: int, conn: int) -> int {
+    rtmutexlock(srv.lock);
+    let n = veclen<int>(srv.connHandles);
+    let mut slot = 0 - 1;
+    for (let mut i = 0; i < n && slot < 0; i = i + 1) {
+        if (get<int>(srv.connHandles, i) == 0) { slot = i; }
+    }
+    if (slot < 0) {
+        slot = n;
+        srv.connHandles = push<int>(srv.connHandles, conn);
+        srv.connSocks = push<int>(srv.connSocks, sock);
+        srv.connBusy = push<int>(srv.connBusy, 0);
+    } else {
+        set<int>(srv.connHandles, slot, conn);
+        set<int>(srv.connSocks, slot, sock);
+        set<int>(srv.connBusy, slot, 0);
+    }
+    rtmutexunlock(srv.lock);
+    let a = rtatomicintfetchadd(srv.mConnections, 1);
+    return slot;
+}
+
+func setBusy(srv: WebServer, slot: int, busy: int) {
+    rtmutexlock(srv.lock);
+    set<int>(srv.connBusy, slot, busy);
+    rtmutexunlock(srv.lock);
+}
+
+/// One request in its own task and its own heap: everything the request allocates (context,
+/// strings, JSON, claims) is freed when it ends. The connection hands over the stream in
+/// cs.pending and waits until this task has taken it.
+func requestTask(cs: ConnState) -> int {
+    let heap = rtaioheap(0, 0);
+    let r = serveTaken(cs, heap);
+    // Locals of serveTaken are gone by now; nothing here refers to the request heap
+    if (heap > 0) { let e = rtaioheap(3, heap); }
+    let d = rtatomicintfetchadd(cs.inflight, 0 - 1);
+    return 0;
+}
+
+func serveTaken(cs: ConnState, heap: int) -> int {
+    let h = cs.pending;
+    cs.pending = 0;
+    let ctx = newCtx(cs.srv, h, cs.inflight);
+    if (heap > 0) { ctx.heap = heap; }
+    return serveRequest(ctx);
+}
+
+func applyLimits(srv: WebServer, conn: int) -> bool {
+    let hc = HttpConn { handle: conn };
+    if (!setLimit(hc, limitBodySize(), srv.maxBody + 1).is_ok) { return false; }
+    if (!setLimit(hc, limitHeaderCount(), srv.maxHeaders).is_ok) { return false; }
+    if (!setLimit(hc, limitHeaderBytes(), srv.maxHeaderBytes).is_ok) { return false; }
+    if (!setLimit(hc, limitRequestLine(), srv.maxUri + 32).is_ok) { return false; }
+    if (!setLimit(hc, timeoutHeader(), srv.headerTimeout).is_ok) { return false; }
+    if (!setLimit(hc, timeoutIdle(), srv.idleTimeout).is_ok) { return false; }
+    if (!setLimit(hc, timeoutRead(), srv.readTimeout).is_ok) { return false; }
+    if (!setLimit(hc, timeoutWrite(), srv.writeTimeout).is_ok) { return false; }
+    return true;
+}
+
+/// One connection: HTTP/1.1 requests are served in order; HTTP/2 streams run concurrently.
+func serveConn(cs: ConnState) -> int {
+    let srv = cs.srv;
+    let conn = rtaiohttpserver(cs.sock, protoAuto());
+    if (conn < 0) {
+        let x = rtaioclose(cs.sock);
+        return 0;
+    }
+    if (!applyLimits(srv, conn)) {
+        let y = rtaiohttpclose(conn);
+        return 0;
+    }
+    cs.conn = conn;
+    cs.slot = registerConn(srv, cs.sock, conn);
+    cs.inflight = rtatomicintcreate(0);
+    let mut open = true;
+    while (open) {
+        let r = rtaiohttpnext(conn);
+        if (r < 0) {
+            open = false;
+        } else {
+            let i = rtatomicintfetchadd(cs.inflight, 1);
+            let h2 = rtaiohttpinfo(conn, 0) == 2;
+            if (!h2) { setBusy(srv, cs.slot, 1); }
+            cs.pending = r;
+            let t = rtaiospawn(requestTask, cs);
+            if (t < 0) {
+                cs.pending = 0;
+                let d = rtatomicintfetchadd(cs.inflight, 0 - 1);
+                let rs = rtaiohttpreset(r, 7);
+                let f = rtaiohttpfree(r);
+            } else if (h2) {
+                while (cs.pending != 0) { let y = rtaioyield(); }
+                let rel = rtaiorelease(t);
+            } else {
+                let w = rtaioawait(t);
+                let rel = rtaiorelease(t);
+            }
+            if (!h2) {
+                setBusy(srv, cs.slot, 0);
+                if (atomicLoad(srv.draining) == 1) { open = false; }
+            }
+        }
+    }
+    // HTTP/2: streams still running own the connection until they finish
+    while (rtatomicintload(cs.inflight) > 0) { let z = sleep(1); }
+    rtmutexlock(srv.lock);
+    set<int>(srv.connHandles, cs.slot, 0);
+    rtmutexunlock(srv.lock);
+    let q = rtaiohttpclose(conn);
+    let a = rtatomicintfetchadd(srv.mConnections, 0 - 1);
+    let dd = rtatomicdestroy(cs.inflight);
+    return 0;
+}
+
+func acceptLoop(srv: WebServer) -> int {
+    let mut running = true;
+    while (running) {
+        let s = rtaiotcpaccept(srv.listener);
+        if (s < 0) {
+            running = false;
+        } else if (atomicLoad(srv.draining) == 1) {
+            let x = rtaioclose(s);
+        } else {
+            let cs = ConnState { srv: srv, sock: s, conn: 0, slot: 0 - 1, inflight: 0, pending: 0 };
+            let t = rtaiospawn(serveConn, cs);
+            if (t < 0) { let y = rtaioclose(s); } else { let r = rtaiorelease(t); }
+        }
+    }
+    return 0;
+}
+
+/// Validates the configuration (fail closed), binds host:port (0 picks a free port) and starts
+/// accepting in a background task. Must be called from a runtime task. Returns the bound port.
+pub func listen(srv: WebServer, host: string, port: int) -> Result<int, WebError> {
+    let v = validateConfig(srv);
+    if (!v.is_ok) { return v; }
+    if (srv.listener != 0) { return err<int, WebError>(WebError::InvalidArgument); }
+    let l = tcpListen(host, port, 1024);
+    if (!l.is_ok) { return err<int, WebError>(WebError::Listen); }
+    srv.listener = l.value.handle;
+    srv.port = listenerPort(l.value);
+    let mut tasks = vecNew<int>();
+    for (let mut i = 0; i < srv.maxConcurrent + 1; i = i + 1) { tasks = push<int>(tasks, 0); }
+    srv.tasks = tasks;
+    let t = rtaiospawn(acceptLoop, srv);
+    if (t < 0) {
+        let x = listenerClose(l.value);
+        srv.listener = 0;
+        return err<int, WebError>(WebError::Listen);
+    }
+    let r = rtaiorelease(t);
+    return ok<int, WebError>(srv.port);
+}
+
+pub func boundPort(srv: WebServer) -> int { return srv.port; }
+
+/// Graceful shutdown: stops accepting, sends GOAWAY on HTTP/2 connections, ends idle HTTP/1.1
+/// keep-alive connections, lets active requests finish for at most the shutdown timeout, then
+/// cancels the remaining handlers and closes every connection. Returns the number of requests
+/// that had to be cancelled.
+pub func shutdown(srv: WebServer) -> Result<int, WebError> {
+    if (rtatomicintswap(srv.draining, 1) == 1) { return ok<int, WebError>(0); }
+    if (srv.listener != 0) { let l = rtaioclose(srv.listener); }
+    rtmutexlock(srv.lock);
+    for (let mut i = 0; i < veclen<int>(srv.connHandles); i = i + 1) {
+        let h = get<int>(srv.connHandles, i);
+        if (h != 0) {
+            let g = rtaiohttpgoaway(h, 0);
+            // An idle HTTP/1.1 keep-alive connection is closed now (RFC 9112 9.6); a busy one after
+            // its response. A request racing with this close is lost with the connection, as with
+            // any server-side keep-alive close; clients retry it.
+            if (rtaiohttpinfo(h, 0) != 2 && get<int>(srv.connBusy, i) == 0) { let s = rtaiohttpclose(h); }
+        }
+    }
+    rtmutexunlock(srv.lock);
+    let deadline = nowMicros() + srv.shutdownTimeout * 1000;
+    while ((rtatomicintload(srv.mActive) > 0 || rtatomicintload(srv.mConnections) > 0) && nowMicros() < deadline) {
+        let z = sleep(2);
+    }
+    let mut cancelled = 0;
+    if (rtatomicintload(srv.mActive) > 0 || rtatomicintload(srv.mConnections) > 0) {
+        rtmutexlock(srv.lock);
+        for (let mut i = 0; i < veclen<int>(srv.tasks); i = i + 1) {
+            let t = get<int>(srv.tasks, i);
+            if (t != 0) {
+                let x = rtaiocancel(t);
+                cancelled = cancelled + 1;
+            }
+        }
+        for (let mut i = 0; i < veclen<int>(srv.connHandles); i = i + 1) {
+            if (get<int>(srv.connHandles, i) != 0) { let s = rtaiohttpclose(get<int>(srv.connHandles, i)); }
+        }
+        rtmutexunlock(srv.lock);
+        let hard = nowMicros() + 2000000;
+        while ((rtatomicintload(srv.mActive) > 0 || rtatomicintload(srv.mConnections) > 0) && nowMicros() < hard) {
+            let z = sleep(2);
+        }
+    }
+    return ok<int, WebError>(cancelled);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------------------------
+
+pub func metric(srv: WebServer, key: int) -> int {
+    if (key == 0) { return rtatomicintload(srv.mRequests); }
+    if (key == 1) { return rtatomicintload(srv.mActive); }
+    if (key == 2) { return rtatomicintload(srv.m2xx); }
+    if (key == 3) { return rtatomicintload(srv.m3xx); }
+    if (key == 4) { return rtatomicintload(srv.m4xx); }
+    if (key == 5) { return rtatomicintload(srv.m5xx); }
+    if (key == 6) { return rtatomicintload(srv.mRateLimited); }
+    if (key == 7) { return rtatomicintload(srv.mAuthFailures); }
+    if (key == 8) { return rtatomicintload(srv.mLatencyTotal); }
+    if (key == 9) { return rtatomicintload(srv.mLatencyMax); }
+    if (key == 10) { return rtatomicintload(srv.mTimeouts); }
+    if (key == 11) { return rtatomicintload(srv.mConnections); }
+    return 0 - 1;
+}
+
+/// Metrics in the Prometheus text exposition format.
+pub func metricsText(srv: WebServer) -> string {
+    return "web_requests_total " + str(metric(srv, 0)) + "\n" +
+        "web_requests_active " + str(metric(srv, 1)) + "\n" +
+        "web_responses_total{class=\"2xx\"} " + str(metric(srv, 2)) + "\n" +
+        "web_responses_total{class=\"3xx\"} " + str(metric(srv, 3)) + "\n" +
+        "web_responses_total{class=\"4xx\"} " + str(metric(srv, 4)) + "\n" +
+        "web_responses_total{class=\"5xx\"} " + str(metric(srv, 5)) + "\n" +
+        "web_rate_limited_total " + str(metric(srv, 6)) + "\n" +
+        "web_auth_failures_total " + str(metric(srv, 7)) + "\n" +
+        "web_latency_micros_total " + str(metric(srv, 8)) + "\n" +
+        "web_latency_micros_max " + str(metric(srv, 9)) + "\n" +
+        "web_timeouts_total " + str(metric(srv, 10)) + "\n" +
+        "web_connections_active " + str(metric(srv, 11)) + "\n";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client helper (service-to-service calls and tests): one request on a new connection
+// ---------------------------------------------------------------------------------------------
+
+pub struct WebResponse {
+    int status;
+    string body;
+    Vec<string> names;
+    Vec<string> values;
+}
+
+/// Sends method target with headers ("Name: value" lines separated by "\n") and body, reads at
+/// most maxBody response bytes. status is the HTTP status or a negative transport error code.
+pub func webRequest(host: string, port: int, proto: int, method: string, target: string, headers: string, body: string, maxBody: int) -> WebResponse {
+    let resp = WebResponse { status: 0 - 7, body: "", names: vecNew<string>(), values: vecNew<string>() };
+    let conn = rtaiotcpconnect(host, port);
+    if (conn < 0) { resp.status = conn; return resp; }
+    let hc = rtaiohttpclient(conn, proto);
+    if (hc < 0) { let x = rtaioclose(conn); resp.status = hc; return resp; }
+    let au = rtaiohttpauthority(hc, host + ":" + str(port));
+    let h = rtaiohttprequest(hc, method, target);
+    if (h < 0) { let y = rtaiohttpclose(hc); resp.status = h; return resp; }
+    let lines = splitLines(headers);
+    for (let mut i = 0; i < veclen<string>(lines); i = i + 1) {
+        let line = get<string>(lines, i);
+        let colon = find(line, ":");
+        if (colon > 0) {
+            let a = rtaiohttpaddheader(h, trim(slice(line, 0, colon)), trim(slice(line, colon + 1, len(line))));
+            if (a < 0) { resp.status = a; }
+        }
+    }
+    let mut r = 0;
+    if (resp.status == 0 - 7) {
+        r = rtaiohttpsend(h, 0, len(body));
+        if (r >= 0 && body != "") { r = rtaiohttpwritetext(h, body); }
+        if (r >= 0) { r = rtaiohttpfinish(h); }
+        if (r >= 0) { r = rtaiohttpresponse(h); }
+    } else {
+        r = resp.status;
+    }
+    resp.status = r;
+    if (r > 0) {
+        let n = rtaiohttpheadercount(h, "");
+        for (let mut i = 0; i < n; i = i + 1) {
+            resp.names = push<string>(resp.names, lower(rtaiohttpheaderat(h, i, 0)));
+            resp.values = push<string>(resp.values, rtaiohttpheaderat(h, i, 1));
+        }
+        let a = rtaiobufnew(maxBody + 1);
+        let mut total = 0;
+        let mut open = true;
+        while (open && total <= maxBody) {
+            let k = rtaiohttpread(h, a + total, maxBody + 1 - total);
+            if (k < 0) { open = false; } else { total = total + k; }
+        }
+        if (total > 0) { resp.body = rtaiobufstr(a, total); }
+        let f = rtaiobuffree(a);
+    }
+    let fs = rtaiohttpfree(h);
+    let q = rtaiohttpclose(hc);
+    return resp;
+}
+
+/// First value of a response header ("" when absent); name is case-insensitive.
+pub func respHeader(r: WebResponse, name: string) -> string {
+    let ln = lower(name);
+    for (let mut i = 0; i < veclen<string>(r.names); i = i + 1) {
+        if (get<string>(r.names, i) == ln) { return get<string>(r.values, i); }
+    }
+    return "";
+}
+
+pub func respHeaderCount(r: WebResponse, name: string) -> int {
+    let ln = lower(name);
+    let mut n = 0;
+    for (let mut i = 0; i < veclen<string>(r.names); i = i + 1) {
+        if (get<string>(r.names, i) == ln) { n = n + 1; }
+    }
+    return n;
+}

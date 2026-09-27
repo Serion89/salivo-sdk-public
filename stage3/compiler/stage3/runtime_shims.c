@@ -1,6 +1,10 @@
 /* std `rt*` intrinsics that the host backend lowers inline; Stage 3 links these instead. */
+#ifdef __wasm__
+#include "salivo_wasm_libc.h"
+#else
 #include <stdlib.h>
 #include <string.h>
+#endif
 
 long long rtcharat(const char* s, long long i) {
     return s ? (long long)(unsigned char)s[i] : 0;

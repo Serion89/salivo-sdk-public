@@ -523,6 +523,11 @@ pub func pushstr(String s, StrSlice appendtext) -> String {
 
 /// Appends a Unicode code point to an owned String
 pub func push(String s, int codepoint) -> String {
+    return pushCodepoint(s, codepoint);
+}
+
+/// Appends a Unicode code point to an owned String (`push` shares its name with Vec `push`)
+pub func pushCodepoint(String s, int codepoint) -> String {
     let cp = codepoint;
     if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
         panic("Invalid Unicode code point passed to push");
@@ -751,7 +756,7 @@ pub func upper(String s) -> String {
         }
         let cp = unwrap<int>(next_opt);
         let up_cp = unicodetopper(cp);
-        out_str = push(out_str, up_cp);
+        out_str = pushCodepoint(out_str, up_cp);
         iter = stepchar(iter);
     }
     return out_str;
@@ -773,7 +778,7 @@ pub func lower(String s) -> String {
         }
         let cp = unwrap<int>(next_opt);
         let low_cp = unicodetolower(cp);
-        out_str = push(out_str, low_cp);
+        out_str = pushCodepoint(out_str, low_cp);
         iter = stepchar(iter);
     }
     return out_str;

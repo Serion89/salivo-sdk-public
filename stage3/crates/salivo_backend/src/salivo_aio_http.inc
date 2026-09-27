@@ -100,6 +100,15 @@ static int h_digits(const unsigned char* p, uint32_t n, int64_t* out) {
     return 1;
 }
 
+/* A string returned to Salivo code (the program's allocator; see sa_str_new). */
+static char* h_strret(const unsigned char* p, uint32_t n) {
+    char* s = sa_str_new((size_t)n + 1);
+    if (!s) return NULL;
+    if (n) memcpy(s, p, n);
+    s[n] = 0;
+    return s;
+}
+
 static char* h_strdup(const unsigned char* p, uint32_t n) {
     char* s = (char*)malloc((size_t)n + 1);
     if (!s) return NULL;
@@ -3069,7 +3078,7 @@ int64_t salivo_aio_http_chunk_byte(int64_t ex, int64_t i) {
     return r;
 }
 
-static char* h_empty(void) { return h_strdup((const unsigned char*)"", 0); }
+static char* h_empty(void) { return h_strret((const unsigned char*)"", 0); }
 
 char* salivo_aio_http_text_str(int64_t ex, int64_t key) {
     HEx* e = h_ex_get(ex);
@@ -3112,7 +3121,7 @@ char* salivo_aio_http_text_str(int64_t ex, int64_t key) {
             } else n = 0;
         }
     }
-    char* s = lit ? h_strdup((const unsigned char*)lit, (uint32_t)strlen(lit)) : h_strdup(p, p ? n : 0);
+    char* s = lit ? h_strret((const unsigned char*)lit, (uint32_t)strlen(lit)) : h_strret(p, p ? n : 0);
     sa_obj_unref(&e->obj);
     return s;
 }
@@ -3121,7 +3130,7 @@ char* salivo_aio_http_header_str(int64_t ex, const char* name, int64_t idx) {
     HEx* e = h_ex_get(ex);
     if (!e) return h_empty();
     HField* f = name && e->head_ready ? h_find(e, (const unsigned char*)name, (uint32_t)strlen(name), (int32_t)idx) : NULL;
-    char* s = f ? h_strdup(e->hbase + f->voff, f->vlen) : h_empty();
+    char* s = f ? h_strret(e->hbase + f->voff, f->vlen) : h_empty();
     sa_obj_unref(&e->obj);
     return s;
 }
@@ -3145,7 +3154,7 @@ char* salivo_aio_http_header_at_str(int64_t ex, int64_t i, int64_t part) {
     if (!e->head_ready || i < 0 || i >= e->nf) s = h_empty();
     else {
         HField* f = &e->f[i];
-        s = part ? h_strdup(e->hbase + f->voff, f->vlen) : h_strdup(e->hbase + f->noff, f->nlen);
+        s = part ? h_strret(e->hbase + f->voff, f->vlen) : h_strret(e->hbase + f->noff, f->nlen);
     }
     sa_obj_unref(&e->obj);
     return s;
@@ -3161,7 +3170,7 @@ char* salivo_aio_http_trailer_str(int64_t ex, const char* name) {
         uint32_t k = 0, n = (uint32_t)strlen(name);
         if (f->nlen != n) continue;
         while (k < n && h_lc(a[k]) == h_lc((unsigned char)name[k])) k++;
-        if (k == n) s = h_strdup(e->tarena + f->voff, f->vlen);
+        if (k == n) s = h_strret(e->tarena + f->voff, f->vlen);
     }
     sa_obj_unref(&e->obj);
     return s ? s : h_empty();
@@ -3349,4 +3358,35 @@ static void sa_release_owned(int64_t h) {
         salivo_aio_cancel(h);
         salivo_aio_release(h);
     } else salivo_aio_close(h);
+}
+
+/* Stage 36.3: textual IP address ("127.0.0.1", "::1") of the peer of an exchange's or a
+ * connection's socket, for rate limiting and logging; "" when unknown. */
+char* salivo_aio_http_peer_str(int64_t h) {
+    char text[SA_PEER_TEXT] = "";
+    SaObj* o = sa_lookup(h, 0);
+    if (o) {
+        int64_t ch = o->type == OT_HTTP_EX ? ((HEx*)o)->conn_h : (o->type == OT_HTTP_CONN ? h : 0);
+        HConn* c = ch ? (HConn*)sa_lookup(ch, OT_HTTP_CONN) : NULL;
+        SaSock* k = c && c->sock ? (SaSock*)sa_lookup(c->sock, OT_TCP_STREAM) : NULL;
+        if (k) {
+            struct sockaddr_storage ss;
+            memset(&ss, 0, sizeof(ss));
+#if defined(_WIN32)
+            int sl = (int)sizeof(ss);
+            int got = !k->closed && getpeername(k->s, (struct sockaddr*)&ss, &sl) == 0;
+#else
+            socklen_t sl = (socklen_t)sizeof(ss);
+            int got = !k->closed && getpeername(k->fd, (struct sockaddr*)&ss, &sl) == 0;
+#endif
+            if (got && ss.ss_family == AF_INET6)
+                inet_ntop(AF_INET6, (void*)&((struct sockaddr_in6*)&ss)->sin6_addr, text, sizeof(text));
+            else if (got && ss.ss_family == AF_INET)
+                inet_ntop(AF_INET, (void*)&((struct sockaddr_in*)&ss)->sin_addr, text, sizeof(text));
+            sa_obj_unref(&k->obj);
+        }
+        if (c) sa_obj_unref(&c->obj);
+        sa_obj_unref(o);
+    }
+    return h_strret((const unsigned char*)text, strlen(text));
 }

@@ -63,6 +63,9 @@ long long salivo_channel_recv_i64(long long channel_handle);
 /* Set by the Stage 36.1 async runtime while it runs: legacy blocking primitives report themselves
  * so a blocking call made from an async worker is detected (see salivo_aio_runtime.c). */
 void (*salivo_aio_blocking_hook)(const char* what) = 0;
+/* Stage 36.4: set by a started async runtime. Runs fn(arg) on the runtime's blocking pool when called
+ * from an async task (the task suspends) and returns 1 with the result in *out; returns 0 elsewhere. */
+int (*salivo_aio_offload_hook)(long long (*fn)(long long), long long arg, long long* out) = 0;
 /* Allocation counters are updated from several async workers at once. This file is also built
  * with MSVC (cl) for the JIT, which lacks the GCC __atomic builtins. */
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -129,7 +132,15 @@ static void salivo_stat(int kind, long long bytes) {
 /* Static "" returned by rtconcat/rtsubstr/rtintstr on allocation failure; never freed */
 static char salivo_empty_str[1] = {0};
 
-/* Frees a heap string produced by rtconcat/rtsubstr/rtintstr (a heap "" included) */
+/* Strings returned to Salivo code by rtupper/rtlower/rttrim/rtsubstr/rtintstr and the hex
+ * digests come from the program's allocator when a Stage 3 program registered one (so a Stage 36.3
+ * request heap reclaims them); otherwise from malloc. */
+static void* (*g_rt_str_alloc)(long long n);
+void salivo_set_str_alloc(void* f) { g_rt_str_alloc = (void* (*)(long long))f; }
+static void* rt_smalloc(size_t n) { return g_rt_str_alloc ? g_rt_str_alloc((long long)n) : malloc(n); }
+
+/* Frees a heap string produced by rtconcat/rtsubstr/rtintstr (a heap "" included); only for
+ * programs without a registered allocator */
 void rtfreestr(char* s) {
     if (s && s != salivo_empty_str) free(s);
 }
@@ -250,7 +261,7 @@ static int salivo_utf8_encode_cp(long long cp, char* out) {
 char* rtupper(const char* s) {
     if (!s) return "";
     long long slen = (long long)strlen(s);
-    char* res = (char*)malloc((size_t)(slen * 4 + 4));
+    char* res = (char*)rt_smalloc((size_t)(slen * 4 + 4));
     if (!res) return "";
     long long offset = 0;
     long long out_len = 0;
@@ -296,7 +307,7 @@ char* rtupper(const char* s) {
 char* rtlower(const char* s) {
     if (!s) return "";
     long long slen = (long long)strlen(s);
-    char* res = (char*)malloc((size_t)(slen * 4 + 4));
+    char* res = (char*)rt_smalloc((size_t)(slen * 4 + 4));
     if (!res) return "";
     long long offset = 0;
     long long out_len = 0;
@@ -356,11 +367,11 @@ char* rtsubstr(const char* s, long long start, long long len) {
     /* Always a fresh heap string: callers may free a result they are done with */
     long long total_len = s ? (long long)strlen(s) : 0;
     if (start < 0) start = 0;
-    if (start >= total_len) { char* empty = (char*)malloc(1); if (empty) empty[0] = 0; return empty ? empty : salivo_empty_str; }
+    if (start >= total_len) { char* empty = (char*)rt_smalloc(1); if (empty) empty[0] = 0; return empty ? empty : salivo_empty_str; }
     if (len < 0) len = 0;
     if (start + len > total_len) len = total_len - start;
     salivo_stat(1, len + 1);
-    char* res = (char*)malloc((size_t)len + 1);
+    char* res = (char*)rt_smalloc((size_t)len + 1);
     if (!res) return salivo_empty_str;
     memcpy(res, s + start, (size_t)len);
     res[len] = '\0';
@@ -414,7 +425,7 @@ char* rttrim(const char* s) {
         s++;
     }
     if (*s == '\0') {
-        char* empty = (char*)malloc(1);
+        char* empty = (char*)rt_smalloc(1);
         if (empty) empty[0] = '\0';
         return empty ? empty : "";
     }
@@ -423,7 +434,7 @@ char* rttrim(const char* s) {
         end--;
     }
     size_t len = (size_t)(end - s + 1);
-    char* res = (char*)malloc(len + 1);
+    char* res = (char*)rt_smalloc(len + 1);
     if (!res) return "";
     memcpy(res, s, len);
     res[len] = '\0';
@@ -3362,7 +3373,7 @@ long long salivo_c_file_remove(const char* path) {
 
 char* rtintstr(long long val) {
     salivo_stat(2, 32);
-    char* buf = (char*)malloc(32);
+    char* buf = (char*)rt_smalloc(32);
     if (!buf) return salivo_empty_str;
     snprintf(buf, 32, "%lld", val);
     return buf;
@@ -3822,7 +3833,7 @@ char* salivo_crypto_sha256_str(const char* s) {
     salivo_sha256_update(&ctx, (const uint8_t*)s, strlen(s));
     uint8_t digest[32];
     salivo_sha256_final(&ctx, digest);
-    char* hex = (char*)malloc(65);
+    char* hex = (char*)rt_smalloc(65);
     if (!hex) return "";
     static const char hex_digits[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
@@ -3866,7 +3877,7 @@ char* salivo_crypto_hmac_sha256_str(const char* key, const char* msg) {
     salivo_sha256_update(&ctx, opad, 64);
     salivo_sha256_update(&ctx, inner, 32);
     salivo_sha256_final(&ctx, digest);
-    char* hex = (char*)malloc(65);
+    char* hex = (char*)rt_smalloc(65);
     if (!hex) return "";
     static const char hex_digits[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
@@ -4756,3 +4767,6 @@ void salivo_thread_sleep_ms(long long ms) {
 }
 
 
+
+/* Stage 36.4: strings other runtime files hand to Salivo come from the same allocator */
+void* salivo_rt_smalloc(long long n) { return rt_smalloc((size_t)n); }

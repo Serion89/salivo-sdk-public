@@ -1,0 +1,30 @@
+# Salivo Stage 36.4 database pooling ABI - the single canonical definition (C: salivo_db_runtime.c).
+#
+# Consumers: crates/salivo_common (db_abi.rs) for the semantic analyzer and the backend, and
+# compiler/stage3 (runtimeIntrinsic reads this file for `rtdb*` names).
+#
+# Every value is a 64-bit integer (`int`) or a NUL-terminated UTF-8 string (`string`). Pools,
+# leases (checked-out connections) and result sets cross the boundary as opaque handles.
+# Negative `int` results are error codes: -3 connection lost, -4 checkout timeout, -7 invalid
+# argument, -8 connect/authentication failure, -10 invalid handle, -11 table full, -18 query error.
+#
+# Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
+@abi_version 36400
+rtdbpoolopen|salivo_db_pool_open|int|string,int,int|network|any thread|opens one connection eagerly; caller owns the pool handle until rtdbpoolclose
+rtdbpoolclose|salivo_db_pool_close|int|int|network|any thread|idle connections close now, leased ones on release
+rtdbacquire|salivo_db_acquire|int|int|network (checkout wait up to the pool timeout)|any thread|caller owns the lease until rtdbrelease
+rtdbrelease|salivo_db_release|int|int|network (rollback)|thread holding the lease|rolls back an open transaction; returns 1 when it did
+rtdbquery|salivo_db_query|int|int,string,string,int|network|thread holding the lease|params are `<len>:<bytes>` per ? placeholder; caller owns the result handle
+rtdbresultfree|salivo_db_result_free|int|int|never|any thread|frees the result set
+rtdbrows|salivo_db_rows|int|int|never|any thread|none
+rtdbcols|salivo_db_cols|int|int|never|any thread|none
+rtdbaffected|salivo_db_affected|int|int|never|any thread|-1 for statements that return rows
+rtdblastid|salivo_db_last_id|int|int|never|any thread|none
+rtdbcolname|salivo_db_col_name|string|int,int|never|any thread|new string owned by the caller
+rtdbtext|salivo_db_text|string|int,int,int|never|any thread|new string owned by the caller ("" for NULL)
+rtdbisnull|salivo_db_is_null|int|int,int,int|never|any thread|none
+rtdbintxn|salivo_db_in_txn|int|int|never|thread holding the lease|none
+rtdbdriver|salivo_db_driver|int|int|never|any thread|1 sqlite, 2 postgres, 3 mysql
+rtdberror|salivo_db_error|string|int|never|any thread|lease (>0), pool (-pool) or last open error (0); new string owned by the caller
+rtdbstat|salivo_db_stat|int|int,int|never|any thread|0 open 1 idle 2 in use 3 max 4 created 5 waits 6 timeouts 7 broken 8 rollbacks 9 checkouts
+rtdbsetidlecheck|salivo_db_set_idle_check|int|int,int|never|any thread|idle time (ms) after which checkout health-checks a connection

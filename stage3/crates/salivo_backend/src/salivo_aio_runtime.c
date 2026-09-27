@@ -34,6 +34,7 @@
 /* Hook the legacy runtime calls before a blocking primitive (sleep, blocking channel, mutex, join).
  * Defined in salivo_task_runtime.c, which is always linked. */
 extern void (*salivo_aio_blocking_hook)(const char* what);
+extern int (*salivo_aio_offload_hook)(long long (*fn)(long long), long long arg, long long* out);
 
 #if defined(_WIN32)
 #include "salivo_aio_sys_win32.inc"
@@ -69,7 +70,7 @@ enum {
     SA_EFAILED = -17
 };
 
-#define SA_ABI_VERSION 36200
+#define SA_ABI_VERSION 36300
 
 /* ============================================================================================
  * Atomics. Relaxed counters use RELAXED; state machines use ACQ_REL; the two sleep/wake
@@ -189,6 +190,8 @@ typedef struct SaTask {
     char* last_text;                 /* owned; handed out by rtaiolasttext */
     char last_peer[SA_PEER_TEXT];    /* text address of the last datagram's sender */
     void* fiber;
+    void* heap;        /* Stage 36.3 request heap attached to this task (allocator state), or NULL */
+    void* heap_own;    /* request heap this task created (released when the task ends) */
     sa_mutex lock;     /* protects joiners and publication of the terminal state */
     SaWaiter* joiners; /* doubly linked */
     struct SaTask* qnext;               /* run-queue link (a task is in at most one queue) */
@@ -231,12 +234,33 @@ typedef struct SaJob {
  * ========================================================================================== */
 #define SA_FIBER_POOL 64
 
+/* Stage 36.3 request heaps. Stage 3 programs register their allocator's state-swap and release
+ * functions at startup; the scheduler swaps a task's heap in and out around every run, so a
+ * request heap is used only by the task it is attached to, on whatever worker runs it. */
+#define SA_HEAP_WORDS 36
+static void (*g_heap_swap)(void* save, void* load);
+static void (*g_heap_release)(void* state);
+static void* (*g_str_alloc)(int64_t n);
+
+void salivo_heap_hooks(void* swap, void* release, void* str_alloc) {
+    g_heap_swap = (void (*)(void*, void*))swap;
+    g_heap_release = (void (*)(void*))release;
+    g_str_alloc = (void* (*)(int64_t))str_alloc;
+}
+
+/* Strings handed to Salivo code come from the program's allocator when one is registered (so a
+ * request heap reclaims them), else from malloc. */
+static char* sa_str_new(size_t n) {
+    return g_str_alloc ? (char*)g_str_alloc((int64_t)n) : (char*)malloc(n);
+}
+
 typedef struct SaWorker {
     struct SaRuntime* rt;
     int32_t id;
     sa_thread th;
     void* sched_fiber;
     SaTask* current;
+    int64_t heap_save[SA_HEAP_WORDS]; /* the thread's shared allocator state while a request heap is loaded */
     sa_mutex qlock;
     SaTask *qhead, *qtail;
     int64_t qlen; /* atomic (read without the lock by stealers) */
@@ -753,7 +777,9 @@ static void sa_run_task(SaRuntime* rt, SaWorker* w, SaTask* t) {
     A_STORE(&w->preempt, 0);
     int64_t t0 = sa_now_ns();
     A_STORE(&w->running_since_ns, t0);
+    if (t->heap) g_heap_swap(w->heap_save, t->heap);
     sa_fiber_switch(t->fiber);
+    if (t->heap) g_heap_swap(t->heap, w->heap_save);
     /* Back on the scheduler fiber: the task has fully switched out, so it is now safe for
      * another worker to resume it. */
     A_STORE(&w->running_since_ns, 0);
@@ -1103,6 +1129,12 @@ static void sa_task_destroy(SaObj* o) {
 }
 
 static void sa_task_finalize(SaRuntime* rt, SaTask* t, int final_state) {
+    if (t->heap_own) { /* a request heap its creator never ended */
+        g_heap_release(t->heap_own);
+        free(t->heap_own);
+        t->heap_own = NULL;
+    }
+    t->heap = NULL;
     sa_mutex_lock(&t->lock);
     A_STORE(&t->state, final_state);
     A_STORE(&t->sched, SW_DONE);
@@ -1182,6 +1214,54 @@ static int64_t sa_spawn_in(SaRuntime* rt, int64_t fn, int64_t arg) { return sa_s
 /* Like spawn, but the task owns `h` (the argument): if the task is cancelled before it ever runs,
  * the runtime closes/releases h, so a handle handed to a task never leaks. On error the caller
  * still owns h. */
+/* Stage 36.3: synchronous indirect call of a Salivo `func(int) -> int` (the function value an
+ * application passes as a handler or middleware); InvalidArgument for a null function. */
+int64_t salivo_aio_call(int64_t fn, int64_t arg) {
+    if (!fn) return SA_EINVAL;
+    return ((int64_t (*)(int64_t))(intptr_t)fn)(arg);
+}
+
+/* Stage 36.3 request heap of the calling task. op 0: create and attach a new heap (returns it);
+ * 1: detach the attached heap; 2: attach heap h; 3: end heap h (detach, free its memory). */
+int64_t salivo_aio_heap(int64_t op, int64_t h) {
+    SaWorker* w = sa_tls_worker();
+    SaTask* t = w ? w->current : NULL;
+    if (!t) return SA_ENOTASK;
+    if (!g_heap_swap) return SA_EUNSUPPORTED;
+    void* st = (void*)(intptr_t)h;
+    switch (op) {
+    case 0:
+        if (t->heap || t->heap_own) return SA_EINVAL;
+        st = calloc(SA_HEAP_WORDS, sizeof(int64_t));
+        if (!st) return SA_EOS;
+        g_heap_swap(w->heap_save, st);
+        t->heap = t->heap_own = st;
+        return (int64_t)(intptr_t)st;
+    case 1:
+        if (t->heap) {
+            g_heap_swap(t->heap, w->heap_save);
+            t->heap = NULL;
+        }
+        return SA_OK;
+    case 2:
+        if (t->heap || !st) return SA_EINVAL;
+        g_heap_swap(w->heap_save, st);
+        t->heap = st;
+        return SA_OK;
+    case 3:
+        if (!st || st != t->heap_own) return SA_EINVAL;
+        if (t->heap == st) {
+            g_heap_swap(st, w->heap_save);
+            t->heap = NULL;
+        }
+        g_heap_release(st);
+        free(st);
+        t->heap_own = NULL;
+        return SA_OK;
+    }
+    return SA_EINVAL;
+}
+
 int64_t salivo_aio_spawn_owning(int64_t fn, int64_t h) {
     int64_t err = SA_ESHUTDOWN;
     SaRuntime* rt = sa_ctx_rt(&err);
@@ -1709,6 +1789,16 @@ int64_t salivo_aio_chan_len(int64_t h) {
 /* ============================================================================================
  * Blocking detector hook: legacy blocking primitives report themselves when called on a worker
  * ========================================================================================== */
+int64_t salivo_aio_last_value(void);
+/* Stage 36.4: blocking C work (database I/O) issued by a task runs on the blocking pool */
+static int sa_offload_hook(long long (*fn)(long long), long long arg, long long* out) {
+    SaWorker* w = sa_tls_worker();
+    if (!w || !w->current) return 0;
+    int64_t r = salivo_aio_blocking((int64_t)(intptr_t)fn, (int64_t)arg);
+    *out = r == SA_OK ? (long long)salivo_aio_last_value() : (long long)r;
+    return 1;
+}
+
 static void sa_blocking_hook(const char* what) {
     SaWorker* w = sa_tls_worker();
     if (!w || !w->current) return;
@@ -1945,6 +2035,7 @@ static void sa_hook_ref(int delta) {
     sa_mutex_lock(&g_rt_lock);
     g_started_runtimes += delta;
     salivo_aio_blocking_hook = g_started_runtimes > 0 ? sa_blocking_hook : NULL;
+    salivo_aio_offload_hook = g_started_runtimes > 0 ? sa_offload_hook : NULL;
     sa_mutex_unlock(&g_rt_lock);
 }
 
@@ -2233,7 +2324,7 @@ char* salivo_aio_buf_str(int64_t buf, int64_t len) {
     int64_t cap = sa_buf_cap(buf);
     if (cap < 0 || len < 0) len = 0;
     if (len > cap) len = cap;
-    char* s = (char*)malloc((size_t)len + 1);
+    char* s = sa_str_new((size_t)len + 1);
     if (!s) return NULL;
     if (len > 0) memcpy(s, (void*)(intptr_t)buf, (size_t)len);
     s[len] = 0;
@@ -2447,4 +2538,5 @@ static int sa_sockaddr_port(const struct sockaddr_storage* ss) {
 
 #else /* no async backend for this platform */
 #include "salivo_aio_unsupported.inc"
+void salivo_heap_hooks(void* swap, void* release, void* str_alloc) { (void)swap; (void)release; (void)str_alloc; }
 #endif

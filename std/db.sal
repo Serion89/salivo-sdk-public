@@ -1,0 +1,168 @@
+module salivo.std.db;
+
+// Stage 36.4 unified database connection pooling (docs/STAGE_36_4_DB.md).
+// One API over PostgreSQL, MySQL and SQLite:
+//   postgres://user:pass@host:5432/db   mysql://user:pass@host:3306/db   sqlite:path   sqlite::memory:
+// A DbConn is a connection checked out of its pool. Dropping it returns it to the pool, and an
+// open transaction is rolled back first. A DbRows owns a result set and frees it when dropped.
+// Handles are negative when the operation failed: read the reason with dbOpenError / dbError.
+
+><salivo.std.collections::{Vec, get, veclen};
+
+pub struct DbPool { int handle; }
+pub struct DbConn { int handle; }
+pub struct DbRows { int handle; }
+
+impl Drop for DbConn {
+    func drop(self) {
+        if (self.handle > 0) {
+            rtdbrelease(self.handle);
+        }
+    }
+}
+
+impl Drop for DbRows {
+    func drop(self) {
+        if (self.handle > 0) {
+            rtdbresultfree(self.handle);
+        }
+    }
+}
+
+/// Opens a pool of up to maxConns connections; checkout waits at most timeoutMs (0 = 5000)
+pub func dbOpen(string url, int maxConns, int timeoutMs) -> DbPool {
+    return DbPool { handle: rtdbpoolopen(url, maxConns, timeoutMs) };
+}
+
+/// Why the last dbOpen failed
+pub func dbOpenError() -> string {
+    return rtdberror(0);
+}
+
+pub func poolOk(DbPool pool) -> bool {
+    return pool.handle > 0;
+}
+
+/// Closes idle connections now; connections still checked out close when they are dropped
+pub func dbClose(DbPool pool) -> int {
+    return rtdbpoolclose(pool.handle);
+}
+
+/// Checks a connection out of the pool (blocks up to the pool timeout)
+pub func dbAcquire(DbPool pool) -> DbConn {
+    return DbConn { handle: rtdbacquire(pool.handle) };
+}
+
+pub func connOk(DbConn conn) -> bool {
+    return conn.handle > 0;
+}
+
+/// Why the pool's last checkout failed
+pub func poolError(DbPool pool) -> string {
+    return rtdberror(0 - pool.handle);
+}
+
+/// The connection's last error message ("" when the last statement succeeded)
+pub func dbError(DbConn conn) -> string {
+    return rtdberror(conn.handle);
+}
+
+/// Runs one statement
+pub func dbQuery(DbConn conn, string sql) -> DbRows {
+    return DbRows { handle: rtdbquery(conn.handle, sql, "", 0) };
+}
+
+/// Runs a statement whose `?` placeholders are bound, in order, to args as quoted literals
+pub func dbQueryArgs(DbConn conn, string sql, Vec<string> args) -> DbRows {
+    let mut packed = "";
+    let n = veclen<string>(args);
+    for (let mut i = 0; i < n; i = i + 1) {
+        let a = get<string>(args, i);
+        let alen = len(a);
+        packed = packed + $"{alen}:" + a;
+    }
+    return DbRows { handle: rtdbquery(conn.handle, sql, packed, n) };
+}
+
+/// Runs a statement and returns the rows it changed, or a negative error code
+pub func dbExec(DbConn conn, string sql) -> int {
+    let h = rtdbquery(conn.handle, sql, "", 0);
+    if (h <= 0) {
+        return h;
+    }
+    let n = rtdbaffected(h);
+    rtdbresultfree(h);
+    return n;
+}
+
+pub func dbExecArgs(DbConn conn, string sql, Vec<string> args) -> int {
+    let rows = dbQueryArgs(conn, sql, args);
+    if (rows.handle <= 0) {
+        return rows.handle;
+    }
+    return rtdbaffected(rows.handle);
+}
+
+pub func dbBegin(DbConn conn) -> bool {
+    return dbExec(conn, "BEGIN") >= 0;
+}
+
+pub func dbCommit(DbConn conn) -> bool {
+    return dbExec(conn, "COMMIT") >= 0;
+}
+
+pub func dbRollback(DbConn conn) -> bool {
+    return dbExec(conn, "ROLLBACK") >= 0;
+}
+
+pub func dbInTxn(DbConn conn) -> bool {
+    return rtdbintxn(conn.handle) == 1;
+}
+
+pub func rowsOk(DbRows rows) -> bool {
+    return rows.handle > 0;
+}
+
+pub func rowCount(DbRows rows) -> int {
+    return rtdbrows(rows.handle);
+}
+
+pub func colCount(DbRows rows) -> int {
+    return rtdbcols(rows.handle);
+}
+
+pub func colName(DbRows rows, int col) -> string {
+    return rtdbcolname(rows.handle, col);
+}
+
+/// Text of a cell ("" for SQL NULL; check cellIsNull to tell them apart)
+pub func cellText(DbRows rows, int row, int col) -> string {
+    return rtdbtext(rows.handle, row, col);
+}
+
+pub func cellIsNull(DbRows rows, int row, int col) -> bool {
+    return rtdbisnull(rows.handle, row, col) == 1;
+}
+
+pub func rowsAffected(DbRows rows) -> int {
+    return rtdbaffected(rows.handle);
+}
+
+pub func lastInsertId(DbRows rows) -> int {
+    return rtdblastid(rows.handle);
+}
+
+/// 0 open, 1 idle, 2 in use, 3 max, 4 created, 5 waits, 6 timeouts, 7 broken, 8 rollbacks, 9 checkouts
+pub func poolStat(DbPool pool, int key) -> int {
+    return rtdbstat(pool.handle, key);
+}
+
+/// Idle time (ms) after which a checkout health-checks the connection before handing it out
+pub func setIdleCheck(DbPool pool, int ms) -> int {
+    return rtdbsetidlecheck(pool.handle, ms);
+}
+
+/// 1 sqlite, 2 postgres, 3 mysql
+pub func dbDriver(DbPool pool) -> int {
+    return rtdbdriver(pool.handle);
+}
