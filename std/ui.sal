@@ -1,0 +1,730 @@
+module salivo.std.ui;
+
+// Stage 37.3 reactive UI (`@salivo/ui`, docs/STAGE_37_3_UI.md). wasm32 only; every DOM effect goes
+// through salivo.std.browser (Stage 37.2).
+//
+// Model: fine-grained signals. An effect records the signals it reads while it runs; writing a
+// signal queues exactly those effects. Template bindings ({signal} text, attr={signal},
+// if={signal}) are effects that own one DOM node each, so a write touches only the nodes bound to
+// that signal; nothing re-renders a component.
+//
+// Scheduling: synchronous. A write outside a callback runs its effects before signalSet returns.
+// Inside an event, timer or fetch callback (uiOn / uiTimeout / uiInterval / uiFetch) writes are
+// batched and flushed once when the callback returns. Effects run in FIFO order of first
+// invalidation, and one write invalidates its subscribers in the order they subscribed. An effect
+// re-run more than 100 times in one flush is a cycle and panics.
+//
+// Ownership: component(fn, ctx) runs fn(ctx) with the new component as owner. Everything created
+// while it is owner (signals, effects, elements, listeners, timers, fetches, child components) is
+// released by unmount, newest first, after the root is detached. A disposed component's callbacks
+// never run: its listeners and timers are removed and its fetches aborted. Ids are generation
+// checked: a stale id is -10 (setters, dispose) or a panic (reads).
+
+><salivo.std.mem::{allocate, alloczero, reallocate, readi64, writei64};
+><salivo.std.browser::{domCreate, domCreateText, domAppend, domInsert, domRemove, domParent, domSetText, domSetAttr,
+    jsRelease, addEvent, timerStart, timerRepeat, fetchStart, callFn, browserError};
+
+// ---- record table: 14 i64 fields per record; field 0 kind, 1 generation, 12 the owner's
+// resource record for this record (0 when unowned) ----------------------------------------
+
+global let mut g_tab: int = 0;
+global let mut g_cap: int = 0;
+global let mut g_top: int = 0;
+global let mut g_free: int = 0;
+global let mut g_q: int = 0;
+global let mut g_qcap: int = 0;
+global let mut g_qhead: int = 0;
+global let mut g_qtail: int = 0;
+global let mut g_owner: int = 0;
+global let mut g_track: int = 0;
+global let mut g_batch: int = 0;
+global let mut g_flushing: int = 0;
+global let mut g_epoch: int = 0;
+global let mut g_runs: int = 0;
+global let mut g_domwrites: int = 0;
+
+const KSIG: int = 1;
+const KEFF: int = 2;
+const KCOMP: int = 3;
+const KEDGE: int = 4;
+const KRES: int = 5;
+const KHANDLER: int = 6;
+
+const TUSER: int = 0;
+const TTEXT: int = 1;
+const TATTR: int = 2;
+const TIF: int = 3;
+
+const RSIG: int = 1;
+const REFF: int = 2;
+const RJS: int = 3;
+const RCOMP: int = 4;
+const RHANDLER: int = 5;
+
+const IDKIND: int = 1099511627776;
+const IDGEN: int = 16777216;
+const MAXGEN: int = 65535;
+
+func rd(i: int, f: int) -> int {
+    return readi64(g_tab, (i * 14 + f) * 8);
+}
+
+func wr(i: int, f: int, v: int) {
+    writei64(g_tab, (i * 14 + f) * 8, v);
+}
+
+func newRecord(kind: int) -> int {
+    if (g_tab == 0) {
+        g_cap = 64;
+        g_tab = alloczero(g_cap * 112, 8);
+        g_top = 1;
+    }
+    let mut i = g_free;
+    if (i != 0) {
+        g_free = rd(i, 2);
+    } else {
+        if (g_top >= g_cap) {
+            g_tab = reallocate(g_tab, g_cap * 112, g_cap * 224, 8);
+            g_cap = g_cap * 2;
+        }
+        i = g_top;
+        g_top = g_top + 1;
+        wr(i, 1, 0);
+    }
+    wr(i, 0, kind);
+    wr(i, 1, rd(i, 1) + 1);
+    let mut f = 2;
+    while (f < 14) {
+        wr(i, f, 0);
+        f = f + 1;
+    }
+    wr(0, kind, rd(0, kind) + 1);
+    return i;
+}
+
+func freeRecord(i: int) {
+    wr(0, rd(i, 0), rd(0, rd(i, 0)) - 1);
+    wr(i, 0, 0);
+    // a slot whose generation is exhausted is retired, so an old id can never name a new record
+    if (rd(i, 1) < MAXGEN) {
+        wr(i, 2, g_free);
+        g_free = i;
+    }
+}
+
+func idOf(i: int) -> int {
+    return rd(i, 0) * IDKIND + rd(i, 1) * IDGEN + i;
+}
+
+/// Record index of a live id of the given kind, else 0
+func indexOf(id: int, kind: int) -> int {
+    if (id <= 0 || g_tab == 0) { return 0; }
+    let i = id % IDGEN;
+    if (id / IDKIND != kind || i <= 0 || i >= g_top) { return 0; }
+    if (rd(i, 0) != kind || rd(i, 1) != (id / IDGEN) % (MAXGEN + 1)) { return 0; }
+    return i;
+}
+
+func need(id: int, kind: int, what: string) -> int {
+    let i = indexOf(id, kind);
+    if (i == 0) { panic("ui: " + what + ": invalid or disposed id"); }
+    return i;
+}
+
+/// Live counts: 0 signals, 1 effects, 2 components, 3 dependency edges, 4 owned resources,
+/// 5 callback handlers, 6 effect runs so far, 7 DOM writes made by bindings so far
+pub func uiStat(kind: int) -> int {
+    if (kind == 6) { return g_runs; }
+    if (kind == 7) { return g_domwrites; }
+    if (g_tab == 0 || kind < 0 || kind > 5) { return 0; }
+    return rd(0, kind + 1);
+}
+
+// An owner is a component (resources in field 6) or a user effect (field 11): what an effect
+// creates while it runs is disposed before it runs again.
+func resField(owner: int) -> int {
+    if (rd(owner, 0) == KEFF) { return 11; }
+    return 6;
+}
+
+// Resource records: field 2 kind, 3 value (an id, or a JS handle for RJS), 4 next, 5 previous,
+// 6 owner. Doubly linked, so disposing an owned record early also drops its entry at once.
+func resTarget(r: int) -> int {
+    let k = rd(r, 2);
+    let mut kind = 0;
+    if (k == RSIG) { kind = KSIG; }
+    if (k == REFF) { kind = KEFF; }
+    if (k == RCOMP) { kind = KCOMP; }
+    if (k == RHANDLER) { kind = KHANDLER; }
+    if (kind == 0) { return 0; }
+    return indexOf(rd(r, 3), kind);
+}
+
+func addResource(owner: int, kind: int, value: int) {
+    if (owner == 0) { return; }
+    let r = newRecord(KRES);
+    let f = resField(owner);
+    let head = rd(owner, f);
+    wr(r, 2, kind);
+    wr(r, 3, value);
+    wr(r, 4, head);
+    wr(r, 6, owner);
+    if (head != 0) { wr(head, 5, r); }
+    wr(owner, f, r);
+    let t = resTarget(r);
+    if (t != 0) { wr(t, 12, r); }
+}
+
+/// Unlinks and frees resource record r
+func removeResource(r: int) {
+    let owner = rd(r, 6);
+    let prev = rd(r, 5);
+    let next = rd(r, 4);
+    if (prev == 0) { wr(owner, resField(owner), next); } else { wr(prev, 4, next); }
+    if (next != 0) { wr(next, 5, prev); }
+    let t = resTarget(r);
+    if (t != 0 && rd(t, 12) == r) { wr(t, 12, 0); }
+    freeRecord(r);
+}
+
+/// Drops the owner's entry for record x, which is being disposed on its own
+func detachFromOwner(x: int) {
+    if (rd(x, 12) != 0) { removeResource(rd(x, 12)); }
+}
+
+/// Releases everything owner created, newest first
+func disposeResources(owner: int) {
+    let f = resField(owner);
+    while (rd(owner, f) != 0) {
+        let r = rd(owner, f);
+        let k = rd(r, 2);
+        let v = rd(r, 3);
+        removeResource(r);
+        if (k == RSIG) {
+            signalDispose(v);
+        } else if (k == REFF) {
+            effectDispose(v);
+        } else if (k == RJS) {
+            // a one-shot timer or a finished fetch has already ended: -10 is expected there
+            jsRelease(v);
+        } else if (k == RCOMP) {
+            let child = indexOf(v, KCOMP);
+            if (child != 0) { disposeComponent(child); }
+        } else if (k == RHANDLER) {
+            let h = indexOf(v, KHANDLER);
+            if (h != 0) { freeRecord(h); }
+        }
+    }
+}
+
+/// The component an owner belongs to (an effect's nearest enclosing component), or 0
+func ownerComponent(owner: int) -> int {
+    let mut o = owner;
+    while (o != 0 && rd(o, 0) == KEFF) { o = rd(o, 6); }
+    return o;
+}
+
+// ---- dependency edges: field 2 signal, 3 effect, 4 next of the signal, 5 next of the effect -
+
+func unlinkFromSignal(e: int) {
+    let s = rd(e, 2);
+    let mut prev = 0;
+    let mut cur = rd(s, 4);
+    while (cur != 0 && cur != e) {
+        prev = cur;
+        cur = rd(cur, 4);
+    }
+    if (cur == 0) { return; }
+    if (prev == 0) { wr(s, 4, rd(e, 4)); } else { wr(prev, 4, rd(e, 4)); }
+    if (rd(s, 6) == e) { wr(s, 6, prev); }
+}
+
+/// Drops every dependency of effect e
+func clearDeps(e: int) {
+    let mut edge = rd(e, 7);
+    while (edge != 0) {
+        let next = rd(edge, 5);
+        unlinkFromSignal(edge);
+        freeRecord(edge);
+        edge = next;
+    }
+    wr(e, 7, 0);
+}
+
+/// Drops every subscriber of signal s
+func clearSubscribers(s: int) {
+    let mut edge = rd(s, 4);
+    while (edge != 0) {
+        let next = rd(edge, 4);
+        let e = rd(edge, 3);
+        if (rd(e, 7) == edge) {
+            wr(e, 7, rd(edge, 5));
+        } else {
+            let mut cur = rd(e, 7);
+            while (cur != 0 && rd(cur, 5) != edge) { cur = rd(cur, 5); }
+            if (cur != 0) { wr(cur, 5, rd(edge, 5)); }
+        }
+        freeRecord(edge);
+        edge = next;
+    }
+    wr(s, 4, 0);
+    wr(s, 6, 0);
+}
+
+func track(s: int) {
+    // an effect that disposed itself while running no longer tracks anything
+    if (g_track == 0 || rd(g_track, 0) != KEFF) { return; }
+    let mut edge = rd(g_track, 7);
+    while (edge != 0) {
+        if (rd(edge, 2) == s) { return; }
+        edge = rd(edge, 5);
+    }
+    // appended, so a write notifies subscribers in the order they subscribed
+    let n = newRecord(KEDGE);
+    wr(n, 2, s);
+    wr(n, 3, g_track);
+    if (rd(s, 6) == 0) { wr(s, 4, n); } else { wr(rd(s, 6), 4, n); }
+    wr(s, 6, n);
+    wr(n, 5, rd(g_track, 7));
+    wr(g_track, 7, n);
+}
+
+// ---- scheduler ------------------------------------------------------------------------------
+
+func enqueue(e: int) {
+    if (rd(e, 8) == 1) { return; }
+    wr(e, 8, 1);
+    if (g_qtail >= g_qcap) {
+        if (g_q == 0) {
+            g_qcap = 64;
+            g_q = allocate(g_qcap * 8, 8);
+        } else {
+            g_q = reallocate(g_q, g_qcap * 8, g_qcap * 16, 8);
+            g_qcap = g_qcap * 2;
+        }
+    }
+    writei64(g_q, g_qtail * 8, idOf(e));
+    g_qtail = g_qtail + 1;
+}
+
+func notify(s: int) {
+    let mut edge = rd(s, 4);
+    while (edge != 0) {
+        enqueue(rd(edge, 3));
+        edge = rd(edge, 4);
+    }
+    if (g_batch == 0 && g_flushing == 0) { flush(); }
+}
+
+func flush() {
+    g_flushing = 1;
+    g_epoch = g_epoch + 1;
+    while (g_qhead < g_qtail) {
+        let id = readi64(g_q, g_qhead * 8);
+        g_qhead = g_qhead + 1;
+        let e = indexOf(id, KEFF);
+        if (e != 0 && rd(e, 8) == 1) {
+            wr(e, 8, 0);
+            if (rd(e, 9) != g_epoch) {
+                wr(e, 9, g_epoch);
+                wr(e, 10, 0);
+            }
+            wr(e, 10, rd(e, 10) + 1);
+            if (rd(e, 10) > 100) {
+                panic("ui: reactive cycle: an effect re-ran 100 times in one update");
+            }
+            runEffect(e);
+        }
+    }
+    g_qhead = 0;
+    g_qtail = 0;
+    g_flushing = 0;
+}
+
+func batchEnd() {
+    g_batch = g_batch - 1;
+    if (g_batch == 0 && g_flushing == 0) { flush(); }
+}
+
+// ---- signals: field 2 int value, 3 text box, 4 first subscriber edge, 5 is text, 6 last edge
+
+func signalRecord(v: int, box: int, text: int) -> int {
+    let s = newRecord(KSIG);
+    wr(s, 2, v);
+    wr(s, 3, box);
+    wr(s, 5, text);
+    let id = idOf(s);
+    addResource(g_owner, RSIG, id);
+    return id;
+}
+
+/// An int signal
+pub func signalNew(value: int) -> int {
+    return signalRecord(value, 0, 0);
+}
+
+/// A text signal
+pub func textSignal(value: string) -> int {
+    return signalRecord(0, rtbrkeep(value), 1);
+}
+
+/// Signal record of a live signal of the expected kind (text 1, int 0). A disposed id is 0; a
+/// signal of the other kind is a programming error and panics.
+func signalOf(sig: int, text: int, what: string) -> int {
+    let s = indexOf(sig, KSIG);
+    if (s != 0 && rd(s, 5) != text) {
+        if (text == 1) { panic("ui: " + what + ": an int signal is not a text signal"); }
+        panic("ui: " + what + ": a text signal is not an int signal");
+    }
+    return s;
+}
+
+pub func signalGet(sig: int) -> int {
+    let s = signalOf(sig, 0, "signalGet");
+    if (s == 0) { panic("ui: signalGet: invalid or disposed id"); }
+    track(s);
+    return rd(s, 2);
+}
+
+pub func textGet(sig: int) -> string {
+    let s = signalOf(sig, 1, "textGet");
+    if (s == 0) { panic("ui: textGet: invalid or disposed id"); }
+    track(s);
+    return rtbrkept(rd(s, 3));
+}
+
+/// Writes an int signal; writing the current value notifies nobody. -10 for a disposed signal;
+/// a text signal panics (use textSet).
+pub func signalSet(sig: int, value: int) -> int {
+    let s = signalOf(sig, 0, "signalSet");
+    if (s == 0) { return -10; }
+    if (rd(s, 2) == value) { return 0; }
+    wr(s, 2, value);
+    notify(s);
+    return 0;
+}
+
+/// Writes a text signal; same rules as signalSet (an int signal panics).
+pub func textSet(sig: int, value: string) -> int {
+    let s = signalOf(sig, 1, "textSet");
+    if (s == 0) { return -10; }
+    if (rtbrkept(rd(s, 3)) == value) { return 0; }
+    rtbrunkeep(rd(s, 3));
+    wr(s, 3, rtbrkeep(value));
+    notify(s);
+    return 0;
+}
+
+/// Disposes a signal: its subscribers stop depending on it. Second dispose is -10.
+pub func signalDispose(sig: int) -> int {
+    let s = indexOf(sig, KSIG);
+    if (s == 0) { return -10; }
+    detachFromOwner(s);
+    clearSubscribers(s);
+    rtbrunkeep(rd(s, 3));
+    freeRecord(s);
+    return 0;
+}
+
+/// Writes a signal's value as text into a node (textContent) or an attribute (attr != ""). The
+/// value is formatted here, never returned: Stage 3 frees a string temporary inside the function
+/// that made it, but not a string returned to a caller, so a returning helper would leak per update.
+func writeSignal(node: int, attr: string, sig: int) {
+    let s = indexOf(sig, KSIG);
+    if (s == 0) { return; }
+    track(s);
+    if (rd(s, 5) == 1) {
+        if (attr == "") { domSetText(node, rtbrkept(rd(s, 3))); } else { domSetAttr(node, attr, rtbrkept(rd(s, 3))); }
+        return;
+    }
+    let v = rd(s, 2);
+    if (attr == "") { domSetText(node, $"{v}"); } else { domSetAttr(node, attr, $"{v}"); }
+}
+
+func signalTruthy(sig: int) -> bool {
+    let s = indexOf(sig, KSIG);
+    if (s == 0) { return false; }
+    track(s);
+    if (rd(s, 5) == 1) { return len(rtbrkept(rd(s, 3))) > 0; }
+    return rd(s, 2) != 0;
+}
+
+// ---- effects: field 2 type, 3..5 operands, 6 owner, 7 deps, 8 queued, 9 epoch, 10 runs,
+// 11 owned resources (user effects) or shown (if bindings)
+
+func runEffect(e: int) {
+    clearDeps(e);
+    let t = rd(e, 2);
+    let prev_track = g_track;
+    let prev_owner = g_owner;
+    g_track = e;
+    g_owner = rd(e, 6);
+    g_runs = g_runs + 1;
+    if (t == TUSER) {
+        disposeResources(e);
+        g_owner = e;
+        callFn(rd(e, 3), rd(e, 4));
+    } else if (t == TTEXT) {
+        writeSignal(rd(e, 3), "", rd(e, 4));
+        g_domwrites = g_domwrites + 1;
+    } else if (t == TATTR) {
+        writeSignal(rd(e, 3), rtbrkept(rd(e, 5)), rd(e, 4));
+        g_domwrites = g_domwrites + 1;
+    } else if (t == TIF) {
+        let show = signalTruthy(rd(e, 4));
+        if (show && rd(e, 11) == 0) {
+            let anchor = rd(e, 5);
+            let parent = domParent(anchor);
+            domInsert(parent, rd(e, 3), anchor);
+            jsRelease(parent);
+            wr(e, 11, 1);
+            g_domwrites = g_domwrites + 1;
+        } else if (!show && rd(e, 11) == 1) {
+            domRemove(rd(e, 3));
+            wr(e, 11, 0);
+            g_domwrites = g_domwrites + 1;
+        }
+    }
+    g_track = prev_track;
+    g_owner = prev_owner;
+}
+
+func effectRecord(t: int, a: int, b: int, c: int) -> int {
+    let e = newRecord(KEFF);
+    wr(e, 2, t);
+    wr(e, 3, a);
+    wr(e, 4, b);
+    wr(e, 5, c);
+    wr(e, 6, g_owner);
+    let id = idOf(e);
+    addResource(g_owner, REFF, id);
+    // the first run is batched: signals it writes are flushed after it, never inside it
+    g_batch = g_batch + 1;
+    runEffect(e);
+    batchEnd();
+    return id;
+}
+
+/// Runs fn(ctx) now and again whenever a signal it read changes
+pub func effectNew(fn: int, ctx: int) -> int {
+    if (fn == 0) { return -7; }
+    return effectRecord(TUSER, fn, ctx, 0);
+}
+
+/// Stops an effect. Second dispose is -10.
+pub func effectDispose(eff: int) -> int {
+    let e = indexOf(eff, KEFF);
+    if (e == 0) { return -10; }
+    detachFromOwner(e);
+    clearDeps(e);
+    if (rd(e, 2) == TUSER) { disposeResources(e); }
+    if (rd(e, 2) == TATTR) { rtbrunkeep(rd(e, 5)); }
+    freeRecord(e);
+    return 0;
+}
+
+/// Runs fn(ctx) with signal writes batched: effects run once, when it returns
+pub func batch(fn: int, ctx: int) -> int {
+    g_batch = g_batch + 1;
+    let r = callFn(fn, ctx);
+    batchEnd();
+    return r;
+}
+
+// ---- components: field 2 fn, 3 ctx, 4 root node, 5 parent, 6 resources -------------------
+
+/// Creates a component: fn(ctx) builds and returns its root node with this component as owner.
+pub func component(fn: int, ctx: int) -> int {
+    if (fn == 0) { return -7; }
+    let c = newRecord(KCOMP);
+    let id = idOf(c);
+    wr(c, 2, fn);
+    wr(c, 3, ctx);
+    wr(c, 5, g_owner);
+    addResource(g_owner, RCOMP, id);
+    let prev_owner = g_owner;
+    let prev_track = g_track;
+    g_owner = c;
+    g_track = 0;
+    g_batch = g_batch + 1;
+    let root = callFn(fn, ctx);
+    g_owner = prev_owner;
+    g_track = prev_track;
+    batchEnd();
+    if (root <= 0) {
+        disposeComponent(c);
+        return -7;
+    }
+    wr(c, 4, root);
+    return id;
+}
+
+/// The root node of a component (owned by the component)
+pub func componentRoot(comp: int) -> int {
+    let c = indexOf(comp, KCOMP);
+    if (c == 0) { return -10; }
+    return rd(c, 4);
+}
+
+pub func mount(parent: int, comp: int) -> int {
+    let c = indexOf(comp, KCOMP);
+    if (c == 0) { return -10; }
+    return domAppend(parent, rd(c, 4));
+}
+
+/// Inserts comp before another mounted component (0 appends): keyed list insert and reorder
+pub func mountBefore(parent: int, comp: int, before: int) -> int {
+    let c = indexOf(comp, KCOMP);
+    if (c == 0) { return -10; }
+    if (before == 0) { return domAppend(parent, rd(c, 4)); }
+    let b = indexOf(before, KCOMP);
+    if (b == 0) { return -10; }
+    return domInsert(parent, rd(c, 4), rd(b, 4));
+}
+
+/// Detaches and disposes a component and everything it owns. Second unmount is -10.
+pub func unmount(comp: int) -> int {
+    let c = indexOf(comp, KCOMP);
+    if (c == 0) { return -10; }
+    disposeComponent(c);
+    return 0;
+}
+
+func disposeComponent(c: int) {
+    detachFromOwner(c);
+    if (rd(c, 4) > 0) { domRemove(rd(c, 4)); }
+    disposeResources(c);
+    freeRecord(c);
+}
+
+// ---- callbacks owned by the current owner: field 2 fn, 3 component ctx, 4 owner id ----------
+
+func handlerRecord(fn: int) -> int {
+    if (fn == 0) { panic("ui: null callback"); }
+    let h = newRecord(KHANDLER);
+    wr(h, 2, fn);
+    if (g_owner != 0) {
+        let comp = ownerComponent(g_owner);
+        if (comp != 0) { wr(h, 3, rd(comp, 3)); }
+        wr(h, 4, idOf(g_owner));
+    }
+    let id = idOf(h);
+    addResource(g_owner, RHANDLER, id);
+    return id;
+}
+
+/// Browser entry point of every UI callback: runs the handler batched, with its component as owner
+pub func uiDispatch(hid: int) -> int {
+    let h = indexOf(hid, KHANDLER);
+    if (h == 0) { return 0; }
+    let mut owner = 0;
+    if (rd(h, 4) != 0) {
+        owner = indexOf(rd(h, 4), rd(h, 4) / IDKIND);
+        if (owner == 0) { return 0; }
+    }
+    let prev_owner = g_owner;
+    g_owner = owner;
+    g_batch = g_batch + 1;
+    callFn(rd(h, 2), rd(h, 3));
+    g_owner = prev_owner;
+    batchEnd();
+    return 0;
+}
+
+func owned(handle: int, what: string) -> int {
+    if (handle <= 0) { panic("ui: " + what + " failed: " + browserError()); }
+    addResource(g_owner, RJS, handle);
+    return handle;
+}
+
+/// fn(ctx) after ms, owned by the current component (cancelled when it unmounts)
+pub func uiTimeout(ms: int, fn: int) -> int {
+    return owned(timerStart(ms, uiDispatch, handlerRecord(fn)), "timer");
+}
+
+pub func uiInterval(ms: int, fn: int) -> int {
+    return owned(timerRepeat(ms, uiDispatch, handlerRecord(fn)), "timer");
+}
+
+/// fetch owned by the current component: aborted when it unmounts, so fn never sees a disposed
+/// component. In fn, currentEvent() is the response.
+pub func uiFetch(method: string, url: string, headers: string, body: string, fn: int) -> int {
+    return owned(fetchStart(method, url, headers, body, uiDispatch, handlerRecord(fn)), "fetch");
+}
+
+// ---- template builders (targets of the template lowering) -----------------------------------
+
+/// <tag>: a new element owned by the current component
+pub func uiEl(tag: string) -> int {
+    let n = domCreate(tag);
+    if (n <= 0) { panic("ui: cannot create <" + tag + ">: " + browserError()); }
+    addResource(g_owner, RJS, n);
+    return n;
+}
+
+/// name="text"
+pub func uiAttr(node: int, name: string, value: string) -> int {
+    if (domSetAttr(node, name, value) != 0) { panic("ui: attribute " + name + ": " + browserError()); }
+    return node;
+}
+
+/// name={signal}: the attribute follows the signal
+pub func uiBind(node: int, name: string, sig: int) -> int {
+    need(sig, KSIG, "attribute " + name + " must be bound to a signal");
+    effectRecord(TATTR, node, sig, rtbrkeep(name));
+    return node;
+}
+
+/// on:event={handler}: handler(component ctx) runs batched
+pub func uiOn(node: int, event: string, fn: int) -> int {
+    owned(addEvent(node, event, uiDispatch, handlerRecord(fn)), "listener on:" + event);
+    return node;
+}
+
+/// "text" child: a text node, never parsed as HTML
+pub func uiText(node: int, text: string) -> int {
+    let t = domCreateText(text);
+    domAppend(node, t);
+    jsRelease(t);
+    return node;
+}
+
+/// The node to insert for a child: an element, a component's root, or a text node bound to a signal
+func childNode(child: int) -> int {
+    let kind = child / IDKIND;
+    if (kind == KSIG) {
+        need(child, KSIG, "{signal} child");
+        let t = domCreateText("");
+        addResource(g_owner, RJS, t);
+        effectRecord(TTEXT, t, child, 0);
+        return t;
+    }
+    if (kind == KCOMP) {
+        return rd(need(child, KCOMP, "component child"), 4);
+    }
+    if (child <= 0 || kind != 0) { panic("ui: a child must be an element, a signal or a component"); }
+    return child;
+}
+
+/// {child} or <child/>
+pub func uiAdd(node: int, child: int) -> int {
+    domAppend(node, childNode(child));
+    return node;
+}
+
+/// <child if={signal}/>: child is in the DOM exactly while the signal is non-zero / non-empty
+pub func uiAddIf(node: int, child: int, sig: int) -> int {
+    need(sig, KSIG, "if must be bound to a signal");
+    let anchor = domCreateText("");
+    domAppend(node, anchor);
+    addResource(g_owner, RJS, anchor);
+    effectRecord(TIF, childNode(child), sig, anchor);
+    return node;
+}
+
+/// <Comp ctx={e}/>
+pub func uiComp(fn: int, ctx: int) -> int {
+    let c = component(fn, ctx);
+    if (c < 0) { panic("ui: component returned no root node"); }
+    return c;
+}

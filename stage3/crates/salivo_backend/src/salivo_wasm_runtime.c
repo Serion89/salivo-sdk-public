@@ -127,6 +127,31 @@ void* calloc(long long a, long long b) {
     return memset(malloc(a * b), 0, (uptr)(a * b));
 }
 
+/* salivo.std.mem (allocate / alloczero / deallocate / reallocate), with the native runtime's
+ * contract: size <= 0 yields 0, reallocate of 0 allocates, reallocate to size <= 0 frees. Blocks
+ * are 16-byte aligned; a larger alignment is not available on wasm32 and is a fatal error. */
+static void check_align(long long a) {
+    if (a > 16) fatal("panic: alignment above 16 bytes is not supported on wasm32\n");
+}
+long long salivo_crt_salivo_alloc(long long n, long long a) {
+    check_align(a);
+    return n <= 0 ? 0 : (long long)(uptr)malloc(n);
+}
+long long salivo_crt_salivo_alloc_zeroed(long long n, long long a) {
+    check_align(a);
+    return n <= 0 ? 0 : (long long)(uptr)calloc(n, 1);
+}
+void salivo_crt_salivo_deallocate(long long p, long long n, long long a) {
+    (void)n; (void)a;
+    free((void*)(uptr)p);
+}
+long long salivo_crt_salivo_reallocate(long long p, long long old, long long n, long long a) {
+    (void)old;
+    check_align(a);
+    if (n <= 0) { free((void*)(uptr)p); return 0; }
+    return (long long)(uptr)realloc((void*)(uptr)p, n);
+}
+
 /* Single linear heap: the per-request heap hooks of the native runtime are not used on wasm32. */
 void salivo_heap_hooks(void* swap, void* release, void* str_alloc) { (void)swap; (void)release; (void)str_alloc; }
 void salivo_set_str_alloc(void* f) { (void)f; }

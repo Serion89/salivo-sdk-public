@@ -7,7 +7,7 @@
 **A compiled systems language with a self-hosted compiler, deterministic cleanup and tiny native binaries**
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
-[![Version](https://img.shields.io/badge/version-v1.0.14-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.15-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux%20x64-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
@@ -101,7 +101,7 @@ Salivo builds faster, lighter and smaller than Zig; Zig currently generates fast
 
 ### Windows (x64)
 
-1. Download **`salivo-sdk-1.0.14-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
+1. Download **`salivo-sdk-1.0.15-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
 2. Double-click **`Salivo Setup.exe`**. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
 3. Open a new terminal (or restart VS Code).
 
@@ -117,15 +117,15 @@ Cloning this repository and running `install.bat` also works, but the release zi
 
 ### Linux (x64)
 
-1. Download **`salivo-sdk-1.0.14-linux-x64.tar.gz`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
+1. Download **`salivo-sdk-1.0.15-linux-x64.tar.gz`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
 2. Install clang if you do not have it:
    - Ubuntu 24.04 and newer: `sudo apt install clang`
    - Debian 12 or Ubuntu 22.04: `sudo apt install clang-16` (setup finds it automatically)
    - Fedora: `sudo dnf install clang` / Arch: `sudo pacman -S clang`
 3. Extract and run the installer:
    ```bash
-   tar xzf salivo-sdk-1.0.14-linux-x64.tar.gz
-   sh salivo-sdk-1.0.14-linux-x64/install.sh
+   tar xzf salivo-sdk-1.0.15-linux-x64.tar.gz
+   sh salivo-sdk-1.0.15-linux-x64/install.sh
    ```
 4. Open a new terminal.
 
@@ -414,7 +414,7 @@ salivodoc src/             # generate documentation
 
 ### VS Code extension
 
-Installed by setup (`vscode/salivo-1.0.14.vsix`): syntax highlighting, snippets (`main`, `func`, `struct`, `impl`, `drop`, `match`, `for` and more), file icons, and commands: **Ctrl+F5** run, **Ctrl+Shift+B** build, **Ctrl+Shift+K** check, **Ctrl+Shift+L** lint, **Shift+Alt+F** format.
+Installed by setup (`vscode/salivo-1.0.15.vsix`): syntax highlighting, snippets (`main`, `func`, `struct`, `impl`, `drop`, `match`, `for` and more), file icons, and commands: **Ctrl+F5** run, **Ctrl+Shift+B** build, **Ctrl+Shift+K** check, **Ctrl+Shift+L** lint, **Shift+Alt+F** format.
 
 ---
 

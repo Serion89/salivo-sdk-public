@@ -1,0 +1,121 @@
+module salivo.std.browser;
+
+// Stage 37.2 browser DOM + JavaScript FFI (docs/STAGE_37_2_BROWSER.md). wasm32 only: build with
+// `sf build app.sal --target wasm32` and load the module with scripts/salivo_browser.mjs.
+//
+// JavaScript values (DOM nodes, events, responses, any object) are opaque int handles into the
+// host's handle table; 0 is null. A handle a function returns is owned by the caller until
+// jsRelease. Exceptions: domWindow / domDocument are permanent, and currentEvent() is borrowed
+// for the duration of the callback. Negative results are error codes:
+//   -7 invalid argument   -10 invalid, released or stale handle   -11 handle table full
+//   -20 JavaScript/DOM exception (message: browserError())
+//   -21 type/conversion error (wrong JS type, integer outside +-(2^53-1), NUL in a JS string)
+// Functions that return a string report failure through browserStatus() (0 = ok).
+// Callbacks are func(int) -> int values: fn(ctx) runs on the browser event loop.
+
+pub func domWindow() -> int { return rtbrwindow(); }
+pub func domDocument() -> int { return rtbrdocument(); }
+pub func domBody() -> int { return rtbrgetobj(rtbrdocument(), "body"); }
+
+/// Ends a handle: a node/object reference, a listener, a timer (cancels it) or a fetch (aborts it).
+/// Releasing twice is -10; a permanent (window, document) or borrowed (currentEvent) handle is -7.
+pub func jsRelease(int h) -> int { return rtbrrelease(h); }
+/// Status of the last browser call: 0 or an error code
+pub func browserStatus() -> int { return rtbrstatus(); }
+/// Message of the last failure (a JavaScript exception's "Name: message")
+pub func browserError() -> string { return rtbrerror(); }
+/// Live host objects: 0 handles, 1 listeners, 2 timers, 3 fetches; 4 callbacks dispatched so far,
+/// 5 linear memory size in bytes
+pub func browserStat(int kind) -> int { return rtbrstat(kind); }
+/// 1 when both handles name the same JavaScript value
+pub func jsSame(int a, int b) -> int { return rtbrsame(a, b); }
+
+// ---- DOM ------------------------------------------------------------------------------------
+
+/// root.querySelector(selector): new handle, 0 when nothing matches, -20 for an invalid selector
+pub func domQuery(int root, string selector) -> int { return rtbrquery(root, selector); }
+pub func domById(string id) -> int { return rtbrbyid(id); }
+pub func domCreate(string tag) -> int { return rtbrcreate(tag); }
+/// A text node: the content is never parsed as HTML
+pub func domCreateText(string text) -> int { return rtbrcreatetext(text); }
+/// Appends child (moving it if it already has a parent)
+pub func domAppend(int parent, int child) -> int { return rtbrinsert(parent, child, 0); }
+/// Inserts child before `before` (0 appends)
+pub func domInsert(int parent, int child, int before) -> int { return rtbrinsert(parent, child, before); }
+/// Detaches node from its parent; the handle stays valid
+pub func domRemove(int node) -> int { return rtbrremove(node); }
+pub func domParent(int node) -> int { return rtbrparent(node); }
+pub func domChildCount(int node) -> int { return rtbrchildcount(node); }
+pub func domChild(int node, int i) -> int { return rtbrchild(node, i); }
+/// textContent = text (never parsed as HTML)
+pub func domSetText(int node, string text) -> int { return rtbrsettext(node, text); }
+pub func domText(int node) -> string { return rtbrtext(node); }
+pub func domSetAttr(int node, string name, string value) -> int { return rtbrsetattr(node, name, value); }
+/// "" when absent; domHasAttr tells absent from empty
+pub func domAttr(int node, string name) -> string { return rtbrattr(node, name); }
+pub func domHasAttr(int node, string name) -> bool { return rtbrhasattr(node, name) == 1; }
+pub func domRemoveAttr(int node, string name) -> int { return rtbrremoveattr(node, name); }
+/// Lower-case tag name, "#text" for a text node
+pub func domTag(int node) -> string { return rtbrtag(node); }
+
+// ---- typed JavaScript property access (no eval) ---------------------------------------------
+
+/// "undefined" "null" "boolean" "number" "string" "object" "function" "bigint" "symbol"
+pub func jsTypeOf(int obj, string name) -> string { return rtbrtypeof(obj, name); }
+pub func jsGetStr(int obj, string name) -> string { return rtbrgetstr(obj, name); }
+pub func jsSetStr(int obj, string name, string value) -> int { return rtbrsetstr(obj, name, value); }
+/// obj[name] as an exact integer; on -21 (not a safe integer) returns 0 and browserStatus() is -21
+pub func jsGetInt(int obj, string name) -> int { return rtbrgetint(obj, name); }
+/// -21 when value is outside +-(2^53-1), which a JavaScript number cannot hold exactly
+pub func jsSetInt(int obj, string name, int value) -> int { return rtbrsetint(obj, name, value); }
+pub func jsGetBool(int obj, string name) -> bool { return rtbrgetbool(obj, name) == 1; }
+pub func jsSetBool(int obj, string name, bool value) -> int {
+    if (value) { return rtbrsetbool(obj, name, 1); }
+    return rtbrsetbool(obj, name, 0);
+}
+/// obj[name] as a new handle; 0 for null/undefined, -21 for a primitive
+pub func jsGetObj(int obj, string name) -> int { return rtbrgetobj(obj, name); }
+/// obj[name]() ; -21 when it is not a function, -20 when it throws
+pub func jsCall(int obj, string name) -> int { return rtbrcall(obj, name); }
+pub func jsCallStr(int obj, string name, string arg) -> int { return rtbrcallstr(obj, name, arg); }
+
+// ---- events, timers, fetch ------------------------------------------------------------------
+
+/// Calls fn(ctx) for every `kind` event on target. Returns the listener handle; jsRelease
+/// (or removeEvent) detaches it, and a removed listener is never called again.
+pub func addEvent(int target, string kind, int fn, int ctx) -> int { return rtbrlisten(target, kind, fn, ctx); }
+pub func removeEvent(int listener) -> int { return rtbrrelease(listener); }
+/// The event (in a listener) or response (in a fetch callback) being dispatched; 0 in a timer.
+/// Borrowed: valid until the callback returns.
+pub func currentEvent() -> int { return rtbrevent(); }
+
+/// One-shot timer: fn(ctx) after ms. The handle ends after the callback.
+pub func timerStart(int ms, int fn, int ctx) -> int { return rtbrtimer(ms, 0, fn, ctx); }
+/// Repeating timer: fn(ctx) every ms until timerCancel
+pub func timerRepeat(int ms, int fn, int ctx) -> int { return rtbrtimer(ms, 1, fn, ctx); }
+pub func timerCancel(int timer) -> int { return rtbrrelease(timer); }
+
+/// Starts fetch(url) with method, headers ("Name: value" lines) and body. fn(ctx) runs once
+/// when it completes, with the response as currentEvent(). fetchCancel aborts it, and then the
+/// callback never runs.
+pub func fetchStart(string method, string url, string headers, string body, int fn, int ctx) -> int {
+    return rtbrfetch(method, url, headers, body, fn, ctx);
+}
+pub func fetchCancel(int request) -> int { return rtbrrelease(request); }
+/// HTTP status of a response; 0 when the request failed before a response
+pub func fetchStatus(int res) -> int { return rtbrgetint(res, "status"); }
+pub func fetchBody(int res) -> string { return rtbrgetstr(res, "body"); }
+/// "" on success, "http" (status >= 400), "network" (no response) or "invalid" (unreadable body)
+pub func fetchError(int res) -> string { return rtbrgetstr(res, "error"); }
+/// Response header by lower-case name, "" when absent
+pub func fetchHeader(int res, string name) -> string {
+    let h = rtbrgetobj(res, "headers");
+    if (h <= 0) { return ""; }
+    let mut v = "";
+    if (rtbrtypeof(h, name) == "string") { v = rtbrgetstr(h, name); }
+    rtbrrelease(h);
+    return v;
+}
+
+/// Synchronous call of a Salivo func(int) -> int value
+pub func callFn(int fn, int ctx) -> int { return rtbrapply(fn, ctx); }

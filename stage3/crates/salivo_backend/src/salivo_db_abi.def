@@ -6,16 +6,23 @@
 # Every value is a 64-bit integer (`int`) or a NUL-terminated UTF-8 string (`string`). Pools,
 # leases (checked-out connections) and result sets cross the boundary as opaque handles.
 # Negative `int` results are error codes: -3 connection lost, -4 checkout timeout, -7 invalid
-# argument, -8 connect/authentication failure, -10 invalid handle, -11 table full, -18 query error.
+# argument, -8 connect/authentication failure, -10 invalid handle, -11 table full, -12 pool closed,
+# -13 another statement or an open row stream is using the lease, -14 cancelled (token or shutdown
+# timeout), -15 query timeout, -18 query error.
 #
 # Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
-@abi_version 36400
+@abi_version 36401
 rtdbpoolopen|salivo_db_pool_open|int|string,int,int|network|any thread|opens one connection eagerly; caller owns the pool handle until rtdbpoolclose
-rtdbpoolclose|salivo_db_pool_close|int|int|network|any thread|idle connections close now, leased ones on release
+rtdbpoolclose|salivo_db_pool_close|int|int|network|any thread|idle connections close now, leased ones on release; waiting checkouts fail with -12
+rtdbclosewait|salivo_db_pool_close_wait|int|int,int|network (waits up to ms)|any thread|closes, then waits up to ms for leases: 0 drained, -4 leases still out (their statements are cancelled)
 rtdbacquire|salivo_db_acquire|int|int|network (checkout wait up to the pool timeout)|any thread|caller owns the lease until rtdbrelease
-rtdbrelease|salivo_db_release|int|int|network (rollback)|thread holding the lease|rolls back an open transaction; returns 1 when it did
+rtdbacquirewith|salivo_db_acquire_with|int|int,int|network (checkout wait up to the pool timeout)|any thread|as rtdbacquire; cancelling the token (0 = none) ends the wait with -14
+rtdbrelease|salivo_db_release|int|int|network (rollback)|thread holding the lease|waits for a running statement, ends an open row stream, rolls back an open transaction; returns 1 when it rolled back
 rtdbquery|salivo_db_query|int|int,string,string,int|network|thread holding the lease|params are `<len>:<bytes>` per ? placeholder; caller owns the result handle
-rtdbresultfree|salivo_db_result_free|int|int|never|any thread|frees the result set
+rtdbquerywith|salivo_db_query_with|int|int,string,string,int,int|network|thread holding the lease|as rtdbquery; cancelling the token (0 = none) stops the statement server-side (-14)
+rtdbstream|salivo_db_stream|int|int,string,string,int,int|network|thread holding the lease|row stream over one statement: read rows with rtdbnext; the lease runs nothing else until the stream ends or is freed
+rtdbnext|salivo_db_next|int|int|network|thread holding the lease|1 next row (read it as row 0), 0 end, negative error (the stream ends)
+rtdbresultfree|salivo_db_result_free|int|int|network (ends an open row stream)|any thread|frees the result set
 rtdbrows|salivo_db_rows|int|int|never|any thread|none
 rtdbcols|salivo_db_cols|int|int|never|any thread|none
 rtdbaffected|salivo_db_affected|int|int|never|any thread|-1 for statements that return rows
@@ -26,5 +33,9 @@ rtdbisnull|salivo_db_is_null|int|int,int,int|never|any thread|none
 rtdbintxn|salivo_db_in_txn|int|int|never|thread holding the lease|none
 rtdbdriver|salivo_db_driver|int|int|never|any thread|1 sqlite, 2 postgres, 3 mysql
 rtdberror|salivo_db_error|string|int|never|any thread|lease (>0), pool (-pool) or last open error (0); new string owned by the caller
-rtdbstat|salivo_db_stat|int|int,int|never|any thread|0 open 1 idle 2 in use 3 max 4 created 5 waits 6 timeouts 7 broken 8 rollbacks 9 checkouts
+rtdbstat|salivo_db_stat|int|int,int|never|any thread|0 open 1 idle 2 in use 3 max 4 created 5 waits 6 timeouts 7 broken 8 rollbacks 9 checkouts 10 expired
 rtdbsetidlecheck|salivo_db_set_idle_check|int|int,int|never|any thread|idle time (ms) after which checkout health-checks a connection
+rtdbsetlimit|salivo_db_set_limit|int|int,int,int|never|any thread|key 0 connect timeout (> 0), 1 query timeout, 2 idle timeout, 3 connection max lifetime; ms, 0 = off
+rtdbtokennew|salivo_db_token_new|int||never|any thread|caller owns the cancellation token until rtdbtokenfree
+rtdbtokencancel|salivo_db_token_cancel|int|int|never|any thread|the checkout or statement using the token stops within 50 ms
+rtdbtokenfree|salivo_db_token_free|int|int|never|any thread|none

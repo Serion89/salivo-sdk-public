@@ -6,8 +6,10 @@
 #include <string.h>
 #endif
 
-long long rtcharat(const char* s, long long i) {
-    return s ? (long long)(unsigned char)s[i] : 0;
+/* Salivo passes strings as 64-bit address slots: take them as long long so the signatures match the
+   IR on 32-bit targets too (wasm32 would otherwise link the call to a trap) */
+long long rtcharat(long long s, long long i) {
+    return s ? (long long)((const unsigned char*)(size_t)s)[i] : 0;
 }
 
 void rtexit(long long code) {
@@ -18,8 +20,8 @@ long long rtfloattoint(double f) {
     return (long long)f;
 }
 
-long long rtstrtoptr(const char* s) {
-    return (long long)s;
+long long rtstrtoptr(long long s) {
+    return s;
 }
 
 /* Slot and `global let` accessors (rtmemreadval, rtglobalget, ...) are defined in the IR preamble. */

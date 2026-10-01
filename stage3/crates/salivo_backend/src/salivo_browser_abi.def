@@ -1,0 +1,61 @@
+# Salivo Stage 37.2 browser DOM + JavaScript FFI ABI - the single canonical definition
+# (C: salivo_browser_runtime.c, JS host: scripts/salivo_browser.mjs, docs/STAGE_37_2_BROWSER.md).
+#
+# Consumers: crates/salivo_common (aio_abi.rs) for the semantic analyzer, and compiler/stage3
+# (runtimeIntrinsic reads this file for `rtbr*` names). The C symbols exist only in the wasm32
+# runtime, so a native build that calls one fails to link.
+#
+# Every value is a 64-bit integer (`int`) or a NUL-terminated UTF-8 string (`string`). JavaScript
+# objects never enter linear memory: they cross as opaque handles (index + generation) into the
+# host handle table. Handle 0 is null. A handle is owned by the Salivo program until rtbrrelease,
+# except the window and document handles (permanent) and the handle rtbrevent returns (borrowed:
+# valid only during the callback). Releasing a handle twice, or using a released one, is -10.
+# Negative `int` results are error codes: -7 invalid argument, -10 invalid or stale handle,
+# -11 handle table full, -20 JavaScript/DOM exception (message: rtbrerror), -21 type or conversion
+# error (wrong JS type, integer outside +-(2^53-1), NUL in a JS string, invalid UTF-8),
+# -22 unsupported in this host. Functions returning `string` report failure through rtbrstatus.
+# Host scheduling is the browser event loop; callbacks are synchronous func(int) -> int calls.
+#
+# Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
+@abi_version 37201
+rtbrwindow|salivo_br_window|int||no|main thread|permanent handle to window; rtbrrelease on it is -7
+rtbrdocument|salivo_br_document|int||no|main thread|permanent handle to document; rtbrrelease on it is -7
+rtbrrelease|salivo_br_release|int|int|no|main thread|ends the handle; also ends a listener, timer or fetch handle; second release is -10; a permanent or borrowed (rtbrevent) handle is -7
+rtbrstatus|salivo_br_status|int||no|main thread|status of the last rtbr call (0 ok, else an error code)
+rtbrerror|salivo_br_error_str|string||no|main thread|message of the last -20 (or other) failure; caller owns the copy
+rtbrstat|salivo_br_stat|int|int|no|main thread|live count: 0 handles, 1 listeners, 2 timers, 3 fetches; 4 callbacks dispatched so far, 5 linear memory bytes
+rtbrsame|salivo_br_same|int|int,int|no|main thread|1 when both handles name the same JS value, else 0
+rtbrquery|salivo_br_query|int|int,string|no|main thread|root.querySelector(sel): new owned handle, 0 when nothing matches, -20 invalid selector
+rtbrbyid|salivo_br_by_id|int|string|no|main thread|document.getElementById: new owned handle or 0
+rtbrcreate|salivo_br_create|int|string|no|main thread|document.createElement: new owned handle
+rtbrcreatetext|salivo_br_create_text|int|string|no|main thread|document.createTextNode: new owned handle (text is never parsed as HTML)
+rtbrinsert|salivo_br_insert|int|int,int,int|no|main thread|parent.insertBefore(child, before); before 0 appends; moves an attached child
+rtbrremove|salivo_br_remove|int|int|no|main thread|detaches the node from its parent (no-op when detached); the handle stays valid
+rtbrparent|salivo_br_parent|int|int|no|main thread|new owned handle to parentNode, or 0
+rtbrchildcount|salivo_br_child_count|int|int|no|main thread|childNodes.length
+rtbrchild|salivo_br_child|int|int,int|no|main thread|new owned handle to childNodes[i], or 0 out of range
+rtbrsettext|salivo_br_set_text|int|int,string|no|main thread|textContent = s (never parsed as HTML)
+rtbrtext|salivo_br_text_str|string|int|no|main thread|textContent; caller owns the copy
+rtbrsetattr|salivo_br_set_attr|int|int,string,string|no|main thread|setAttribute; -20 invalid name
+rtbrattr|salivo_br_attr_str|string|int,string|no|main thread|getAttribute; "" when absent (rtbrhasattr tells absent from empty); caller owns the copy
+rtbrhasattr|salivo_br_has_attr|int|int,string|no|main thread|1 when the attribute is present, else 0
+rtbrremoveattr|salivo_br_remove_attr|int|int,string|no|main thread|removeAttribute
+rtbrtag|salivo_br_tag_str|string|int|no|main thread|lower-case tagName ("#text" for text nodes)
+rtbrtypeof|salivo_br_typeof_str|string|int,string|no|main thread|JS type of obj[name]: undefined null boolean number string object function bigint symbol
+rtbrgetstr|salivo_br_get_str|string|int,string|no|main thread|obj[name] when it is a JS string, else "" with status -21
+rtbrsetstr|salivo_br_set_str|int|int,string,string|no|main thread|obj[name] = string
+rtbrgetint|salivo_br_get_int|int|int,string|no|main thread|obj[name] when it is a safe-integer number (or boolean); else 0 with status -21
+rtbrsetint|salivo_br_set_int|int|int,string,int|no|main thread|obj[name] = number; -21 outside +-(2^53-1)
+rtbrgetbool|salivo_br_get_bool|int|int,string|no|main thread|obj[name] when boolean: 1 or 0; else 0 with status -21
+rtbrsetbool|salivo_br_set_bool|int|int,string,int|no|main thread|obj[name] = (v != 0)
+rtbrgetobj|salivo_br_get_obj|int|int,string|no|main thread|obj[name] when object or function: new owned handle; 0 for null/undefined; -21 for primitives
+rtbrcall|salivo_br_call|int|int,string|no|main thread|obj[name]() with no arguments; -21 when not a function, -20 when it throws; may re-enter callbacks
+rtbrcallstr|salivo_br_call_str|int|int,string,string|no|main thread|obj[name](s) with one string argument; same errors as rtbrcall
+rtbrlisten|salivo_br_listen|int|int,string,int,int|no|main thread|addEventListener(type): listener handle owned by the caller; calls fn(ctx) per event
+rtbrevent|salivo_br_event|int||no|main thread|borrowed handle of the event (listener), response (fetch) or 0 (timer) being dispatched; the host ends it when the callback returns and refuses rtbrrelease on it (-7)
+rtbrtimer|salivo_br_timer|int|int,int,int,int|no|main thread|setTimeout/setInterval(ms, repeat): timer handle; a one-shot handle ends after its callback
+rtbrfetch|salivo_br_fetch|int|string,string,string,string,int,int|no|main thread|fetch(method, url, headers "k: v" lines, body): request handle; fn(ctx) runs once with the response as rtbrevent; releasing the handle first aborts and the callback never runs
+rtbrapply|salivo_br_apply|int|int,int|whatever the called function does|main thread|synchronous call of a Salivo func(int) -> int value; -7 for a null function
+rtbrkeep|salivo_br_keep|int|string|no|main thread|copies the string into a box in linear memory owned by the caller (wasm-side UI state; never crosses to JS); free with rtbrunkeep
+rtbrkept|salivo_br_kept_str|string|int|no|main thread|borrowed view of a box's string, valid until rtbrunkeep; 0 reads as ""
+rtbrunkeep|salivo_br_unkeep|int|int|no|main thread|frees a box; 0 is a no-op

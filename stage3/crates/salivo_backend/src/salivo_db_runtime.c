@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -38,6 +39,7 @@ static void cond_init(db_cond* c) { InitializeConditionVariable(c); }
 static int cond_wait_ms(db_cond* c, db_mutex* m, long long ms) { return SleepConditionVariableSRW(c, m, (DWORD)(ms < 0 ? 0 : ms), 0) ? 0 : -1; }
 static void cond_broadcast(db_cond* c) { WakeAllConditionVariable(c); }
 static long long now_ms(void) { return (long long)GetTickCount64(); }
+static void sleep_ms(int ms) { Sleep((DWORD)ms); }
 static int os_random(uint8_t* out, size_t n) { return BCryptGenRandom(NULL, out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0 ? 0 : -1; }
 static void net_init(void) {
     static volatile LONG done = 0;
@@ -49,6 +51,7 @@ static void net_init(void) {
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -72,6 +75,7 @@ static int cond_wait_ms(db_cond* c, db_mutex* m, long long ms) {
     return pthread_cond_timedwait(c, m, &ts) == 0 ? 0 : -1;
 }
 static void cond_broadcast(db_cond* c) { pthread_cond_broadcast(c); }
+static void sleep_ms(int ms) { struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L }; nanosleep(&ts, NULL); }
 static long long now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
 static int os_random(uint8_t* out, size_t n) {
     int fd = open("/dev/urandom", O_RDONLY);
@@ -347,58 +351,30 @@ static int rsa_oaep_encrypt(const char* pem, const uint8_t* msg, size_t mlen, ui
     return 0;
 }
 
-/* ---- sockets ----------------------------------------------------------------------------------- */
-static db_sock tcp_connect(const char* host, int port, long long timeout_ms) {
-    net_init();
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    char ps[16];
-    snprintf(ps, sizeof ps, "%d", port);
-    if (getaddrinfo(host, ps, &hints, &res) != 0) return DB_BAD_SOCK;
-    db_sock s = DB_BAD_SOCK;
-    for (struct addrinfo* a = res; a; a = a->ai_next) {
-        s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (s == DB_BAD_SOCK) continue;
-#ifdef _WIN32
-        DWORD tv = (DWORD)timeout_ms;
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-#else
-        struct timeval tv = { (time_t)(timeout_ms / 1000), (suseconds_t)((timeout_ms % 1000) * 1000) };
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-#endif
-        int one = 1;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
-        if (connect(s, a->ai_addr, (int)a->ai_addrlen) == 0) break;
-        db_closesock(s);
-        s = DB_BAD_SOCK;
-    }
-    freeaddrinfo(res);
-    return s;
-}
-static int send_all(db_sock s, const uint8_t* p, size_t n) {
-    while (n) { int r = send(s, (const char*)p, (int)(n > 65536 ? 65536 : n), 0); if (r <= 0) return -1; p += r; n -= (size_t)r; }
-    return 0;
-}
-static int recv_exact(db_sock s, uint8_t* p, size_t n) {
-    while (n) { int r = recv(s, (char*)p, (int)(n > 65536 ? 65536 : n), 0); if (r <= 0) return -1; p += r; n -= (size_t)r; }
-    return 0;
-}
-
 /* ---- result sets ------------------------------------------------------------------------------ */
+/* Cancellation token: cancelling it stops the checkout or statement it was passed to */
+typedef struct { volatile int cancelled; int gen, used; } Token;
+/* A row stream reads one row at a time; its lease stays busy until the last row or an early close */
+typedef struct {
+    int lease, done, failed, tok_gen;
+    Token* tok;
+    sqlite3_stmt* st;
+    char** row; /* the row being read, swapped with the visible one */
+    Buf in;
+} Stream;
 typedef struct {
     int cols, rows, cap_rows;
     char** names;
     char** cells; /* rows * cols, NULL = SQL NULL */
     long long affected, last_id;
+    Stream* s; /* row streams only: rows is 1 while a current row is visible */
 } Result;
+static void free_row(char** row, int n) { for (int i = 0; row && i < n; i++) { free(row[i]); row[i] = NULL; } }
 static void result_free(Result* r) {
     if (!r) return;
     for (int i = 0; i < r->cols; i++) free(r->names[i]);
     for (long i = 0; i < (long)r->rows * r->cols; i++) free(r->cells[i]);
+    if (r->s) { free_row(r->s->row, r->cols); free(r->s->row); if (r->s->st) sqlite3_finalize(r->s->st); buf_free(&r->s->in); free(r->s); }
     free(r->names); free(r->cells); free(r);
 }
 static int result_add_row(Result* r) {
@@ -413,21 +389,132 @@ static int result_add_row(Result* r) {
     return 0;
 }
 static char* dup_n(const char* s, size_t n) { char* r = (char*)malloc(n + 1); if (r) { memcpy(r, s, n); r[n] = 0; } return r; }
+static uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static void put_be32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 
 /* ---- connections ------------------------------------------------------------------------------ */
 enum { DRV_SQLITE = 1, DRV_PG = 2, DRV_MYSQL = 3 };
+typedef struct { int driver; char host[256], user[128], pass[128], db[128], path[512]; int port; } DbUrl;
 typedef struct {
     int driver;
     db_sock sock;
     sqlite3* lite;
     int broken, in_txn, std_strings, no_backslash;
-    long long last_used;
+    long long last_used, created;
     char err[512];
     uint8_t seq; /* mysql packet sequence */
+    DbUrl url;   /* for the separate connection that carries a cancel request */
+    uint32_t pg_pid, pg_secret, my_thread;
+    long long connect_ms; /* connect timeout, also how long a cancelled statement may take to stop */
+    /* The operation in progress. deadline 0 = none. A statement (in_query) that is cancelled or
+     * passes its deadline gets a server-side cancel; stop then records why (1 cancelled, 2 timed
+     * out) and grace bounds the wait for the server's answer. Anything else just fails. */
+    long long deadline, grace;
+    Token* tok;
+    int tok_gen, in_query, stop;
+    volatile int kill; /* dbCloseWait ran out of time: cancel what runs, refuse what comes */
 } Conn;
-typedef struct { int driver; char host[256], user[128], pass[128], db[128], path[512]; int port; } DbUrl;
 
 static void set_err(Conn* c, const char* fmt, const char* a) { snprintf(c->err, sizeof c->err, fmt, a ? a : ""); }
+
+/* ---- sockets with deadlines and cancellation --------------------------------------------------- */
+static int sock_poll(db_sock s, int wr, int ms) {
+#ifdef _WIN32
+    fd_set f, e;
+    FD_ZERO(&f); FD_ZERO(&e); FD_SET(s, &f); FD_SET(s, &e);
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    return select(0, wr ? NULL : &f, wr ? &f : NULL, &e, &tv);
+#else
+    struct pollfd p = { s, (short)(wr ? POLLOUT : POLLIN), 0 };
+    int r = poll(&p, 1, ms);
+    return r < 0 && errno == EINTR ? 0 : r;
+#endif
+}
+static void sock_blocking(db_sock s, int on) {
+#ifdef _WIN32
+    u_long nb = !on;
+    ioctlsocket(s, FIONBIO, &nb);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, on ? fl & ~O_NONBLOCK : fl | O_NONBLOCK);
+#endif
+}
+static int connect_pending(void) {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EINPROGRESS;
+#endif
+}
+static int sock_error(db_sock s) { int e = 0; socklen_t n = sizeof e; getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&e, &n); return e != 0; }
+static int tok_cancelled(const Token* t, int gen) { return t && t->gen == gen && t->cancelled; }
+/* 0 keep going, 1 cancelled (token or shutdown), 2 deadline passed */
+static int conn_stop_reason(const Conn* c) {
+    if (c->kill || tok_cancelled(c->tok, c->tok_gen)) return 1;
+    return c->deadline && now_ms() >= c->deadline ? 2 : 0;
+}
+static void conn_send_cancel(Conn* c);
+/* Waits until the socket is ready, checking every 50 ms for a cancel or the deadline. */
+static int conn_wait(Conn* c, int wr) {
+    for (;;) {
+        int why = conn_stop_reason(c);
+        if (why && !c->in_query) { set_err(c, why == 1 ? "operation cancelled%s" : "timed out%s", ""); return -1; }
+        if (why && !c->stop) { c->stop = why; c->grace = now_ms() + c->connect_ms; conn_send_cancel(c); }
+        if (c->stop && now_ms() >= c->grace) { set_err(c, "the server did not answer the cancel request%s", ""); return -1; }
+        int r = sock_poll(c->sock, wr, 50);
+        if (r > 0) return 0;
+        if (r < 0) { set_err(c, "connection lost%s", ""); return -1; }
+    }
+}
+static int conn_send(Conn* c, const uint8_t* p, size_t n) {
+    while (n) {
+        if (conn_wait(c, 1)) return -1;
+        int r = send(c->sock, (const char*)p, (int)(n > 65536 ? 65536 : n), 0);
+        if (r <= 0) { set_err(c, "connection lost%s", ""); return -1; }
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+static int conn_recv(Conn* c, uint8_t* p, size_t n) {
+    while (n) {
+        if (conn_wait(c, 0)) return -1;
+        int r = recv(c->sock, (char*)p, (int)(n > 65536 ? 65536 : n), 0);
+        if (r <= 0) { set_err(c, "connection lost%s", ""); return -1; }
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+/* Connects c->sock before c->deadline; a cancel aborts the attempt */
+static int tcp_connect(Conn* c, const char* host, int port) {
+    net_init();
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char ps[16];
+    snprintf(ps, sizeof ps, "%d", port);
+    /* ponytail: name resolution is not bounded by the connect timeout; an async resolver if slow DNS shows up */
+    if (getaddrinfo(host, ps, &hints, &res) != 0) { set_err(c, "cannot resolve %s", host); return -1; }
+    for (struct addrinfo* a = res; a && c->sock == DB_BAD_SOCK; a = a->ai_next) {
+        db_sock s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (s == DB_BAD_SOCK) continue;
+        sock_blocking(s, 0);
+        int r = connect(s, a->ai_addr, (int)a->ai_addrlen);
+        c->sock = s;
+        if (r != 0 && (!connect_pending() || conn_wait(c, 1) || sock_error(s))) {
+            db_closesock(s);
+            c->sock = DB_BAD_SOCK;
+            if (conn_stop_reason(c)) break;
+            continue;
+        }
+        sock_blocking(s, 1);
+        int one = 1;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
+    }
+    freeaddrinfo(res);
+    if (c->sock == DB_BAD_SOCK) { if (!c->err[0]) set_err(c, "cannot connect to %s", host); return -1; }
+    return 0;
+}
 
 /* url: postgres://user:pass@host:port/db | mysql://user:pass@host:port/db | sqlite:path | sqlite::memory: */
 static int parse_url(const char* url, DbUrl* u) {
@@ -463,12 +550,12 @@ static int parse_url(const char* url, DbUrl* u) {
 /* PostgreSQL ------------------------------------------------------------------------------------ */
 static int pg_read(Conn* c, uint8_t* type, Buf* body) {
     uint8_t h[5];
-    if (recv_exact(c->sock, h, 5)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+    if (conn_recv(c, h, 5)) { c->broken = 1; return -1; }
     uint32_t len = (uint32_t)h[1] << 24 | (uint32_t)h[2] << 16 | (uint32_t)h[3] << 8 | h[4];
     if (len < 4 || len > (1u << 30)) { c->broken = 1; set_err(c, "protocol error%s", ""); return -1; }
     body->n = 0;
     if (buf_reserve(body, len - 4 + 1)) return -1;
-    if (recv_exact(c->sock, body->p, len - 4)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+    if (conn_recv(c, body->p, len - 4)) { c->broken = 1; return -1; }
     body->n = len - 4;
     body->p[body->n] = 0;
     *type = h[0];
@@ -478,7 +565,7 @@ static int pg_send(Conn* c, uint8_t type, const Buf* body) {
     uint8_t h[5];
     uint32_t len = (uint32_t)body->n + 4;
     h[0] = type; h[1] = (uint8_t)(len >> 24); h[2] = (uint8_t)(len >> 16); h[3] = (uint8_t)(len >> 8); h[4] = (uint8_t)len;
-    if (send_all(c->sock, h, 5) || send_all(c->sock, body->p, body->n)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+    if (conn_send(c, h, 5) || conn_send(c, body->p, body->n)) { c->broken = 1; return -1; }
     return 0;
 }
 static void pg_error(Conn* c, const Buf* b) {
@@ -566,9 +653,8 @@ out:
     return rc;
 }
 static void md5_hex(const uint8_t* p, size_t n, char out[33]);
-static int pg_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
-    c->sock = tcp_connect(u->host, u->port, timeout_ms);
-    if (c->sock == DB_BAD_SOCK) { set_err(c, "cannot connect to %s", u->host); return -1; }
+static int pg_connect(Conn* c, const DbUrl* u) {
+    if (tcp_connect(c, u->host, u->port)) return -1;
     Buf m = {0}, in = {0};
     uint8_t ver[4] = { 0, 3, 0, 0 };
     buf_put(&m, ver, 4);
@@ -579,7 +665,7 @@ static int pg_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
     uint8_t h[4]; uint32_t len = (uint32_t)m.n + 4;
     h[0] = (uint8_t)(len >> 24); h[1] = (uint8_t)(len >> 16); h[2] = (uint8_t)(len >> 8); h[3] = (uint8_t)len;
     int rc = -1;
-    if (send_all(c->sock, h, 4) || send_all(c->sock, m.p, m.n)) { set_err(c, "connection lost%s", ""); goto out; }
+    if (conn_send(c, h, 4) || conn_send(c, m.p, m.n)) goto out;
     for (;;) {
         uint8_t t;
         if (pg_read(c, &t, &in)) goto out;
@@ -605,56 +691,86 @@ static int pg_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
         }
         if (t == 'S' && in.n) {
             const char* k = (const char*)in.p;
-            const char* v = k + strlen(k) + 1;
+            const char* v = strlen(k) + 1 < in.n ? k + strlen(k) + 1 : "";
             if (!strcmp(k, "standard_conforming_strings")) c->std_strings = !strcmp(v, "on");
             continue;
         }
+        if (t == 'K' && in.n >= 8) { c->pg_pid = be32(in.p); c->pg_secret = be32(in.p + 4); continue; } /* for cancel requests */
         if (t == 'Z') { c->in_txn = in.n && in.p[0] != 'I'; rc = 0; break; }
-        /* K (BackendKeyData), N (notice) and others are not needed */
+        /* N (notice) and others are not needed */
     }
 out:
     buf_free(&m); buf_free(&in);
     return rc;
 }
+/* Reads one message of a simple-query response into r. Returns 1 for a DataRow (stored in
+ * stream_row, or appended to r without one), 2 for ReadyForQuery, 3 for a RowDescription, 0 for
+ * anything else and -1 when the connection broke. A server error sets *failed; the caller reads on
+ * to ReadyForQuery. A stream takes one row-returning statement: a second RowDescription fails it. */
+static int pg_step(Conn* c, Buf* in, Result* r, char** stream_row, int* failed) {
+    uint8_t t;
+    if (pg_read(c, &t, in)) return -1;
+    if ((t == 'T' || t == 'D') && in->n < 2) goto bad;
+    if (t == 'T') {
+        if (stream_row) { if (!*failed) set_err(c, "a stream runs one row-returning statement%s", ""); *failed = 1; return 0; }
+        int n = in->p[0] << 8 | in->p[1];
+        /* a later statement's rows replace an earlier one's */
+        for (int i = 0; i < r->cols; i++) free(r->names[i]);
+        for (long i = 0; i < (long)r->rows * r->cols; i++) free(r->cells[i]);
+        free(r->names); free(r->cells);
+        r->cells = NULL; r->rows = r->cap_rows = 0;
+        r->cols = n;
+        r->names = (char**)calloc((size_t)(n ? n : 1), sizeof(char*));
+        size_t off = 2;
+        for (int i = 0; i < n; i++) {
+            const uint8_t* z = off < in->n ? memchr(in->p + off, 0, in->n - off) : NULL;
+            if (!z || (size_t)(z - in->p) + 1 + 18 > in->n) goto bad;
+            size_t l = (size_t)(z - in->p) - off;
+            r->names[i] = dup_n((char*)in->p + off, l); off += l + 1 + 18;
+        }
+        return 3;
+    }
+    if (t == 'D') {
+        if (*failed) return 0;
+        int n = in->p[0] << 8 | in->p[1];
+        if (n != r->cols) goto bad;
+        char** row = stream_row;
+        if (!row) { if (result_add_row(r)) goto bad; row = &r->cells[(long)(r->rows - 1) * r->cols]; }
+        size_t off = 2;
+        for (int i = 0; i < n; i++) {
+            if (off + 4 > in->n) goto bad;
+            int32_t l = (int32_t)be32(in->p + off);
+            off += 4;
+            if (l < -1 || (l > 0 && (size_t)l > in->n - off)) goto bad;
+            if (l >= 0) { row[i] = dup_n((char*)in->p + off, (size_t)l); off += (size_t)l; }
+        }
+        return 1;
+    }
+    if (t == 'C') {
+        const char* tag = (const char*)in->p;
+        const char* sp = strrchr(tag, ' ');
+        if (sp && sp[1] >= '0' && sp[1] <= '9' && strncmp(tag, "SELECT", 6)) r->affected = atoll(sp + 1);
+    } else if (t == 'E') {
+        if (!*failed) pg_error(c, in);
+        *failed = 1;
+    } else if (t == 'Z') {
+        c->in_txn = in->n && in->p[0] != 'I';
+        return 2;
+    }
+    return 0;
+bad:
+    set_err(c, "protocol error%s", "");
+    c->broken = 1;
+    return -1;
+}
 static Result* pg_query(Conn* c, const char* sql) {
     Buf q = {0}, in = {0};
     buf_str0(&q, sql);
     Result* r = (Result*)calloc(1, sizeof(Result));
-    int failed = 0;
+    int failed = 0, k = 0;
     r->affected = -1;
-    if (pg_send(c, 'Q', &q)) { failed = 1; goto out; }
-    for (;;) {
-        uint8_t t;
-        if (pg_read(c, &t, &in)) { failed = 1; goto out; }
-        if (t == 'T') {
-            int n = in.p[0] << 8 | in.p[1];
-            for (int i = 0; i < r->cols; i++) free(r->names[i]);
-            free(r->names);
-            r->cols = n;
-            r->names = (char**)calloc((size_t)(n ? n : 1), sizeof(char*));
-            size_t off = 2;
-            for (int i = 0; i < n && off < in.n; i++) { size_t l = strlen((char*)in.p + off); r->names[i] = dup_n((char*)in.p + off, l); off += l + 1 + 18; }
-        } else if (t == 'D') {
-            int n = in.p[0] << 8 | in.p[1];
-            if (n != r->cols || result_add_row(r)) { set_err(c, "protocol error%s", ""); failed = 1; c->broken = 1; goto out; }
-            size_t off = 2;
-            for (int i = 0; i < n; i++) {
-                int32_t l = (int32_t)((uint32_t)in.p[off] << 24 | (uint32_t)in.p[off + 1] << 16 | (uint32_t)in.p[off + 2] << 8 | in.p[off + 3]);
-                off += 4;
-                if (l >= 0) { r->cells[(long)(r->rows - 1) * r->cols + i] = dup_n((char*)in.p + off, (size_t)l); off += (size_t)l; }
-            }
-        } else if (t == 'C') {
-            const char* tag = (const char*)in.p;
-            const char* sp = strrchr(tag, ' ');
-            if (sp && sp[1] >= '0' && sp[1] <= '9' && strncmp(tag, "SELECT", 6)) r->affected = atoll(sp + 1);
-        } else if (t == 'E') {
-            pg_error(c, &in); failed = 1; /* ReadyForQuery still follows */
-        } else if (t == 'Z') {
-            c->in_txn = in.n && in.p[0] != 'I';
-            break;
-        }
-    }
-out:
+    if (pg_send(c, 'Q', &q)) failed = 1;
+    else while ((k = pg_step(c, &in, r, NULL, &failed)) != 2) if (k < 0) { failed = 1; break; }
     buf_free(&q); buf_free(&in);
     if (failed) { result_free(r); return NULL; }
     if (r->affected < 0 && r->cols == 0) r->affected = 0; /* BEGIN, CREATE ...: no row count */
@@ -700,11 +816,11 @@ static int my_read(Conn* c, Buf* b) {
     uint8_t h[4];
     b->n = 0;
     for (;;) {
-        if (recv_exact(c->sock, h, 4)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+        if (conn_recv(c, h, 4)) { c->broken = 1; return -1; }
         size_t len = (size_t)h[0] | (size_t)h[1] << 8 | (size_t)h[2] << 16;
         c->seq = (uint8_t)(h[3] + 1);
         if (buf_reserve(b, len + 1)) return -1;
-        if (recv_exact(c->sock, b->p + b->n, len)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+        if (conn_recv(c, b->p + b->n, len)) { c->broken = 1; return -1; }
         b->n += len;
         if (len < 0xFFFFFF) break;
     }
@@ -713,23 +829,26 @@ static int my_read(Conn* c, Buf* b) {
 }
 static int my_send(Conn* c, const uint8_t* p, size_t n) {
     uint8_t h[4] = { (uint8_t)n, (uint8_t)(n >> 8), (uint8_t)(n >> 16), c->seq++ };
-    if (n >= 0xFFFFFF || send_all(c->sock, h, 4) || send_all(c->sock, p, n)) { c->broken = 1; set_err(c, "connection lost%s", ""); return -1; }
+    if (n >= 0xFFFFFF) { set_err(c, "statement too large%s", ""); return -1; }
+    if (conn_send(c, h, 4) || conn_send(c, p, n)) { c->broken = 1; return -1; }
     return 0;
 }
 static uint64_t my_lenenc(const uint8_t** p, const uint8_t* end, int* is_null) {
-    *is_null = 0;
+    *is_null = -1;
     if (*p >= end) return 0;
     uint8_t f = *(*p)++;
-    if (f < 0xfb) return f;
-    if (f == 0xfb) { *is_null = 1; return 0; }
+    if (f == 0xff) return 0;
+    *is_null = f == 0xfb;
+    if (f <= 0xfb) return f == 0xfb ? 0 : f;
     int k = f == 0xfc ? 2 : f == 0xfd ? 3 : 8;
+    if (end - *p < k) { *is_null = -1; return 0; }
     uint64_t v = 0;
-    for (int i = 0; i < k && *p < end; i++) v |= (uint64_t)*(*p)++ << (8 * i);
+    for (int i = 0; i < k; i++) v |= (uint64_t)*(*p)++ << (8 * i);
     return v;
 }
 static void my_err(Conn* c, const Buf* b) {
     int code = b->n >= 3 ? b->p[1] | b->p[2] << 8 : 0;
-    const char* msg = b->n > 9 && b->p[3] == '#' ? (const char*)b->p + 9 : (const char*)b->p + 3;
+    const char* msg = b->n > 9 && b->p[3] == '#' ? (const char*)b->p + 9 : b->n > 3 ? (const char*)b->p + 3 : "";
     snprintf(c->err, sizeof c->err, "%s (MySQL error %d)", msg, code);
 }
 static void my_ok(Conn* c, const Buf* b, Result* r) {
@@ -764,9 +883,8 @@ static int my_auth_response(const char* plugin, const char* pw, const uint8_t* s
     if (!strcmp(plugin, "caching_sha2_password")) { my_sha2_scramble(pw, salt, out); *n = 32; return 0; }
     return -1;
 }
-static int my_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
-    c->sock = tcp_connect(u->host, u->port, timeout_ms);
-    if (c->sock == DB_BAD_SOCK) { set_err(c, "cannot connect to %s", u->host); return -1; }
+static int my_connect(Conn* c, const DbUrl* u) {
+    if (tcp_connect(c, u->host, u->port)) return -1;
     Buf in = {0}, out = {0};
     int rc = -1;
     uint8_t salt[20];
@@ -776,9 +894,11 @@ static int my_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
     if (in.n && in.p[0] == 0xff) { my_err(c, &in); goto out; }
     {
         const uint8_t *p = in.p, *end = in.p + in.n;
-        if (*p++ != 10) { set_err(c, "unsupported MySQL protocol%s", ""); goto out; }
-        p += strlen((const char*)p) + 1; /* server version */
-        p += 4; /* thread id */
+        if (!in.n || *p++ != 10) { set_err(c, "unsupported MySQL protocol%s", ""); goto out; }
+        const uint8_t* z = memchr(p, 0, (size_t)(end - p));
+        if (!z || end - z < 1 + 4 + 9 + 2 + 3 + 2 + 1 + 10) { set_err(c, "malformed MySQL handshake%s", ""); goto out; }
+        p = z + 1; /* server version */
+        c->my_thread = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; p += 4; /* for KILL QUERY */
         memcpy(salt, p, 8); p += 8 + 1;
         uint32_t caps = p[0] | p[1] << 8; p += 2;
         p += 1 + 2; /* charset, status */
@@ -787,7 +907,7 @@ static int my_connect(Conn* c, const DbUrl* u, long long timeout_ms) {
         p += 10;
         size_t part2 = auth_len > 8 ? (size_t)(auth_len - 8) : 13;
         if (part2 > 13) part2 = 13;
-        if (p + part2 > end) { set_err(c, "malformed MySQL handshake%s", ""); goto out; }
+        if (part2 < 12 || p + part2 > end) { set_err(c, "malformed MySQL handshake%s", ""); goto out; }
         memcpy(salt + 8, p, 12); p += part2;
         if ((caps & 0x80000) && p < end) snprintf(plugin, sizeof plugin, "%s", (const char*)p);
         if (!(caps & 0x200)) { set_err(c, "MySQL server lacks protocol 4.1%s", ""); goto out; }
@@ -851,6 +971,45 @@ out:
     buf_free(&in); buf_free(&out);
     return rc;
 }
+/* Reads the column definitions announced by the column-count packet in `in` into r */
+static int my_columns(Conn* c, Buf* in, Result* r) {
+    const uint8_t* p = in->p;
+    int nul;
+    uint64_t ncols = my_lenenc(&p, in->p + in->n, &nul);
+    if (nul || ncols == 0 || ncols > 4096) goto bad;
+    r->cols = (int)ncols;
+    r->names = (char**)calloc((size_t)ncols, sizeof(char*));
+    for (uint64_t i = 0; i < ncols; i++) {
+        if (my_read(c, in)) return -1;
+        const uint8_t *q = in->p, *end = in->p + in->n;
+        uint64_t l = 0;
+        for (int f = 0; f < 5; f++) { /* catalog, schema, table, org_table, name */
+            if (f) q += l;
+            l = my_lenenc(&q, end, &nul);
+            if (nul < 0 || l > (uint64_t)(end - q)) goto bad;
+        }
+        r->names[i] = dup_n((const char*)q, (size_t)l);
+    }
+    return 0;
+bad:
+    set_err(c, "protocol error%s", "");
+    c->broken = 1;
+    return -1;
+}
+/* Reads the next text-protocol row into row: 1 row, 0 end of rows, -1 error */
+static int my_next_row(Conn* c, Buf* in, int cols, char** row) {
+    if (my_read(c, in)) return -1;
+    if (in->n && in->p[0] == 0xfe && in->n < 0xFFFFFF) { my_ok(c, in, NULL); return 0; } /* OK/EOF terminator */
+    if (in->n && in->p[0] == 0xff) { my_err(c, in); return -1; }
+    const uint8_t *q = in->p, *end = in->p + in->n;
+    for (int i = 0; i < cols; i++) {
+        int nul;
+        uint64_t l = my_lenenc(&q, end, &nul);
+        if (nul < 0 || (!nul && l > (uint64_t)(end - q))) { free_row(row, cols); set_err(c, "protocol error%s", ""); c->broken = 1; return -1; }
+        if (!nul) { row[i] = dup_n((const char*)q, (size_t)l); q += l; }
+    }
+    return 1;
+}
 static Result* my_command(Conn* c, uint8_t cmd, const char* sql) {
     Buf pkt = {0}, in = {0};
     Result* r = (Result*)calloc(1, sizeof(Result));
@@ -861,33 +1020,15 @@ static Result* my_command(Conn* c, uint8_t cmd, const char* sql) {
     if (my_send(c, pkt.p, pkt.n) || my_read(c, &in) || !in.n) goto out;
     if (in.p[0] == 0x00) { my_ok(c, &in, r); failed = 0; goto out; }
     if (in.p[0] == 0xff) { my_err(c, &in); goto out; }
-    {
-        const uint8_t* p = in.p; int nul;
-        uint64_t ncols = my_lenenc(&p, in.p + in.n, &nul);
-        if (ncols == 0 || ncols > 4096) { set_err(c, "protocol error%s", ""); c->broken = 1; goto out; }
-        r->cols = (int)ncols;
-        r->names = (char**)calloc((size_t)ncols, sizeof(char*));
-        for (uint64_t i = 0; i < ncols; i++) {
-            if (my_read(c, &in)) goto out;
-            const uint8_t *q = in.p, *end = in.p + in.n;
-            for (int f = 0; f < 4; f++) { uint64_t l = my_lenenc(&q, end, &nul); q += l; } /* catalog, schema, table, org_table */
-            uint64_t l = my_lenenc(&q, end, &nul);
-            r->names[i] = dup_n((const char*)q, q + l <= end ? (size_t)l : 0);
-        }
-        for (;;) {
-            if (my_read(c, &in)) goto out;
-            if (in.n && in.p[0] == 0xfe && in.n < 0xFFFFFF) { my_ok(c, &in, NULL); break; } /* OK/EOF terminator */
-            if (in.n && in.p[0] == 0xff) { my_err(c, &in); goto out; }
-            if (result_add_row(r)) goto out;
-            const uint8_t *q = in.p, *end = in.p + in.n;
-            for (int i = 0; i < r->cols; i++) {
-                uint64_t l = my_lenenc(&q, end, &nul);
-                if (!nul) { if (q + l > end) { set_err(c, "protocol error%s", ""); c->broken = 1; goto out; } r->cells[(long)(r->rows - 1) * r->cols + i] = dup_n((const char*)q, (size_t)l); q += l; }
-            }
-        }
-        r->affected = -1;
-        failed = 0;
+    if (my_columns(c, &in, r)) goto out;
+    for (;;) {
+        if (result_add_row(r)) goto out;
+        int k = my_next_row(c, &in, r->cols, &r->cells[(long)(r->rows - 1) * r->cols]);
+        if (k < 0) goto out;
+        if (k == 0) { r->rows--; break; }
     }
+    r->affected = -1;
+    failed = 0;
 out:
     buf_free(&pkt); buf_free(&in);
     if (failed) { result_free(r); return NULL; }
@@ -895,6 +1036,22 @@ out:
 }
 
 /* SQLite --------------------------------------------------------------------------------------- */
+static void lite_row(sqlite3_stmt* st, int n, char** row) {
+    for (int i = 0; i < n; i++)
+        if (sqlite3_column_type(st, i) != SQLITE_NULL) { const char* t = (const char*)sqlite3_column_text(st, i); row[i] = dup_n(t, (size_t)sqlite3_column_bytes(st, i)); }
+}
+static char** lite_names(sqlite3_stmt* st, int n) {
+    char** names = (char**)calloc((size_t)(n ? n : 1), sizeof(char*));
+    for (int i = 0; i < n; i++) { const char* nm = sqlite3_column_name(st, i); names[i] = dup_n(nm, strlen(nm)); }
+    return names;
+}
+/* Progress callback: a cancelled or timed-out statement is interrupted (the connection stays usable) */
+static int lite_progress(void* p) {
+    Conn* c = (Conn*)p;
+    int why = c->in_query ? conn_stop_reason(c) : 0;
+    if (why && !c->stop) c->stop = why;
+    return why != 0;
+}
 static Result* lite_query(Conn* c, const char* sql) {
     Result* r = (Result*)calloc(1, sizeof(Result));
     r->affected = -1;
@@ -910,15 +1067,14 @@ static Result* lite_query(Conn* c, const char* sql) {
             for (long i = 0; i < (long)r->rows * r->cols; i++) free(r->cells[i]);
             free(r->cells); r->cells = NULL; r->rows = r->cap_rows = 0;
             r->cols = n;
-            r->names = (char**)calloc((size_t)n, sizeof(char*));
-            for (int i = 0; i < n; i++) { const char* nm = sqlite3_column_name(st, i); r->names[i] = dup_n(nm, strlen(nm)); }
+            r->names = lite_names(st, n);
         }
         int s;
         while ((s = sqlite3_step(st)) == SQLITE_ROW) {
             if (result_add_row(r)) break;
-            for (int i = 0; i < n; i++) if (sqlite3_column_type(st, i) != SQLITE_NULL) { const char* t = (const char*)sqlite3_column_text(st, i); r->cells[(long)(r->rows - 1) * r->cols + i] = dup_n(t, (size_t)sqlite3_column_bytes(st, i)); }
+            lite_row(st, n, &r->cells[(long)(r->rows - 1) * r->cols]);
         }
-        if (s != SQLITE_DONE) { set_err(c, "%s", sqlite3_errmsg(c->lite)); sqlite3_finalize(st); result_free(r); return NULL; }
+        if (s != SQLITE_DONE) { set_err(c, "%s", sqlite3_errmsg(c->lite)); sqlite3_finalize(st); result_free(r); c->in_txn = !sqlite3_get_autocommit(c->lite); return NULL; }
         if (!n) { r->affected = sqlite3_changes(c->lite); r->last_id = sqlite3_last_insert_rowid(c->lite); }
         sqlite3_finalize(st);
     }
@@ -926,47 +1082,226 @@ static Result* lite_query(Conn* c, const char* sql) {
     return r;
 }
 
-static Result* conn_query(Conn* c, const char* sql) {
+/* ---- connections: statements, deadlines, cancellation ------------------------------------------ */
+/* Starts a statement: the token (may be NULL) and query_ms (0 = none) can stop it */
+static void conn_begin(Conn* c, Token* t, int gen, long long query_ms) {
+    c->tok = t; c->tok_gen = gen; c->deadline = query_ms > 0 ? now_ms() + query_ms : 0; c->stop = 0; c->in_query = 1;
+}
+static void conn_end(Conn* c) { c->in_query = 0; c->deadline = 0; c->tok = NULL; }
+/* -1 (with c->err) when no statement may run on the connection now */
+static int conn_ready(Conn* c) {
     c->err[0] = 0;
-    if (c->broken) { set_err(c, "connection is broken%s", ""); return NULL; }
+    if (c->broken) { set_err(c, "connection is broken%s", ""); return -1; }
+    if (c->kill) { c->stop = 1; set_err(c, "the pool is shutting down%s", ""); return -1; }
+    if (c->in_query && conn_stop_reason(c) == 1) { c->stop = 1; set_err(c, "query cancelled%s", ""); return -1; }
+    return 0;
+}
+static void conn_stopped_err(Conn* c) { if (c->stop) set_err(c, c->stop == 1 ? (c->kill ? "the pool is shutting down%s" : "query cancelled%s") : "query timed out%s", ""); }
+/* Error code for a failed statement */
+static long long conn_rc(const Conn* c) { return c->stop == 1 ? -14 : c->stop == 2 ? -15 : c->broken ? -3 : -18; }
+/* Runs sql. A statement that was cancelled or timed out fails even if the server finished it. */
+static Result* conn_query(Conn* c, const char* sql) {
+    if (conn_ready(c)) return NULL;
     Result* r = c->driver == DRV_PG ? pg_query(c, sql) : c->driver == DRV_MYSQL ? my_command(c, 0x03, sql) : lite_query(c, sql);
+    c->last_used = now_ms();
+    if (c->stop) { result_free(r); r = NULL; conn_stopped_err(c); }
+    return r;
+}
+/* Housekeeping statement (health check, rollback on release): fails rather than waits past the connect timeout */
+static Result* conn_quick(Conn* c, const char* sql) {
+    c->in_query = 0; c->tok = NULL; c->deadline = now_ms() + c->connect_ms;
+    Result* r = conn_ready(c) ? NULL : c->driver == DRV_PG ? pg_query(c, sql) : c->driver == DRV_MYSQL ? my_command(c, sql ? 0x03 : 0x0e, sql) : lite_query(c, sql ? sql : "SELECT 1");
+    if (!r && c->driver != DRV_SQLITE && conn_stop_reason(c)) c->broken = 1;
+    c->deadline = 0;
     c->last_used = now_ms();
     return r;
 }
 static void conn_close(Conn* c) {
     if (!c) return;
-    if (c->driver == DRV_PG && c->sock != DB_BAD_SOCK) { Buf e = {0}; pg_send(c, 'X', &e); }
-    if (c->driver == DRV_MYSQL && c->sock != DB_BAD_SOCK) { uint8_t q = 0x01; c->seq = 0; my_send(c, &q, 1); }
+    c->in_query = 0; c->tok = NULL; c->kill = 0; c->deadline = now_ms() + 1000; /* a goodbye never waits long */
+    if (c->driver == DRV_PG && c->sock != DB_BAD_SOCK && !c->broken) { Buf e = {0}; pg_send(c, 'X', &e); }
+    if (c->driver == DRV_MYSQL && c->sock != DB_BAD_SOCK && !c->broken) { uint8_t q = 0x01; c->seq = 0; my_send(c, &q, 1); }
     if (c->sock != DB_BAD_SOCK) db_closesock(c->sock);
     if (c->lite) sqlite3_close(c->lite);
     free(c);
 }
-static Conn* conn_open(const DbUrl* u, long long timeout_ms, char* err, size_t errcap) {
+static Conn* conn_open(const DbUrl* u, long long connect_ms, Token* t, int gen, char* err, size_t errcap) {
     Conn* c = (Conn*)calloc(1, sizeof(Conn));
     c->driver = u->driver;
     c->sock = DB_BAD_SOCK;
+    c->url = *u;
+    c->connect_ms = connect_ms;
+    c->tok = t; c->tok_gen = gen; c->deadline = now_ms() + connect_ms; /* the whole handshake */
     int rc;
     if (u->driver == DRV_SQLITE) {
         rc = sqlite3_open(u->path, &c->lite) == SQLITE_OK ? 0 : -1;
         if (rc) set_err(c, "%s", c->lite ? sqlite3_errmsg(c->lite) : "cannot open database");
-        else sqlite3_busy_timeout(c->lite, (int)timeout_ms);
+        else { sqlite3_busy_timeout(c->lite, (int)connect_ms); sqlite3_progress_handler(c->lite, 1000, lite_progress, c); }
         c->std_strings = 1;
     } else if (u->driver == DRV_PG) {
-        rc = pg_connect(c, u, timeout_ms);
+        rc = pg_connect(c, u);
     } else {
-        rc = my_connect(c, u, timeout_ms);
+        rc = my_connect(c, u);
     }
     if (rc) { snprintf(err, errcap, "%s", c->err); conn_close(c); return NULL; }
-    c->last_used = now_ms();
+    c->tok = NULL; c->deadline = 0;
+    c->last_used = c->created = now_ms();
     return c;
 }
 static int conn_ping(Conn* c) {
     if (c->broken) return -1;
     if (c->driver == DRV_SQLITE) return 0;
-    Result* r = c->driver == DRV_MYSQL ? my_command(c, 0x0e, NULL) : pg_query(c, "SELECT 1");
+    Result* r = conn_quick(c, c->driver == DRV_MYSQL ? NULL : "SELECT 1");
     int ok = r != NULL;
     result_free(r);
     return ok ? 0 : -1;
+}
+/* Asks the server to stop the running statement, over a separate short-lived connection. A request
+ * that arrives after the statement finished is ignored by both servers. */
+static void conn_send_cancel(Conn* c) {
+    if (c->driver == DRV_SQLITE) return; /* the progress callback interrupts SQLite */
+    db_trace("sending a cancel request");
+    Conn* k = (Conn*)calloc(1, sizeof(Conn));
+    k->driver = c->driver; k->sock = DB_BAD_SOCK; k->url = c->url; k->connect_ms = c->connect_ms;
+    k->deadline = now_ms() + c->connect_ms;
+    if (c->driver == DRV_PG) {
+        if (!tcp_connect(k, c->url.host, c->url.port)) {
+            uint8_t m[16];
+            put_be32(m, 16); put_be32(m + 4, 80877102); put_be32(m + 8, c->pg_pid); put_be32(m + 12, c->pg_secret);
+            conn_send(k, m, 16);
+        }
+        k->broken = 1; /* CancelRequest connections get no Terminate */
+    } else if (!my_connect(k, &c->url)) {
+        char sql[48];
+        snprintf(sql, sizeof sql, "KILL QUERY %u", c->my_thread);
+        result_free(my_command(k, 0x03, sql));
+    }
+    conn_close(k);
+}
+
+/* ---- row streams ------------------------------------------------------------------------------- */
+/* Sends sql and reads up to its first row. 0 ok (s->done when the statement returns no rows). */
+static int stream_open(Conn* c, const char* sql, Result* r) {
+    Stream* s = r->s;
+    if (c->driver == DRV_SQLITE) {
+        const char* tail = NULL;
+        if (sqlite3_prepare_v2(c->lite, sql, -1, &s->st, &tail) != SQLITE_OK) { set_err(c, "%s", sqlite3_errmsg(c->lite)); s->done = 1; return -1; }
+        while (tail && isspace((unsigned char)*tail)) tail++;
+        if (!s->st || (tail && *tail)) { set_err(c, "a stream runs one statement%s", ""); s->done = 1; return -1; }
+        r->cols = sqlite3_column_count(s->st);
+        r->names = lite_names(s->st, r->cols);
+        if (!r->cols) { /* nothing to stream: run it now */
+            int k = sqlite3_step(s->st);
+            if (k != SQLITE_DONE) set_err(c, "%s", sqlite3_errmsg(c->lite));
+            else { r->affected = sqlite3_changes(c->lite); r->last_id = sqlite3_last_insert_rowid(c->lite); }
+            sqlite3_finalize(s->st); s->st = NULL; s->done = 1;
+            c->in_txn = !sqlite3_get_autocommit(c->lite);
+            return k == SQLITE_DONE ? 0 : -1;
+        }
+        return 0;
+    }
+    if (c->driver == DRV_PG) {
+        Buf q = {0};
+        buf_str0(&q, sql);
+        int e = pg_send(c, 'Q', &q);
+        buf_free(&q);
+        if (e) { s->done = 1; return -1; }
+        for (;;) {
+            int k = pg_step(c, &s->in, r, NULL, &s->failed);
+            if (k == 3) return 0;
+            if (k < 0 || k == 2) { s->done = 1; if (!r->names) r->names = (char**)calloc(1, sizeof(char*)); return k < 0 || s->failed ? -1 : 0; }
+        }
+    }
+    Buf pkt = {0};
+    buf_byte(&pkt, 0x03);
+    buf_put(&pkt, sql, strlen(sql));
+    c->seq = 0;
+    int e = my_send(c, pkt.p, pkt.n) || my_read(c, &s->in) || !s->in.n;
+    buf_free(&pkt);
+    if (e) { s->done = 1; return -1; }
+    if (s->in.p[0] == 0x00) { my_ok(c, &s->in, r); r->names = (char**)calloc(1, sizeof(char*)); s->done = 1; return 0; }
+    if (s->in.p[0] == 0xff) { my_err(c, &s->in); s->done = 1; return -1; }
+    if (my_columns(c, &s->in, r)) { s->done = 1; return -1; }
+    return 0;
+}
+/* Reads the next row into s->row: 1 row, 0 end, -1 error. s->done is set at the end and on errors. */
+static int stream_next(Conn* c, Result* r) {
+    Stream* s = r->s;
+    if (c->driver == DRV_SQLITE) {
+        int k = sqlite3_step(s->st);
+        if (k == SQLITE_ROW) { lite_row(s->st, r->cols, s->row); return 1; }
+        if (k != SQLITE_DONE) set_err(c, "%s", sqlite3_errmsg(c->lite));
+        sqlite3_finalize(s->st); s->st = NULL; s->done = 1;
+        c->in_txn = !sqlite3_get_autocommit(c->lite);
+        return k == SQLITE_DONE ? 0 : -1;
+    }
+    if (c->driver == DRV_PG) {
+        for (;;) {
+            int k = pg_step(c, &s->in, r, s->row, &s->failed);
+            if (k == 1) return 1;
+            if (k < 0 || k == 2) { s->done = 1; free_row(s->row, r->cols); return k < 0 || s->failed ? -1 : 0; }
+        }
+    }
+    int k = my_next_row(c, &s->in, r->cols, s->row);
+    if (k <= 0) s->done = 1;
+    return k;
+}
+/* Ends a stream early. The rest of the result is read and dropped; one that is still streaming after
+ * 50 ms gets a server-side cancel. The connection error (if any) is kept. */
+static void stream_drain(Conn* c, Result* r) {
+    Stream* s = r->s;
+    char err[512];
+    snprintf(err, sizeof err, "%s", c->err);
+    if (c->driver == DRV_SQLITE || c->broken) {
+        if (s->st) sqlite3_finalize(s->st);
+        s->st = NULL; s->done = 1;
+        if (c->lite) c->in_txn = !sqlite3_get_autocommit(c->lite);
+        return;
+    }
+    conn_begin(c, NULL, 0, 50);
+    while (!s->done) if (stream_next(c, r) > 0) free_row(s->row, r->cols);
+    conn_end(c);
+    c->stop = 0;
+    if (!c->broken) snprintf(c->err, sizeof c->err, "%s", err);
+}
+
+static int ident_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || (unsigned char)ch >= 0x80; }
+/* Length of the comment, quoted string or quoted identifier starting at s (where a ? is not a
+ * placeholder), or 0. Unterminated spans run to the end of the text. */
+static size_t sql_skip(const Conn* c, const char* sql, const char* s) {
+    const char* e;
+    int my = c->driver == DRV_MYSQL, pg = c->driver == DRV_PG;
+    if ((s[0] == '-' && s[1] == '-' && (!my || !s[2] || isspace((unsigned char)s[2]))) || (s[0] == '#' && my))
+        return strcspn(s, "\n");
+    if (s[0] == '/' && s[1] == '*') { /* PostgreSQL comments nest, MySQL and SQLite ones do not */
+        int depth = 0;
+        for (e = s; *e;) {
+            if (e[0] == '/' && e[1] == '*') { if (!depth || pg) depth++; e += 2; }
+            else if (e[0] == '*' && e[1] == '/') { e += 2; if (!--depth) break; }
+            else e++;
+        }
+        return (size_t)(e - s);
+    }
+    char close = *s == '[' && c->driver == DRV_SQLITE ? ']' : *s;
+    if (close == '\'' || close == '"' || close == '`' || close == ']') {
+        /* backslash escapes: MySQL strings (unless NO_BACKSLASH_ESCAPES) and PostgreSQL E'...' strings */
+        int bs = (my && !c->no_backslash && close != '`') || (pg && close == '\'' && s > sql && (s[-1] == 'E' || s[-1] == 'e') && (s - 1 == sql || !ident_char(s[-2])));
+        for (e = s + 1; *e; e++) {
+            if (bs && *e == '\\' && e[1]) { e++; continue; }
+            if (*e == close) { if (close != ']' && e[1] == close) { e++; continue; } return (size_t)(e + 1 - s); }
+        }
+        return (size_t)(e - s);
+    }
+    if (*s == '$' && pg && (s == sql || !ident_char(s[-1]))) { /* $tag$ ... $tag$ */
+        const char* t = s + 1;
+        if (!isdigit((unsigned char)*t)) while (ident_char(*t)) t++;
+        if (*t == '$') {
+            size_t tl = (size_t)(t + 1 - s);
+            for (e = t + 1; *e; e++) if (!strncmp(e, s, tl)) return (size_t)(e + tl - s);
+            return (size_t)(e - s);
+        }
+    }
+    return 0;
 }
 
 /* Quote ? parameters as literals for this connection. params is `<len>:<bytes>` repeated, one entry
@@ -977,11 +1312,11 @@ static char* bind_params(Conn* c, const char* sql, const char* params, int npara
     Buf o = {0};
     const char* p = params;
     int used = 0;
-    char quote = 0;
-    for (const char* s = sql; *s; s++) {
-        if (quote) { buf_byte(&o, (uint8_t)*s); if (*s == quote) quote = 0; continue; }
-        if (*s == '\'' || *s == '"' || *s == '`') { quote = *s; buf_byte(&o, (uint8_t)*s); continue; }
-        if (*s != '?') { buf_byte(&o, (uint8_t)*s); continue; }
+    for (const char* s = sql; *s;) {
+        size_t skip = sql_skip(c, sql, s);
+        if (skip) { buf_put(&o, s, skip); s += skip; continue; }
+        if (*s != '?') { buf_byte(&o, (uint8_t)*s++); continue; }
+        s++;
         if (used == nparams) { buf_free(&o); set_err(c, "more ? placeholders than parameters%s", ""); return NULL; }
         char* colon = NULL;
         long long n = strtoll(p, &colon, 10);
@@ -1010,22 +1345,40 @@ static char* bind_params(Conn* c, const char* sql, const char* params, int npara
 #define MAX_POOLS 64
 #define MAX_CONNS_PER_POOL 256
 #define MAX_RESULTS 4096
+#define MAX_TOKENS 4096
 typedef struct {
-    int used, closing;
+    int used, closing, busy; /* busy: acquirers and closers in flight; the slot is freed once closing with no leases or busy */
     DbUrl url;
     int max, open, in_use;
     long long timeout_ms, idle_check_ms;
+    volatile long long connect_ms, query_ms, idle_ms, life_ms; /* rtdbsetlimit; 0 = off (connect is always on) */
     Conn* idle[MAX_CONNS_PER_POOL];
     int nidle;
     db_mutex mu;
     db_cond cv;
-    long long stat_created, stat_waits, stat_timeouts, stat_broken, stat_rollbacks, stat_checkouts;
+    long long stat_created, stat_waits, stat_timeouts, stat_broken, stat_rollbacks, stat_checkouts, stat_expired;
     char err[512];
 } Pool;
-typedef struct { Conn* c; int pool; int used; } Lease;
+/* busy: a statement or stream read is running on the lease; stream: its open row stream */
+typedef struct { Conn* c; int pool; int used, busy; Result* stream; } Lease;
 static Pool g_pools[MAX_POOLS + 1];
 static Lease g_leases[MAX_POOLS * MAX_CONNS_PER_POOL + 1];
 static Result* g_results[MAX_RESULTS + 1];
+static Token g_tokens[MAX_TOKENS + 1];
+/* Free handle stacks (under g_tab_mu): O(1) allocation instead of scanning the tables */
+#define MAX_LEASES (MAX_POOLS * MAX_CONNS_PER_POOL)
+static int g_free_lease[MAX_LEASES], g_free_lease_n = -1;
+static int g_free_res[MAX_RESULTS], g_free_res_n = -1;
+static int g_free_tok[MAX_TOKENS], g_free_tok_n = -1, g_tok_gen;
+static void free_stacks_init(void) {
+    if (g_free_lease_n >= 0) return;
+    for (int i = 0; i < MAX_LEASES; i++) g_free_lease[i] = MAX_LEASES - i; /* 1 on top */
+    g_free_lease_n = MAX_LEASES;
+    for (int i = 0; i < MAX_RESULTS; i++) g_free_res[i] = MAX_RESULTS - i;
+    g_free_res_n = MAX_RESULTS;
+    for (int i = 0; i < MAX_TOKENS; i++) g_free_tok[i] = MAX_TOKENS - i;
+    g_free_tok_n = MAX_TOKENS;
+}
 static char g_last_err[512];
 #ifdef _WIN32
 static db_mutex g_tab_mu = SRWLOCK_INIT;
@@ -1033,6 +1386,102 @@ static db_mutex g_tab_mu = SRWLOCK_INIT;
 static db_mutex g_tab_mu = PTHREAD_MUTEX_INITIALIZER;
 #endif
 static void tab_lock(void) { mtx_lock(&g_tab_mu); }
+
+/* ---- cancellation tokens ---- */
+static Token* tok_get(long long h) { return h >= 1 && h <= MAX_TOKENS && g_tokens[h].used ? &g_tokens[h] : NULL; }
+/* Resolves an optional token argument (0 = none); -1 for an invalid handle */
+static int tok_resolve(long long h, Token** t, int* gen) {
+    *t = NULL; *gen = 0;
+    if (!h) return 0;
+    tab_lock();
+    Token* k = tok_get(h);
+    if (k) { *t = k; *gen = k->gen; }
+    mtx_unlock(&g_tab_mu);
+    return k ? 0 : -1;
+}
+long long salivo_db_token_new(void) {
+    tab_lock();
+    free_stacks_init();
+    long long h = -11;
+    if (g_free_tok_n > 0) { int i = g_free_tok[--g_free_tok_n]; g_tokens[i].used = 1; g_tokens[i].cancelled = 0; g_tokens[i].gen = ++g_tok_gen; h = i; }
+    mtx_unlock(&g_tab_mu);
+    return h;
+}
+/* The checkout or statement using the token stops within 50 ms (statements get a server-side cancel) */
+long long salivo_db_token_cancel(long long h) { tab_lock(); Token* t = tok_get(h); if (t) t->cancelled = 1; mtx_unlock(&g_tab_mu); return t ? 0 : -10; }
+long long salivo_db_token_free(long long h) {
+    tab_lock();
+    Token* t = tok_get(h);
+    if (t) { t->used = 0; t->gen = ++g_tok_gen; g_free_tok[g_free_tok_n++] = (int)h; }
+    mtx_unlock(&g_tab_mu);
+    return t ? 0 : -10;
+}
+
+/* ---- pools ---- */
+static Pool* pool_get(long long h) { return h >= 1 && h <= MAX_POOLS && g_pools[h].used ? &g_pools[h] : NULL; }
+/* Locks a pool slot; g_tab_mu is held while locking so the slot cannot be freed and reused meanwhile */
+static Pool* pool_lock(long long h) {
+    tab_lock();
+    Pool* p = pool_get(h);
+    if (p) mtx_lock(&p->mu);
+    mtx_unlock(&g_tab_mu);
+    return p;
+}
+/* Unlocks p->mu; the last one out of a closing pool frees its slot */
+static void pool_unlock(Pool* p) {
+    int done = p->closing && p->in_use == 0 && p->busy == 0 && p->used;
+    mtx_unlock(&p->mu);
+    if (done) { tab_lock(); p->used = 0; mtx_unlock(&g_tab_mu); }
+}
+static int conn_expired(const Pool* p, const Conn* c, long long now) {
+    return (p->idle_ms > 0 && now - c->last_used >= p->idle_ms) || (p->life_ms > 0 && now - c->created >= p->life_ms);
+}
+/* Closes idle connections past the idle timeout or their lifetime (p->mu held) */
+static void pool_reap(Pool* p) {
+    long long now = now_ms();
+    int k = 0;
+    for (int i = 0; i < p->nidle; i++) {
+        Conn* c = p->idle[i];
+        if (conn_expired(p, c, now)) { conn_close(c); p->open--; p->stat_expired++; }
+        else p->idle[k++] = c;
+    }
+    p->nidle = k;
+}
+/* Expiry also happens while nothing checks out: one background thread, started by the first idle
+ * timeout or lifetime, sweeps every pool */
+static int g_reaper;
+#ifdef _WIN32
+static DWORD WINAPI reaper_main(LPVOID x)
+#else
+static void* reaper_main(void* x)
+#endif
+{
+    (void)x;
+    for (;;) {
+        sleep_ms(250); /* ponytail: expiry is enforced within a quarter second; a timer wheel if that is too coarse */
+        for (int h = 1; h <= MAX_POOLS; h++) {
+            Pool* p = pool_lock(h);
+            if (!p) continue;
+            if (!p->closing) pool_reap(p);
+            mtx_unlock(&p->mu);
+        }
+    }
+    return 0; /* not reached */
+}
+static void reaper_start(void) {
+    tab_lock();
+    int start = !g_reaper;
+    g_reaper = 1;
+    mtx_unlock(&g_tab_mu);
+    if (!start) return;
+#ifdef _WIN32
+    HANDLE t = CreateThread(NULL, 0, reaper_main, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+#else
+    pthread_t t;
+    if (!pthread_create(&t, NULL, reaper_main, NULL)) pthread_detach(t);
+#endif
+}
 
 static long long db_pool_open_impl(const char* url, long long max_conns, long long timeout_ms) {
     DbUrl u;
@@ -1044,30 +1493,39 @@ static long long db_pool_open_impl(const char* url, long long max_conns, long lo
         Pool* p = &g_pools[h];
         memset(p, 0, sizeof *p);
         p->used = 1; p->url = u; p->max = (int)max_conns; p->timeout_ms = timeout_ms ? timeout_ms : 5000; p->idle_check_ms = 1000;
+        p->connect_ms = p->timeout_ms;
         mtx_init(&p->mu); cond_init(&p->cv);
     }
     mtx_unlock(&g_tab_mu);
     if (h < 0) { snprintf(g_last_err, sizeof g_last_err, "too many pools"); return h; }
     /* one eager connection proves the URL and credentials work */
     char err[512];
-    Conn* c = conn_open(&u, g_pools[h].timeout_ms, err, sizeof err);
-    if (!c) { snprintf(g_last_err, sizeof g_last_err, "%s", err); g_pools[h].used = 0; return -8; }
+    Conn* c = conn_open(&u, g_pools[h].connect_ms, NULL, 0, err, sizeof err);
+    if (!c) { snprintf(g_last_err, sizeof g_last_err, "%s", err); tab_lock(); g_pools[h].used = 0; mtx_unlock(&g_tab_mu); return -8; }
     Pool* p = &g_pools[h];
     mtx_lock(&p->mu);
     p->idle[p->nidle++] = c; p->open = 1; p->stat_created = 1;
     mtx_unlock(&p->mu);
     return h;
 }
-static Pool* pool_get(long long h) { return h >= 1 && h <= MAX_POOLS && g_pools[h].used && !g_pools[h].closing ? &g_pools[h] : NULL; }
 
-/* Returns a lease handle (> 0) or a negative error: -4 Timeout, -8 connect failure, -10 bad handle */
-static long long db_acquire_impl(long long pool) {
-    Pool* p = pool_get(pool);
+/* Returns a lease handle (> 0) or a negative error: -4 timeout, -8 connect failure, -10 bad handle,
+ * -12 pool closed, -14 cancelled through the token */
+static long long db_acquire_impl(long long pool, long long tok) {
+    Token* t;
+    int gen;
+    if (tok_resolve(tok, &t, &gen)) return -10;
+    Pool* p = pool_lock(pool);
     if (!p) return -10;
-    long long deadline = now_ms() + p->timeout_ms;
+    if (p->closing) { mtx_unlock(&p->mu); return -12; }
+    p->busy++;
+    long long deadline = now_ms() + p->timeout_ms, rc = 0;
+    int waited = 0;
     Conn* c = NULL;
-    mtx_lock(&p->mu);
     for (;;) {
+        if (p->closing) { rc = -12; break; } /* dbClose ran while this checkout waited */
+        if (tok_cancelled(t, gen)) { rc = -14; break; }
+        pool_reap(p);
         while (p->nidle > 0 && !c) {
             Conn* cand = p->idle[--p->nidle];
             if (now_ms() - cand->last_used >= p->idle_check_ms) {
@@ -1078,149 +1536,351 @@ static long long db_acquire_impl(long long pool) {
                 if (dead) conn_close(cand);
                 mtx_lock(&p->mu);
                 if (dead) { p->open--; p->stat_broken++; continue; }
+                if (p->closing) { conn_close(cand); p->open--; continue; }
             }
             c = cand;
         }
         if (c) break;
         if (p->open < p->max) {
             p->open++;
+            long long cms = p->connect_ms;
             mtx_unlock(&p->mu);
             char err[512];
-            c = conn_open(&p->url, p->timeout_ms, err, sizeof err);
+            c = conn_open(&p->url, cms, t, gen, err, sizeof err);
             mtx_lock(&p->mu);
-            if (!c) { p->open--; snprintf(p->err, sizeof p->err, "%s", err); cond_broadcast(&p->cv); mtx_unlock(&p->mu); return -8; }
+            if (!c) { p->open--; snprintf(p->err, sizeof p->err, "%s", err); cond_broadcast(&p->cv); rc = tok_cancelled(t, gen) ? -14 : -8; break; }
             p->stat_created++;
+            if (p->closing) { conn_close(c); c = NULL; p->open--; rc = -12; }
             break;
         }
         long long left = deadline - now_ms();
-        if (left <= 0) { p->stat_timeouts++; snprintf(p->err, sizeof p->err, "timed out waiting for a pooled connection"); mtx_unlock(&p->mu); return -4; }
-        p->stat_waits++;
-        cond_wait_ms(&p->cv, &p->mu, left);
+        if (left <= 0) { p->stat_timeouts++; snprintf(p->err, sizeof p->err, "timed out waiting for a pooled connection"); rc = -4; break; }
+        if (!waited) { p->stat_waits++; waited = 1; }
+        cond_wait_ms(&p->cv, &p->mu, t && left > 50 ? 50 : left); /* a token is checked every 50 ms */
     }
-    p->in_use++;
-    p->stat_checkouts++;
-    mtx_unlock(&p->mu);
+    if (rc == -12) snprintf(p->err, sizeof p->err, "pool is closed");
+    if (rc == -14) snprintf(p->err, sizeof p->err, "checkout cancelled");
+    p->busy--;
+    if (c) { p->in_use++; p->stat_checkouts++; }
+    pool_unlock(p);
+    if (!c) return rc;
     tab_lock();
     long long h = -11;
-    for (int i = 1; i <= MAX_POOLS * MAX_CONNS_PER_POOL; i++) if (!g_leases[i].used) { g_leases[i].used = 1; g_leases[i].c = c; g_leases[i].pool = (int)pool; h = i; break; }
+    free_stacks_init();
+    if (g_free_lease_n > 0) { int i = g_free_lease[--g_free_lease_n]; Lease* l = &g_leases[i]; l->used = 1; l->busy = 0; l->stream = NULL; l->c = c; l->pool = (int)pool; h = i; }
     mtx_unlock(&g_tab_mu);
     return h;
 }
-static Lease* lease_get(long long h) { return h >= 1 && h <= MAX_POOLS * MAX_CONNS_PER_POOL && g_leases[h].used ? &g_leases[h] : NULL; }
-
-/* Gives the connection back; an open transaction is rolled back first, a broken connection closed */
-static long long db_release_impl(long long lease) {
+static Lease* lease_get(long long h) { return h >= 1 && h <= MAX_LEASES && g_leases[h].used ? &g_leases[h] : NULL; }
+/* Claims the lease for one statement: -10 bad handle, -13 a statement or row stream is using it */
+static long long lease_enter(long long lease, Lease** out) {
     tab_lock();
     Lease* l = lease_get(lease);
-    Lease copy = l ? *l : (Lease){0};
-    if (l) l->used = 0;
+    long long rc = !l ? -10 : l->busy || l->stream ? -13 : 0;
+    if (!rc) l->busy = 1;
     mtx_unlock(&g_tab_mu);
+    *out = l;
+    return rc;
+}
+static void lease_exit(Lease* l) { tab_lock(); l->busy = 0; mtx_unlock(&g_tab_mu); }
+static Result* res_get(long long h) { return h >= 1 && h <= MAX_RESULTS ? g_results[h] : NULL; }
+/* Stores a result in the handle table (g_tab_mu held) */
+static long long res_put(Result* r) {
+    free_stacks_init();
+    if (g_free_res_n <= 0) return -11;
+    int i = g_free_res[--g_free_res_n];
+    g_results[i] = r;
+    return i;
+}
+
+/* After an early end: hides the stream's last row and gives the lease back for statements */
+static void stream_detach(Lease* l, Result* r) {
+    tab_lock();
+    char** shown = r->cells;
+    r->cells = r->s->row; r->s->row = shown;
+    r->rows = 0;
+    l->stream = NULL;
+    l->busy = 0;
+    mtx_unlock(&g_tab_mu);
+    free_row(r->s->row, r->cols);
+}
+
+/* Gives the connection back after any running statement; an open row stream is ended, an open
+ * transaction rolled back, and a broken, expired or shut-down connection closed */
+static long long db_release_impl(long long lease) {
+    Lease* l;
+    Lease copy = {0};
+    for (;;) {
+        tab_lock();
+        l = lease_get(lease);
+        int busy = l && l->busy;
+        Result* sr = l && !busy ? l->stream : NULL;
+        if (sr) l->busy = 1;
+        else if (l && !busy) { copy = *l; l->used = 0; } /* stale handles fail from here on; the slot is reused only after cleanup */
+        mtx_unlock(&g_tab_mu);
+        if (sr) { stream_drain(l->c, sr); stream_detach(l, sr); continue; }
+        if (!busy) break;
+        sleep_ms(1); /* ponytail: polls for a statement on another thread to finish; a per-lease condvar if this ever shows up */
+    }
     if (!l) return -10;
-    Pool* p;
     Conn* c = copy.c;
     int rolled = 0;
-    if (!c->broken && c->in_txn) { Result* r = conn_query(c, "ROLLBACK"); result_free(r); rolled = 1; if (c->in_txn) c->broken = 1; }
-    p = copy.pool >= 1 && copy.pool <= MAX_POOLS ? &g_pools[copy.pool] : NULL;
-    if (!p || !p->used) { conn_close(c); return rolled; }
+    if (!c->broken && c->in_txn) { Result* r = conn_quick(c, "ROLLBACK"); result_free(r); rolled = 1; if (c->in_txn) c->broken = 1; }
+    Pool* p = &g_pools[copy.pool]; /* the lease keeps the slot alive (in_use > 0) */
     mtx_lock(&p->mu);
     p->in_use--;
     if (rolled) p->stat_rollbacks++;
-    int drop = c->broken || p->closing;
-    if (drop) { p->open--; if (c->broken) p->stat_broken++; }
+    int expired = !c->broken && !c->kill && !p->closing && conn_expired(p, c, now_ms());
+    int drop = c->broken || c->kill || p->closing || expired;
+    if (drop) { p->open--; if (c->broken) p->stat_broken++; if (expired) p->stat_expired++; }
     else p->idle[p->nidle++] = c;
-    if (p->closing && p->in_use == 0) p->used = 0; /* the slot is reusable once every lease is back */
     cond_broadcast(&p->cv);
-    mtx_unlock(&p->mu);
+    pool_unlock(p);
     if (drop) conn_close(c);
+    tab_lock();
+    g_free_lease[g_free_lease_n++] = (int)lease;
+    mtx_unlock(&g_tab_mu);
     return rolled;
 }
 
-/* params: see bind_params. Returns a result handle or a negative error. */
-static long long db_query_impl(long long lease, const char* sql, const char* params, long long nparams) {
-    Lease* l = lease_get(lease);
-    if (!l) return -10;
+/* params: see bind_params. Returns a result handle or a negative error: -13 the lease is busy,
+ * -14 cancelled, -15 query timeout, -3 connection lost, -18 query error */
+static long long db_query_impl(long long lease, const char* sql, const char* params, long long nparams, long long tok) {
+    Token* t;
+    int gen;
+    if (tok_resolve(tok, &t, &gen)) return -10;
+    Lease* l;
+    long long h = lease_enter(lease, &l);
+    if (h) return h;
     Conn* c = l->c;
     char* bound = bind_params(c, sql ? sql : "", params ? params : "", (int)nparams);
-    if (!bound) return -7;
-    Result* r = conn_query(c, bound);
-    free(bound);
-    if (!r) return c->broken ? -3 : -18;
+    Result* r = NULL;
+    h = -7;
+    if (bound) {
+        conn_begin(c, t, gen, g_pools[l->pool].query_ms);
+        r = conn_query(c, bound);
+        conn_end(c);
+        free(bound);
+        h = r ? -11 : conn_rc(c);
+    }
     tab_lock();
-    long long h = -11;
-    for (int i = 1; i <= MAX_RESULTS; i++) if (!g_results[i]) { g_results[i] = r; h = i; break; }
+    l->busy = 0;
+    if (r) h = res_put(r);
     mtx_unlock(&g_tab_mu);
     if (h < 0) result_free(r);
     return h;
 }
-static Result* res_get(long long h) { return h >= 1 && h <= MAX_RESULTS ? g_results[h] : NULL; }
-long long salivo_db_result_free(long long h) {
+
+/* Opens a row stream: rows are read one at a time with db_next, so memory stays bounded and a slow
+ * reader slows the server (TCP flow control). The lease runs nothing else until the stream ends or
+ * its handle is freed. Errors as db_query. */
+static long long db_stream_impl(long long lease, const char* sql, const char* params, long long nparams, long long tok) {
+    Token* t;
+    int gen;
+    if (tok_resolve(tok, &t, &gen)) return -10;
+    Lease* l;
+    long long rc = lease_enter(lease, &l);
+    if (rc) return rc;
+    Conn* c = l->c;
+    char* bound = bind_params(c, sql ? sql : "", params ? params : "", (int)nparams);
+    if (!bound) { lease_exit(l); return -7; }
+    Result* r = (Result*)calloc(1, sizeof(Result));
+    Stream* s = (Stream*)calloc(1, sizeof(Stream));
+    r->s = s; r->affected = -1;
+    s->lease = (int)lease; s->tok = t; s->tok_gen = gen;
+    conn_begin(c, t, gen, g_pools[l->pool].query_ms);
+    int k = conn_ready(c) ? -1 : stream_open(c, bound, r);
+    if (!k && c->stop) k = -1;
+    if (k) { rc = conn_rc(c); conn_stopped_err(c); }
+    conn_end(c);
+    free(bound);
+    c->last_used = now_ms();
+    if (!k) {
+        int n = r->cols ? r->cols : 1;
+        s->row = (char**)calloc((size_t)n, sizeof(char*));
+        r->cells = (char**)calloc((size_t)n, sizeof(char*));
+        r->cap_rows = 1;
+        tab_lock();
+        rc = res_put(r);
+        if (rc > 0) { if (!s->done) l->stream = r; l->busy = 0; }
+        mtx_unlock(&g_tab_mu);
+    }
+    if (rc < 0) {
+        if (!s->done) stream_drain(c, r);
+        result_free(r);
+        lease_exit(l);
+    }
+    return rc;
+}
+
+/* Moves a row stream to its next row, readable as row 0: 1 row, 0 end, negative error (the stream
+ * then ends). Errors as db_query. */
+static long long db_next_impl(long long h) {
     tab_lock();
     Result* r = res_get(h);
-    if (r) g_results[h] = NULL;
+    Stream* s = r ? r->s : NULL;
+    Lease* l = s && !s->done ? &g_leases[s->lease] : NULL;
+    long long rc = !r ? -10 : !s ? -7 : l && l->busy ? -13 : 0;
+    if (!rc && l) l->busy = 1; /* also keeps r alive: freeing a stream waits for its lease */
     mtx_unlock(&g_tab_mu);
+    if (rc || !l) return rc;
+    Conn* c = l->c;
+    conn_begin(c, s->tok, s->tok_gen, g_pools[l->pool].query_ms);
+    int k = conn_ready(c) ? -1 : stream_next(c, r);
+    if (k > 0 && c->stop) k = -1;
+    if (k < 0) { rc = conn_rc(c); conn_stopped_err(c); }
+    conn_end(c);
+    c->last_used = now_ms();
+    if (k < 0 && !s->done) stream_drain(c, r);
+    if (k <= 0) free_row(s->row, r->cols);
+    tab_lock();
+    char** shown = r->cells; /* the visible row becomes the read buffer */
+    r->cells = s->row; s->row = shown;
+    r->rows = k > 0;
+    if (s->done) l->stream = NULL;
+    l->busy = 0;
+    mtx_unlock(&g_tab_mu);
+    free_row(s->row, r->cols);
+    return k > 0 ? 1 : k == 0 ? 0 : rc;
+}
+
+/* Ends an open row stream whose handle is being freed: waits for its lease, then drains */
+static void stream_close(Result* r) {
+    Stream* s = r->s;
+    Lease* l = NULL;
+    for (;;) {
+        tab_lock();
+        int open = !s->done, busy = open && g_leases[s->lease].busy;
+        if (open && !busy) { l = &g_leases[s->lease]; l->busy = 1; }
+        mtx_unlock(&g_tab_mu);
+        if (!busy) break;
+        sleep_ms(1);
+    }
+    if (!l) return;
+    stream_drain(l->c, r);
+    stream_detach(l, r);
+}
+static long long db_result_free_impl(long long h) {
+    tab_lock();
+    Result* r = res_get(h);
+    if (r) { g_results[h] = NULL; g_free_res[g_free_res_n++] = (int)h; }
+    mtx_unlock(&g_tab_mu);
+    if (!r) return -10;
+    if (r->s) stream_close(r);
     result_free(r);
-    return r ? 0 : -10;
+    return 0;
 }
-long long salivo_db_rows(long long h) { Result* r = res_get(h); return r ? r->rows : -10; }
-long long salivo_db_cols(long long h) { Result* r = res_get(h); return r ? r->cols : -10; }
-long long salivo_db_affected(long long h) { Result* r = res_get(h); return r ? r->affected : -10; }
-long long salivo_db_last_id(long long h) { Result* r = res_get(h); return r ? r->last_id : -10; }
-char* salivo_db_col_name(long long h, long long i) {
-    Result* r = res_get(h);
-    const char* s = r && i >= 0 && i < r->cols && r->names[i] ? r->names[i] : "";
-    return out_str(s, strlen(s));
-}
-long long salivo_db_is_null(long long h, long long row, long long col) {
-    Result* r = res_get(h);
-    if (!r || row < 0 || row >= r->rows || col < 0 || col >= r->cols) return -7;
-    return r->cells[row * r->cols + col] == NULL;
-}
+/* ponytail: one global lock guards every handle read against a concurrent free; per-handle refcounts if it contends */
+#define RES_READ(T, expr) { tab_lock(); Result* r = res_get(h); T v = expr; mtx_unlock(&g_tab_mu); return v; }
+static const char* res_name(Result* r, long long i) { return r && i >= 0 && i < r->cols && r->names[i] ? r->names[i] : ""; }
+long long salivo_db_rows(long long h) RES_READ(long long, r ? r->rows : -10)
+long long salivo_db_cols(long long h) RES_READ(long long, r ? r->cols : -10)
+long long salivo_db_affected(long long h) RES_READ(long long, r ? r->affected : -10)
+long long salivo_db_last_id(long long h) RES_READ(long long, r ? r->last_id : -10)
+char* salivo_db_col_name(long long h, long long i) RES_READ(char*, out_str(res_name(r, i), strlen(res_name(r, i))))
+long long salivo_db_is_null(long long h, long long row, long long col) RES_READ(long long, !r || row < 0 || row >= r->rows || col < 0 || col >= r->cols ? -7 : r->cells[row * r->cols + col] == NULL)
 char* salivo_db_text(long long h, long long row, long long col) {
+    tab_lock();
     Result* r = res_get(h);
     const char* s = r && row >= 0 && row < r->rows && col >= 0 && col < r->cols && r->cells[row * r->cols + col] ? r->cells[row * r->cols + col] : "";
-    return out_str(s, strlen(s));
+    char* v = out_str(s, strlen(s));
+    mtx_unlock(&g_tab_mu);
+    return v;
 }
-long long salivo_db_in_txn(long long lease) { Lease* l = lease_get(lease); return l ? l->c->in_txn : -10; }
-long long salivo_db_driver(long long pool) { Pool* p = pool_get(pool); return p ? p->url.driver : -10; }
+long long salivo_db_in_txn(long long lease) { tab_lock(); Lease* l = lease_get(lease); long long v = !l ? -10 : l->busy ? -13 : l->c->in_txn; mtx_unlock(&g_tab_mu); return v; }
+long long salivo_db_driver(long long pool) { Pool* p = pool_lock(pool); if (!p) return -10; long long v = p->url.driver; mtx_unlock(&p->mu); return v; }
 /* Last error of a lease (> 0), or of a pool (as -pool), or the pool-open error (0) */
 char* salivo_db_error(long long h) {
-    const char* s = g_last_err;
-    if (h > 0) { Lease* l = lease_get(h); s = l ? l->c->err : "invalid connection handle"; }
-    else if (h < 0) { Pool* p = pool_get(-h); s = p ? p->err : "invalid pool handle"; }
+    char s[512];
+    snprintf(s, sizeof s, "%s", g_last_err);
+    if (h > 0) {
+        tab_lock();
+        Lease* l = lease_get(h);
+        snprintf(s, sizeof s, "%s", !l ? "invalid connection handle" : l->busy ? "a statement is running on this connection" : l->c->err);
+        mtx_unlock(&g_tab_mu);
+    } else if (h < 0) {
+        Pool* p = pool_lock(-h);
+        snprintf(s, sizeof s, "%s", p ? p->err : "invalid pool handle");
+        if (p) mtx_unlock(&p->mu);
+    }
     return out_str(s, strlen(s));
 }
-/* 0 open, 1 idle, 2 in use, 3 max, 4 created, 5 waits, 6 timeouts, 7 broken, 8 rollbacks, 9 checkouts */
+/* 0 open, 1 idle, 2 in use, 3 max, 4 created, 5 waits, 6 timeouts, 7 broken, 8 rollbacks, 9 checkouts, 10 expired */
 long long salivo_db_stat(long long pool, long long key) {
-    Pool* p = pool_get(pool);
+    Pool* p = pool_lock(pool);
     if (!p) return -10;
-    mtx_lock(&p->mu);
     long long v = key == 0 ? p->open : key == 1 ? p->nidle : key == 2 ? p->in_use : key == 3 ? p->max : key == 4 ? p->stat_created :
-        key == 5 ? p->stat_waits : key == 6 ? p->stat_timeouts : key == 7 ? p->stat_broken : key == 8 ? p->stat_rollbacks : key == 9 ? p->stat_checkouts : -7;
+        key == 5 ? p->stat_waits : key == 6 ? p->stat_timeouts : key == 7 ? p->stat_broken : key == 8 ? p->stat_rollbacks : key == 9 ? p->stat_checkouts :
+        key == 10 ? p->stat_expired : -7;
     mtx_unlock(&p->mu);
     return v;
 }
 /* Marks idle connections for a health check on their next checkout (after a server restart) */
-long long salivo_db_set_idle_check(long long pool, long long ms) { Pool* p = pool_get(pool); if (!p) return -10; p->idle_check_ms = ms < 0 ? 0 : ms; return 0; }
-static long long db_pool_close_impl(long long pool) {
-    Pool* p = pool_get(pool);
+long long salivo_db_set_idle_check(long long pool, long long ms) { Pool* p = pool_lock(pool); if (!p) return -10; p->idle_check_ms = ms < 0 ? 0 : ms; mtx_unlock(&p->mu); return 0; }
+/* key: 0 connect timeout (> 0), 1 query timeout, 2 idle timeout, 3 connection max lifetime; ms, 0 = off */
+long long salivo_db_set_limit(long long pool, long long key, long long ms) {
+    if (key < 0 || key > 3 || ms < 0 || (key == 0 && ms == 0)) return -7;
+    Pool* p = pool_lock(pool);
     if (!p) return -10;
-    mtx_lock(&p->mu);
-    while (p->nidle) { conn_close(p->idle[--p->nidle]); p->open--; }
-    p->closing = 1; /* leases still out close on release */
-    if (p->in_use == 0) p->used = 0;
-    cond_broadcast(&p->cv);
+    if (key == 0) p->connect_ms = ms; else if (key == 1) p->query_ms = ms; else if (key == 2) p->idle_ms = ms; else p->life_ms = ms;
     mtx_unlock(&p->mu);
+    if (key >= 2 && ms > 0) reaper_start();
     return 0;
+}
+static long long db_pool_close_impl(long long pool) {
+    Pool* p = pool_lock(pool);
+    if (!p) return -10;
+    if (p->closing) { mtx_unlock(&p->mu); return -12; }
+    p->closing = 1; /* new checkouts and waiters fail with -12; leases still out close on release */
+    while (p->nidle) { conn_close(p->idle[--p->nidle]); p->open--; }
+    cond_broadcast(&p->cv);
+    pool_unlock(p);
+    return 0;
+}
+/* Closes the pool and waits up to ms for every lease to come back: 0 drained, -4 leases still out
+ * (their running statements are cancelled, new ones refused, and they close when released) */
+static long long db_pool_close_wait_impl(long long pool, long long ms) {
+    Pool* p = pool_lock(pool);
+    if (!p) return -10;
+    if (!p->closing) { p->closing = 1; while (p->nidle) { conn_close(p->idle[--p->nidle]); p->open--; } cond_broadcast(&p->cv); }
+    p->busy++;
+    long long deadline = now_ms() + (ms > 0 ? ms : 0), rc = 0;
+    while (p->in_use > 0) {
+        long long left = deadline - now_ms();
+        if (left <= 0) { rc = -4; break; }
+        cond_wait_ms(&p->cv, &p->mu, left);
+    }
+    mtx_unlock(&p->mu);
+    if (rc) {
+        tab_lock();
+        for (int i = 1; i <= MAX_LEASES; i++) if (g_leases[i].used && g_leases[i].pool == pool) g_leases[i].c->kill = 1;
+        mtx_unlock(&g_tab_mu);
+        snprintf(p->err, sizeof p->err, "shutdown timed out with leases still out");
+    }
+    mtx_lock(&p->mu);
+    p->busy--;
+    pool_unlock(p);
+    return rc;
 }
 
 /* Public entry points: inline on ordinary threads, on the blocking pool inside async tasks */
 static long long tramp_pool_open(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_pool_open_impl(c->s1, c->a, c->b); }
-static long long tramp_acquire(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_acquire_impl(c->a); }
+static long long tramp_acquire(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_acquire_impl(c->a, c->b); }
 static long long tramp_release(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_release_impl(c->a); }
-static long long tramp_query(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_query_impl(c->a, c->s1, c->s2, c->b); }
+static long long tramp_query(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_query_impl(c->a, c->s1, c->s2, c->b, c->c); }
+static long long tramp_stream(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_stream_impl(c->a, c->s1, c->s2, c->b, c->c); }
+static long long tramp_next(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_next_impl(c->a); }
+static long long tramp_result_free(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_result_free_impl(c->a); }
 static long long tramp_pool_close(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_pool_close_impl(c->a); }
+static long long tramp_pool_close_wait(long long p) { DbCall* c = (DbCall*)(intptr_t)p; return db_pool_close_wait_impl(c->a, c->b); }
 long long salivo_db_pool_open(const char* url, long long max_conns, long long timeout_ms) { DbCall c = { max_conns, timeout_ms, 0, url, NULL, 0 }; return run_offloaded(tramp_pool_open, &c); }
 long long salivo_db_acquire(long long pool) { DbCall c = { pool, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_acquire, &c); }
+long long salivo_db_acquire_with(long long pool, long long tok) { DbCall c = { pool, tok, 0, NULL, NULL, 0 }; return run_offloaded(tramp_acquire, &c); }
 long long salivo_db_release(long long lease) { DbCall c = { lease, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_release, &c); }
 long long salivo_db_query(long long lease, const char* sql, const char* params, long long nparams) { DbCall c = { lease, nparams, 0, sql, params, 0 }; return run_offloaded(tramp_query, &c); }
+long long salivo_db_query_with(long long lease, const char* sql, const char* params, long long nparams, long long tok) { DbCall c = { lease, nparams, tok, sql, params, 0 }; return run_offloaded(tramp_query, &c); }
+long long salivo_db_stream(long long lease, const char* sql, const char* params, long long nparams, long long tok) { DbCall c = { lease, nparams, tok, sql, params, 0 }; return run_offloaded(tramp_stream, &c); }
+long long salivo_db_next(long long h) { DbCall c = { h, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_next, &c); }
+long long salivo_db_result_free(long long h) { DbCall c = { h, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_result_free, &c); }
 long long salivo_db_pool_close(long long pool) { DbCall c = { pool, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_pool_close, &c); }
+long long salivo_db_pool_close_wait(long long pool, long long ms) { DbCall c = { pool, ms, 0, NULL, NULL, 0 }; return run_offloaded(tramp_pool_close_wait, &c); }

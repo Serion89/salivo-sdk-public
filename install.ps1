@@ -55,8 +55,10 @@ function Install-WithWinget([string]$id, [string[]]$extra) {
     & winget @wingetArgs
 }
 
-# Points .sal files at Salivo.File: the official Salivo icon, opening in VS Code. Keys are only created
-# when missing (New-Item -Force would recreate an existing key and wipe other programs' values), and a
+# Points .sal files at Salivo.File: the official Salivo icon, opening in VS Code, plus a
+# "Run with Salivo" right-click entry that runs the file in a console that stays open.
+# Double-click keeps opening the editor, so a downloaded .sal file never runs by accident.
+# Keys are only created when missing (New-Item -Force would recreate an existing key and wipe other programs' values), and a
 # handler another program had installed for .sal is reported and left in place for "Open with".
 function Register-SalivoFiles {
     $ico = Join-Path $root 'salivo.ico'
@@ -64,7 +66,8 @@ function Register-SalivoFiles {
     if (Test-Path $shippedIco) { Copy-Item -Force $shippedIco $ico }
     $classes = 'Registry::HKEY_CURRENT_USER\Software\Classes'
     foreach ($key in @("$classes\.sal", "$classes\.sal\OpenWithProgids", "$classes\Salivo.File",
-                       "$classes\Salivo.File\DefaultIcon", "$classes\Salivo.File\shell\open\command")) {
+                       "$classes\Salivo.File\DefaultIcon", "$classes\Salivo.File\shell\open\command",
+                       "$classes\Salivo.File\shell\run", "$classes\Salivo.File\shell\run\command")) {
         if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
     }
     $previous = (Get-ItemProperty -Path "$classes\.sal" -ErrorAction SilentlyContinue).'(default)'
@@ -77,6 +80,11 @@ function Register-SalivoFiles {
     if (Test-Path $codeExe) {
         Set-ItemProperty -Path "$classes\Salivo.File\shell\open\command" -Name '(default)' -Value "`"$codeExe`" `"%1`""
     }
+    $sf = Join-Path $bin 'sf.exe'
+    Set-ItemProperty -Path "$classes\Salivo.File\shell\run" -Name '(default)' -Value 'Run with Salivo'
+    Set-ItemProperty -Path "$classes\Salivo.File\shell\run" -Name 'Icon' -Value "$ico,0"
+    # cmd /k keeps the window open so the output and exit status stay readable; cd to the file's folder
+    Set-ItemProperty -Path "$classes\Salivo.File\shell\run\command" -Name '(default)' -Value "cmd.exe /k cd /d `"%W`" && `"$sf`" run `"%1`""
     if (-not ('SalivoSetup.Shell' -as [type])) {
         Add-Type -Namespace SalivoSetup -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, System.IntPtr a, System.IntPtr b);'
     }
@@ -84,7 +92,7 @@ function Register-SalivoFiles {
     if ($previous -and $previous -ne 'Salivo.File') {
         Warn "another program ('$previous') had taken over .sal files; restored the Salivo icon"
     }
-    Ok '.sal files use the official Salivo icon and open in VS Code'
+    Ok '.sal files use the official Salivo icon, open in VS Code, and run from the right-click menu'
 }
 
 if ($RepairFileIcons) {

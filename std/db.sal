@@ -6,12 +6,17 @@ module salivo.std.db;
 // A DbConn is a connection checked out of its pool. Dropping it returns it to the pool, and an
 // open transaction is rolled back first. A DbRows owns a result set and frees it when dropped.
 // Handles are negative when the operation failed: read the reason with dbOpenError / dbError.
+// Error codes: -3 connection lost, -4 timeout, -7 invalid argument, -8 connect failure, -10 invalid
+// handle, -12 pool closed, -13 connection busy (a statement or open stream), -14 cancelled,
+// -15 query timeout, -18 query error.
 
 ><salivo.std.collections::{Vec, get, veclen};
 
 pub struct DbPool { int handle; }
 pub struct DbConn { int handle; }
 pub struct DbRows { int handle; }
+/// Cancels the checkout or statement it is passed to, from any thread or task
+pub struct DbCancel { int handle; }
 
 impl Drop for DbConn {
     func drop(self) {
@@ -25,6 +30,14 @@ impl Drop for DbRows {
     func drop(self) {
         if (self.handle > 0) {
             rtdbresultfree(self.handle);
+        }
+    }
+}
+
+impl Drop for DbCancel {
+    func drop(self) {
+        if (self.handle > 0) {
+            rtdbtokenfree(self.handle);
         }
     }
 }
@@ -43,9 +56,51 @@ pub func poolOk(DbPool pool) -> bool {
     return pool.handle > 0;
 }
 
-/// Closes idle connections now; connections still checked out close when they are dropped
+/// Closes idle connections now; connections still checked out close when they are dropped.
+/// Checkouts waiting for a connection fail with -12.
 pub func dbClose(DbPool pool) -> int {
     return rtdbpoolclose(pool.handle);
+}
+
+/// Closes the pool and waits up to ms for every connection to come back: 0 when they did, -4 when
+/// some are still out (their running statements are cancelled and new ones refused)
+pub func dbCloseWait(DbPool pool, int ms) -> int {
+    return rtdbclosewait(pool.handle, ms);
+}
+
+/// Connect timeout for new connections, handshake included (default: the pool timeout)
+pub func setConnectTimeout(DbPool pool, int ms) -> int {
+    return rtdbsetlimit(pool.handle, 0, ms);
+}
+
+/// Longest a statement (or one wait of a row stream) may run; it is then cancelled on the server
+/// and fails with -15. 0 = no limit (the default).
+pub func setQueryTimeout(DbPool pool, int ms) -> int {
+    return rtdbsetlimit(pool.handle, 1, ms);
+}
+
+/// Idle connections unused this long are closed. 0 = never (the default).
+pub func setIdleTimeout(DbPool pool, int ms) -> int {
+    return rtdbsetlimit(pool.handle, 2, ms);
+}
+
+/// Connections older than this are closed when idle or when returned. 0 = no limit (the default).
+pub func setMaxLifetime(DbPool pool, int ms) -> int {
+    return rtdbsetlimit(pool.handle, 3, ms);
+}
+
+pub func dbCancelNew() -> DbCancel {
+    return DbCancel { handle: rtdbtokennew() };
+}
+
+/// Stops the checkout or statement using the token within 50 ms (-14)
+pub func dbCancel(DbCancel token) -> int {
+    return rtdbtokencancel(token.handle);
+}
+
+/// Checks a connection out; cancelling the token ends the wait with -14
+pub func dbAcquireWith(DbPool pool, DbCancel token) -> DbConn {
+    return DbConn { handle: rtdbacquirewith(pool.handle, token.handle) };
 }
 
 /// Checks a connection out of the pool (blocks up to the pool timeout)
@@ -72,8 +127,7 @@ pub func dbQuery(DbConn conn, string sql) -> DbRows {
     return DbRows { handle: rtdbquery(conn.handle, sql, "", 0) };
 }
 
-/// Runs a statement whose `?` placeholders are bound, in order, to args as quoted literals
-pub func dbQueryArgs(DbConn conn, string sql, Vec<string> args) -> DbRows {
+func packArgs(Vec<string> args) -> string {
     let mut packed = "";
     let n = veclen<string>(args);
     for (let mut i = 0; i < n; i = i + 1) {
@@ -81,7 +135,36 @@ pub func dbQueryArgs(DbConn conn, string sql, Vec<string> args) -> DbRows {
         let alen = len(a);
         packed = packed + $"{alen}:" + a;
     }
-    return DbRows { handle: rtdbquery(conn.handle, sql, packed, n) };
+    return packed;
+}
+
+/// Runs a statement whose `?` placeholders are bound, in order, to args as quoted literals
+pub func dbQueryArgs(DbConn conn, string sql, Vec<string> args) -> DbRows {
+    return DbRows { handle: rtdbquery(conn.handle, sql, packArgs(args), veclen<string>(args)) };
+}
+
+/// dbQueryArgs that cancelling the token stops (on the server) with -14
+pub func dbQueryWith(DbConn conn, string sql, Vec<string> args, DbCancel token) -> DbRows {
+    return DbRows { handle: rtdbquerywith(conn.handle, sql, packArgs(args), veclen<string>(args), token.handle) };
+}
+
+/// Streams the rows of one statement: dbNext moves to each row, read as row 0. Memory stays at one
+/// row. The connection runs nothing else until the stream ends or is dropped.
+pub func dbStream(DbConn conn, string sql) -> DbRows {
+    return DbRows { handle: rtdbstream(conn.handle, sql, "", 0, 0) };
+}
+
+pub func dbStreamArgs(DbConn conn, string sql, Vec<string> args) -> DbRows {
+    return DbRows { handle: rtdbstream(conn.handle, sql, packArgs(args), veclen<string>(args), 0) };
+}
+
+pub func dbStreamWith(DbConn conn, string sql, Vec<string> args, DbCancel token) -> DbRows {
+    return DbRows { handle: rtdbstream(conn.handle, sql, packArgs(args), veclen<string>(args), token.handle) };
+}
+
+/// Moves a stream to its next row: 1 row (read it as row 0), 0 end, negative error
+pub func dbNext(DbRows rows) -> int {
+    return rtdbnext(rows.handle);
 }
 
 /// Runs a statement and returns the rows it changed, or a negative error code
@@ -152,7 +235,7 @@ pub func lastInsertId(DbRows rows) -> int {
     return rtdblastid(rows.handle);
 }
 
-/// 0 open, 1 idle, 2 in use, 3 max, 4 created, 5 waits, 6 timeouts, 7 broken, 8 rollbacks, 9 checkouts
+/// 0 open, 1 idle, 2 in use, 3 max, 4 created, 5 waits, 6 timeouts, 7 broken, 8 rollbacks, 9 checkouts, 10 expired
 pub func poolStat(DbPool pool, int key) -> int {
     return rtdbstat(pool.handle, key);
 }
