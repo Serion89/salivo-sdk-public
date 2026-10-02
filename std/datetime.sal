@@ -1,0 +1,251 @@
+// Salivo Standard Library: Datetime Module
+// Calendar dates and times in UTC: build from Unix time, format and parse ISO 8601, add durations,
+// weekdays. A DateTime is a value (no time zone; always UTC). Unix time is in seconds.
+module salivo.std.datetime;
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.text::{byteAt, isDigit};
+
+pub struct DateTime {
+    int year;
+    int month;
+    int day;
+    int hour;
+    int minute;
+    int second;
+    int millis;
+}
+
+func floorDiv(a: int, b: int) -> int {
+    let q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0))) { return q - 1; }
+    return q;
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant's days_from_civil)
+pub func daysFromCivil(y0: int, m: int, d: int) -> int {
+    let mut y = y0;
+    if (m <= 2) { y = y - 1; }
+    let era = floorDiv(y, 400);
+    let yoe = y - era * 400;
+    let mut mp = m - 3;
+    if (m <= 2) { mp = m + 9; }
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// UTC date and time of Unix time ms (milliseconds since 1970-01-01T00:00:00Z)
+pub func fromUnixMillis(ms: int) -> DateTime {
+    let days = floorDiv(ms, 86400000);
+    let rem = ms - days * 86400000;
+    let z = days + 719468;
+    let era = floorDiv(z, 146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mut m = mp + 3;
+    if (mp >= 10) { m = mp - 9; }
+    let mut y = yoe + era * 400;
+    if (m <= 2) { y = y + 1; }
+    return DateTime {
+        year: y, month: m, day: d,
+        hour: rem / 3600000, minute: (rem / 60000) % 60, second: (rem / 1000) % 60, millis: rem % 1000,
+    };
+}
+
+/// UTC date and time of Unix time in seconds
+pub func fromUnix(secs: int) -> DateTime { return fromUnixMillis(secs * 1000); }
+
+/// Current UTC date and time
+pub func utcNow() -> DateTime { return fromUnixMillis(rttimenowms()); }
+
+/// Current Unix time in seconds
+pub func unixNow() -> int { return floorDiv(rttimenowms(), 1000); }
+
+/// Unix time in milliseconds of dt
+pub func toUnixMillis(dt: DateTime) -> int {
+    return daysFromCivil(dt.year, dt.month, dt.day) * 86400000 + dt.hour * 3600000 + dt.minute * 60000 + dt.second * 1000 + dt.millis;
+}
+
+/// Unix time in seconds of dt (milliseconds dropped)
+pub func toUnix(dt: DateTime) -> int { return floorDiv(toUnixMillis(dt), 1000); }
+
+/// A date at midnight UTC
+pub func date(year: int, month: int, day: int) -> DateTime {
+    return DateTime { year: year, month: month, day: day, hour: 0, minute: 0, second: 0, millis: 0 };
+}
+
+pub func isLeapYear(y: int) -> bool {
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+pub func daysInMonth(y: int, m: int) -> int {
+    if (m == 2) {
+        if (isLeapYear(y)) { return 29; }
+        return 28;
+    }
+    if (m == 4 || m == 6 || m == 9 || m == 11) { return 30; }
+    return 31;
+}
+
+/// 0 = Monday .. 6 = Sunday (Python's weekday()); 1970-01-01 was a Thursday
+pub func weekday(dt: DateTime) -> int {
+    let r = (daysFromCivil(dt.year, dt.month, dt.day) + 3) % 7;
+    if (r < 0) { return r + 7; }
+    return r;
+}
+
+pub func weekdayName(dt: DateTime) -> string {
+    let w = weekday(dt);
+    if (w == 0) { return "Monday"; }
+    if (w == 1) { return "Tuesday"; }
+    if (w == 2) { return "Wednesday"; }
+    if (w == 3) { return "Thursday"; }
+    if (w == 4) { return "Friday"; }
+    if (w == 5) { return "Saturday"; }
+    return "Sunday";
+}
+
+pub func addMillis(dt: DateTime, ms: int) -> DateTime { return fromUnixMillis(toUnixMillis(dt) + ms); }
+pub func addSeconds(dt: DateTime, s: int) -> DateTime { return addMillis(dt, s * 1000); }
+pub func addMinutes(dt: DateTime, m: int) -> DateTime { return addMillis(dt, m * 60000); }
+pub func addHours(dt: DateTime, h: int) -> DateTime { return addMillis(dt, h * 3600000); }
+pub func addDays(dt: DateTime, d: int) -> DateTime { return addMillis(dt, d * 86400000); }
+
+/// Same day-of-month n months later, clamped to the month's last day (Jan 31 + 1 month = Feb 28/29)
+pub func addMonths(dt: DateTime, n: int) -> DateTime {
+    let total = dt.year * 12 + (dt.month - 1) + n;
+    let y = floorDiv(total, 12);
+    let m = total - y * 12 + 1;
+    let mut d = dt.day;
+    if (d > daysInMonth(y, m)) { d = daysInMonth(y, m); }
+    return DateTime { year: y, month: m, day: d, hour: dt.hour, minute: dt.minute, second: dt.second, millis: dt.millis };
+}
+
+/// Whole seconds from a to b (negative when b is earlier)
+pub func diffSeconds(a: DateTime, b: DateTime) -> int {
+    return floorDiv(toUnixMillis(b) - toUnixMillis(a), 1000);
+}
+
+/// Whole days from a to b
+pub func diffDays(a: DateTime, b: DateTime) -> int {
+    return floorDiv(toUnixMillis(b) - toUnixMillis(a), 86400000);
+}
+
+func pad(v: int, width: int) -> string {
+    let mut s = intstr(v);
+    while (len(s) < width) { s = "0" + s; }
+    return s;
+}
+
+/// "2026-10-01"
+pub func isoDate(dt: DateTime) -> string {
+    return pad(dt.year, 4) + "-" + pad(dt.month, 2) + "-" + pad(dt.day, 2);
+}
+
+/// "2026-10-01T14:05:09Z" (".123" before the Z when there are milliseconds)
+pub func isoFormat(dt: DateTime) -> string {
+    let mut s = isoDate(dt) + "T" + pad(dt.hour, 2) + ":" + pad(dt.minute, 2) + ":" + pad(dt.second, 2);
+    if (dt.millis != 0) { s = s + "." + pad(dt.millis, 3); }
+    return s + "Z";
+}
+
+/// strftime subset: %Y %m %d %H %M %S %f (milliseconds) %j (day of year) %a %A %b %B %%
+pub func format(dt: DateTime, pattern: string) -> string {
+    let months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    let longMonths = "January  February March    April    May      June     July     August   SeptemberOctober  November December ";
+    let mut out = "";
+    let n = len(pattern);
+    let mut i = 0;
+    while (i < n) {
+        let c = byteAt(pattern, i);
+        if (c == 37 && i + 1 < n) {
+            let f = byteAt(pattern, i + 1);
+            if (f == 89) { out = out + pad(dt.year, 4); }
+            else if (f == 109) { out = out + pad(dt.month, 2); }
+            else if (f == 100) { out = out + pad(dt.day, 2); }
+            else if (f == 72) { out = out + pad(dt.hour, 2); }
+            else if (f == 77) { out = out + pad(dt.minute, 2); }
+            else if (f == 83) { out = out + pad(dt.second, 2); }
+            else if (f == 102) { out = out + pad(dt.millis, 3); }
+            else if (f == 106) { out = out + pad(daysFromCivil(dt.year, dt.month, dt.day) - daysFromCivil(dt.year, 1, 1) + 1, 3); }
+            else if (f == 97) { out = out + slice(weekdayName(dt), 0, 3); }
+            else if (f == 65) { out = out + weekdayName(dt); }
+            else if (f == 98) { out = out + slice(months, (dt.month - 1) * 3, dt.month * 3); }
+            else if (f == 66) { out = out + trim(slice(longMonths, (dt.month - 1) * 9, dt.month * 9)); }
+            else if (f == 37) { out = out + "%"; }
+            else { out = out + slice(pattern, i, i + 2); }
+            i = i + 2;
+        } else {
+            out = out + slice(pattern, i, i + 1);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+func digitsAt(s: string, at: int, count: int) -> int {
+    if (at + count > len(s)) { return 0 - 1; }
+    let mut v = 0;
+    let mut i = 0;
+    while (i < count) {
+        let c = byteAt(s, at + i);
+        if (!isDigit(c)) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// Parses "YYYY-MM-DD", "YYYY-MM-DDTHH:MM[:SS[.fff]]" with an optional "Z" or "+HH:MM"/"-HH:MM"
+/// offset (converted to UTC); a space may replace the "T"
+pub func parseIso(s: string) -> Result<DateTime, string> {
+    let y = digitsAt(s, 0, 4);
+    let mo = digitsAt(s, 5, 2);
+    let d = digitsAt(s, 8, 2);
+    if (y < 0 || mo < 1 || mo > 12 || d < 1 || len(s) < 10 || byteAt(s, 4) != 45 || byteAt(s, 7) != 45) {
+        return err<DateTime, string>("expected YYYY-MM-DD in '" + s + "'");
+    }
+    if (d > daysInMonth(y, mo)) { return err<DateTime, string>("day out of range in '" + s + "'"); }
+    let mut dt = date(y, mo, d);
+    let n = len(s);
+    if (n == 10) { return ok<DateTime, string>(dt); }
+    let sep = byteAt(s, 10);
+    if (sep != 84 && sep != 116 && sep != 32) { return err<DateTime, string>("expected T after the date in '" + s + "'"); }
+    let h = digitsAt(s, 11, 2);
+    let mi = digitsAt(s, 14, 2);
+    if (h < 0 || h > 23 || mi < 0 || mi > 59 || byteAt(s, 13) != 58) { return err<DateTime, string>("expected HH:MM in '" + s + "'"); }
+    let mut sec = 0;
+    let mut ms = 0;
+    let mut i = 16;
+    if (i < n && byteAt(s, i) == 58) {
+        sec = digitsAt(s, 17, 2);
+        if (sec < 0 || sec > 60) { return err<DateTime, string>("bad seconds in '" + s + "'"); }
+        i = 19;
+        if (i < n && byteAt(s, i) == 46) {
+            i = i + 1;
+            let mut scale = 100;
+            while (i < n && isDigit(byteAt(s, i))) {
+                ms = ms + (byteAt(s, i) - 48) * scale;
+                scale = scale / 10;
+                i = i + 1;
+            }
+        }
+    }
+    dt = DateTime { year: y, month: mo, day: d, hour: h, minute: mi, second: sec, millis: ms };
+    if (i == n) { return ok<DateTime, string>(dt); }
+    let z = byteAt(s, i);
+    if ((z == 90 || z == 122) && i + 1 == n) { return ok<DateTime, string>(dt); }
+    if ((z == 43 || z == 45) && i + 6 == n && byteAt(s, i + 3) == 58) {
+        let oh = digitsAt(s, i + 1, 2);
+        let om = digitsAt(s, i + 4, 2);
+        if (oh < 0 || om < 0) { return err<DateTime, string>("bad offset in '" + s + "'"); }
+        let mut off = oh * 60 + om;
+        if (z == 45) { off = 0 - off; }
+        return ok<DateTime, string>(addMinutes(dt, 0 - off));
+    }
+    return err<DateTime, string>("unexpected text after the time in '" + s + "'");
+}

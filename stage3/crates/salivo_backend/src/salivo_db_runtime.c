@@ -1884,3 +1884,788 @@ long long salivo_db_next(long long h) { DbCall c = { h, 0, 0, NULL, NULL, 0 }; r
 long long salivo_db_result_free(long long h) { DbCall c = { h, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_result_free, &c); }
 long long salivo_db_pool_close(long long pool) { DbCall c = { pool, 0, 0, NULL, NULL, 0 }; return run_offloaded(tramp_pool_close, &c); }
 long long salivo_db_pool_close_wait(long long pool, long long ms) { DbCall c = { pool, ms, 0, NULL, NULL, 0 }; return run_offloaded(tramp_pool_close_wait, &c); }
+
+/* ==== MongoDB (OP_MSG wire protocol, std/mongo.sal) ============================================
+ * One connection per handle (no pool, no TLS, no replica-set discovery: the first host of the
+ * URL is used). Commands go in and replies come back as Extended JSON text, converted to and
+ * from BSON here. Authentication: SCRAM-SHA-256 (MongoDB 4.0+ default) when the URL has a user.
+ * A handle is used by one thread at a time; a second concurrent call gets -13. */
+#include <math.h>
+#include <errno.h>
+
+typedef struct {
+    Conn c;
+    int used, busy;
+    int32_t req;
+} Mongo;
+
+#define MG_MAX 64
+static Mongo* g_mg[MG_MAX + 1];
+static char g_mg_open_err[512];
+
+/* ---- JSON text -> BSON ---- */
+typedef struct { const char* s; size_t i, n; int depth; const char* err; } Js;
+
+static void js_ws(Js* j) { while (j->i < j->n && (j->s[j->i] == ' ' || j->s[j->i] == '\t' || j->s[j->i] == '\n' || j->s[j->i] == '\r')) j->i++; }
+static int js_hex4(Js* j, uint32_t* v) {
+    if (j->i + 4 > j->n) return -1;
+    *v = 0;
+    for (int k = 0; k < 4; k++) {
+        int c = j->s[j->i + k], d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return -1;
+        *v = *v * 16 + (uint32_t)d;
+    }
+    j->i += 4;
+    return 0;
+}
+static void utf8_put(Buf* b, uint32_t cp) {
+    if (cp < 0x80) buf_byte(b, (uint8_t)cp);
+    else if (cp < 0x800) { buf_byte(b, (uint8_t)(0xC0 | cp >> 6)); buf_byte(b, (uint8_t)(0x80 | (cp & 63))); }
+    else if (cp < 0x10000) { buf_byte(b, (uint8_t)(0xE0 | cp >> 12)); buf_byte(b, (uint8_t)(0x80 | ((cp >> 6) & 63))); buf_byte(b, (uint8_t)(0x80 | (cp & 63))); }
+    else { buf_byte(b, (uint8_t)(0xF0 | cp >> 18)); buf_byte(b, (uint8_t)(0x80 | ((cp >> 12) & 63))); buf_byte(b, (uint8_t)(0x80 | ((cp >> 6) & 63))); buf_byte(b, (uint8_t)(0x80 | (cp & 63))); }
+}
+/* Decodes the JSON string at j->i (on the opening quote) into out (no terminator added) */
+static int js_string(Js* j, Buf* out) {
+    if (j->i >= j->n || j->s[j->i] != '"') { j->err = "expected a string"; return -1; }
+    j->i++;
+    while (j->i < j->n) {
+        unsigned char c = (unsigned char)j->s[j->i++];
+        if (c == '"') return 0;
+        if (c < 0x20) { j->err = "control character in string"; return -1; }
+        if (c != '\\') { buf_byte(out, c); continue; }
+        if (j->i >= j->n) break;
+        char e = j->s[j->i++];
+        if (e == 'n') buf_byte(out, '\n'); else if (e == 't') buf_byte(out, '\t'); else if (e == 'r') buf_byte(out, '\r');
+        else if (e == 'b') buf_byte(out, '\b'); else if (e == 'f') buf_byte(out, '\f');
+        else if (e == '"' || e == '\\' || e == '/') buf_byte(out, (uint8_t)e);
+        else if (e == 'u') {
+            uint32_t cp;
+            if (js_hex4(j, &cp)) { j->err = "bad \\u escape"; return -1; }
+            if (cp >= 0xD800 && cp <= 0xDBFF && j->i + 6 <= j->n && j->s[j->i] == '\\' && j->s[j->i + 1] == 'u') {
+                size_t save = j->i;
+                uint32_t lo;
+                j->i += 2;
+                if (!js_hex4(j, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                else j->i = save;
+            }
+            utf8_put(out, cp);
+        } else { j->err = "bad escape"; return -1; }
+    }
+    j->err = "unterminated string";
+    return -1;
+}
+static void le32(Buf* b, uint32_t v) { uint8_t x[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; buf_put(b, x, 4); }
+static void le64(Buf* b, uint64_t v) { le32(b, (uint32_t)v); le32(b, (uint32_t)(v >> 32)); }
+static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint64_t rd64(const uint8_t* p) { return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32; }
+static void patch32(Buf* b, size_t at, uint32_t v) { b->p[at] = (uint8_t)v; b->p[at + 1] = (uint8_t)(v >> 8); b->p[at + 2] = (uint8_t)(v >> 16); b->p[at + 3] = (uint8_t)(v >> 24); }
+
+static int put_key(Buf* b, uint8_t type, const uint8_t* k, size_t kn, Js* j) {
+    if (memchr(k, 0, kn)) { j->err = "key contains a NUL byte"; return -1; }
+    buf_byte(b, type);
+    buf_put(b, k, kn);
+    return buf_byte(b, 0);
+}
+static long long days_civil(long long y, int m, int d) {
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+}
+/* "YYYY-MM-DDTHH:MM:SS[.fff](Z|+HH:MM|-HH:MM)" -> Unix ms */
+static int iso_ms(const char* s, long long* out) {
+    int Y, M, D, h = 0, mi = 0, se = 0, n = 0;
+    if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &Y, &M, &D, &h, &mi, &se, &n) < 6) return -1;
+    long long ms = 0;
+    const char* p = s + n;
+    if (*p == '.') { int scale = 100; p++; while (*p >= '0' && *p <= '9') { ms += (*p - '0') * scale; scale /= 10; p++; } }
+    long long off = 0;
+    if (*p == '+' || *p == '-') { int oh, om; if (sscanf(p + 1, "%2d:%2d", &oh, &om) != 2) return -1; off = (oh * 60 + om) * (*p == '-' ? -1 : 1); }
+    else if (*p != 'Z') return -1;
+    *out = days_civil(Y, M, D) * 86400000LL + h * 3600000LL + mi * 60000LL + se * 1000LL + ms - off * 60000LL;
+    return 0;
+}
+
+static int bson_doc(Js* j, Buf* b, int array);
+static int bson_elem(Js* j, Buf* b, const uint8_t* k, size_t kn);
+
+/* {"$x": ...} special forms; returns 1 when handled, 0 when the object is a plain document, -1 on error */
+static int bson_special(Js* j, Buf* b, const uint8_t* k, size_t kn) {
+    size_t save = j->i;
+    j->i++;
+    js_ws(j);
+    Buf key = {0};
+    if (j->i >= j->n || j->s[j->i] != '"' || js_string(j, &key)) { buf_free(&key); j->i = save; j->err = NULL; return 0; }
+    buf_byte(&key, 0);
+    const char* name = (const char*)key.p;
+    if (name[0] != '$') { buf_free(&key); j->i = save; return 0; }
+    js_ws(j);
+    if (j->i >= j->n || j->s[j->i] != ':') { buf_free(&key); j->err = "expected ':'"; return -1; }
+    j->i++;
+    js_ws(j);
+    int rc = 1;
+    Buf v = {0};
+    if (!strcmp(name, "$oid")) {
+        if (js_string(j, &v) || v.n != 24) { j->err = "$oid needs 24 hex digits"; rc = -1; }
+        else {
+            uint8_t oid[12];
+            for (int i = 0; i < 12 && rc == 1; i++) {
+                unsigned x = 0;
+                char two[3] = { (char)v.p[2 * i], (char)v.p[2 * i + 1], 0 };
+                if (!isxdigit(two[0]) || !isxdigit(two[1]) || sscanf(two, "%2x", &x) != 1) { j->err = "$oid needs hex digits"; rc = -1; }
+                oid[i] = (uint8_t)x;
+            }
+            if (rc == 1) { put_key(b, 0x07, k, kn, j); buf_put(b, oid, 12); }
+        }
+    } else if (!strcmp(name, "$date")) {
+        long long ms = 0;
+        if (j->s[j->i] == '"') {
+            if (js_string(j, &v)) rc = -1;
+            else { buf_byte(&v, 0); if (iso_ms((const char*)v.p, &ms)) { j->err = "$date string must be ISO 8601"; rc = -1; } }
+        } else if (j->s[j->i] == '{') {
+            /* {"$numberLong": "ms"} */
+            j->i++; js_ws(j);
+            Buf k2 = {0}, v2 = {0};
+            if (js_string(j, &k2) || k2.n != 11 || memcmp(k2.p, "$numberLong", 11)) { j->err = "$date object must be {\"$numberLong\": ...}"; rc = -1; }
+            else { js_ws(j); j->i++; js_ws(j); if (js_string(j, &v2)) rc = -1; else { buf_byte(&v2, 0); ms = strtoll((const char*)v2.p, NULL, 10); js_ws(j); if (j->s[j->i] != '}') { j->err = "expected '}'"; rc = -1; } else j->i++; } }
+            buf_free(&k2); buf_free(&v2);
+        } else {
+            char* end;
+            ms = (long long)strtod(j->s + j->i, &end);
+            if (end == j->s + j->i) { j->err = "bad $date"; rc = -1; }
+            j->i = (size_t)(end - j->s);
+        }
+        if (rc == 1) { put_key(b, 0x09, k, kn, j); le64(b, (uint64_t)ms); }
+    } else if (!strcmp(name, "$numberLong") || !strcmp(name, "$numberInt") || !strcmp(name, "$numberDouble")) {
+        if (js_string(j, &v)) rc = -1;
+        else {
+            buf_byte(&v, 0);
+            const char* t = (const char*)v.p;
+            if (name[7] == 'L') { put_key(b, 0x12, k, kn, j); le64(b, (uint64_t)strtoll(t, NULL, 10)); }
+            else if (name[7] == 'I') { put_key(b, 0x10, k, kn, j); le32(b, (uint32_t)(int32_t)strtol(t, NULL, 10)); }
+            else {
+                double d = !strcmp(t, "Infinity") ? HUGE_VAL : !strcmp(t, "-Infinity") ? -HUGE_VAL : !strcmp(t, "NaN") ? NAN : strtod(t, NULL);
+                uint64_t bits; memcpy(&bits, &d, 8);
+                put_key(b, 0x01, k, kn, j); le64(b, bits);
+            }
+        }
+    } else if (!strcmp(name, "$binary") || !strcmp(name, "$regularExpression") || !strcmp(name, "$timestamp")) {
+        /* {"$binary": {"base64": "...", "subType": "hh"}} and friends: read the inner object's members */
+        char f1[16] = "", f2[16] = "";
+        Buf a = {0}, c2 = {0};
+        long long t = 0, inc = 0;
+        if (j->s[j->i] != '{') { j->err = "expected an object"; rc = -1; }
+        else {
+            j->i++;
+            for (;;) {
+                js_ws(j);
+                if (j->i < j->n && j->s[j->i] == '}') { j->i++; break; }
+                Buf mk = {0};
+                if (js_string(j, &mk)) { buf_free(&mk); rc = -1; break; }
+                buf_byte(&mk, 0);
+                js_ws(j); j->i++; js_ws(j);
+                const char* m = (const char*)mk.p;
+                if (!strcmp(m, "t") || !strcmp(m, "i")) {
+                    char* end; long long x = strtoll(j->s + j->i, &end, 10); j->i = (size_t)(end - j->s);
+                    if (m[0] == 't') t = x; else inc = x;
+                } else if (!strcmp(m, "base64") || !strcmp(m, "pattern")) { if (js_string(j, &a)) rc = -1; snprintf(f1, sizeof f1, "%s", m); }
+                else if (!strcmp(m, "subType") || !strcmp(m, "options")) { if (js_string(j, &c2)) rc = -1; snprintf(f2, sizeof f2, "%s", m); }
+                else { j->err = "unknown member in extended JSON"; rc = -1; }
+                buf_free(&mk);
+                if (rc < 0) break;
+                js_ws(j);
+                if (j->i < j->n && j->s[j->i] == ',') j->i++;
+            }
+        }
+        if (rc == 1 && name[1] == 'b') {
+            Buf raw = {0};
+            unsigned sub = 0;
+            buf_byte(&c2, 0);
+            if (b64dec((const char*)a.p, a.n, &raw) || sscanf((const char*)c2.p, "%x", &sub) != 1) { j->err = "bad $binary"; rc = -1; }
+            else { put_key(b, 0x05, k, kn, j); le32(b, (uint32_t)raw.n); buf_byte(b, (uint8_t)sub); buf_put(b, raw.p, raw.n); }
+            buf_free(&raw);
+        } else if (rc == 1 && name[1] == 'r') {
+            if (memchr(a.p, 0, a.n) || memchr(c2.p, 0, c2.n)) { j->err = "regex contains a NUL byte"; rc = -1; }
+            else { put_key(b, 0x0B, k, kn, j); buf_put(b, a.p, a.n); buf_byte(b, 0); buf_put(b, c2.p, c2.n); buf_byte(b, 0); }
+        } else if (rc == 1) {
+            put_key(b, 0x11, k, kn, j); le32(b, (uint32_t)inc); le32(b, (uint32_t)t);
+        }
+        buf_free(&a); buf_free(&c2);
+    } else if (!strcmp(name, "$minKey") || !strcmp(name, "$maxKey")) {
+        while (j->i < j->n && j->s[j->i] != '}' && j->s[j->i] != ',') j->i++;
+        put_key(b, name[2] == 'i' ? 0xFF : 0x7F, k, kn, j);
+    } else {
+        /* an operator document such as {"$gt": 5}: a plain document */
+        buf_free(&key);
+        buf_free(&v);
+        j->i = save;
+        return 0;
+    }
+    buf_free(&key);
+    buf_free(&v);
+    if (rc < 0) return -1;
+    js_ws(j);
+    if (j->i >= j->n || j->s[j->i] != '}') { j->err = "extended JSON object must have one member"; return -1; }
+    j->i++;
+    return 1;
+}
+
+static int bson_elem(Js* j, Buf* b, const uint8_t* k, size_t kn) {
+    js_ws(j);
+    if (j->i >= j->n) { j->err = "unexpected end"; return -1; }
+    char c = j->s[j->i];
+    if (c == '{') {
+        int sp = bson_special(j, b, k, kn);
+        if (sp) return sp < 0 ? -1 : 0;
+        if (put_key(b, 0x03, k, kn, j)) return -1;
+        return bson_doc(j, b, 0);
+    }
+    if (c == '[') { if (put_key(b, 0x04, k, kn, j)) return -1; return bson_doc(j, b, 1); }
+    if (c == '"') {
+        Buf s = {0};
+        if (js_string(j, &s)) { buf_free(&s); return -1; }
+        if (put_key(b, 0x02, k, kn, j)) { buf_free(&s); return -1; }
+        le32(b, (uint32_t)s.n + 1); buf_put(b, s.p, s.n); buf_byte(b, 0);
+        buf_free(&s);
+        return 0;
+    }
+    if (!strncmp(j->s + j->i, "true", 4)) { j->i += 4; put_key(b, 0x08, k, kn, j); return buf_byte(b, 1); }
+    if (!strncmp(j->s + j->i, "false", 5)) { j->i += 5; put_key(b, 0x08, k, kn, j); return buf_byte(b, 0); }
+    if (!strncmp(j->s + j->i, "null", 4)) { j->i += 4; return put_key(b, 0x0A, k, kn, j); }
+    size_t st = j->i;
+    if (j->s[j->i] == '-') j->i++;
+    int is_float = 0;
+    while (j->i < j->n && strchr("0123456789.eE+-", j->s[j->i])) { if (strchr(".eE", j->s[j->i])) is_float = 1; j->i++; }
+    if (j->i == st) { j->err = "unexpected character"; return -1; }
+    char num[64];
+    size_t nl = j->i - st;
+    if (nl >= sizeof num) { j->err = "number too long"; return -1; }
+    memcpy(num, j->s + st, nl); num[nl] = 0;
+    if (!is_float) {
+        errno = 0;
+        long long v = strtoll(num, NULL, 10);
+        if (errno == 0) {
+            if (v >= INT32_MIN && v <= INT32_MAX) { put_key(b, 0x10, k, kn, j); le32(b, (uint32_t)(int32_t)v); }
+            else { put_key(b, 0x12, k, kn, j); le64(b, (uint64_t)v); }
+            return 0;
+        }
+    }
+    double d = strtod(num, NULL);
+    uint64_t bits; memcpy(&bits, &d, 8);
+    put_key(b, 0x01, k, kn, j);
+    le64(b, bits);
+    return 0;
+}
+
+/* Writes the object or array at j->i as a BSON document */
+static int bson_doc(Js* j, Buf* b, int array) {
+    if (++j->depth > 100) { j->err = "nesting too deep"; return -1; }
+    size_t at = b->n;
+    le32(b, 0);
+    j->i++;
+    js_ws(j);
+    char close = array ? ']' : '}';
+    int idx = 0;
+    if (j->i < j->n && j->s[j->i] == close) j->i++;
+    else for (;;) {
+        Buf key = {0};
+        char ib[24];
+        if (array) { int l = snprintf(ib, sizeof ib, "%d", idx++); buf_put(&key, ib, (size_t)l); }
+        else {
+            js_ws(j);
+            if (js_string(j, &key)) { buf_free(&key); return -1; }
+            js_ws(j);
+            if (j->i >= j->n || j->s[j->i] != ':') { buf_free(&key); j->err = "expected ':'"; return -1; }
+            j->i++;
+        }
+        int r = bson_elem(j, b, key.p ? key.p : (const uint8_t*)"", key.n);
+        buf_free(&key);
+        if (r) return -1;
+        js_ws(j);
+        if (j->i < j->n && j->s[j->i] == ',') { j->i++; continue; }
+        if (j->i < j->n && j->s[j->i] == close) { j->i++; break; }
+        j->err = array ? "expected ',' or ']'" : "expected ',' or '}'";
+        return -1;
+    }
+    buf_byte(b, 0);
+    patch32(b, at, (uint32_t)(b->n - at));
+    j->depth--;
+    return 0;
+}
+
+/* JSON object text -> BSON document; err gets the reason on failure */
+static int json_to_bson(const char* json, Buf* b, const char** err) {
+    Js j = { json, 0, strlen(json), 0, NULL };
+    js_ws(&j);
+    if (j.i >= j.n || json[j.i] != '{') { *err = "a command must be a JSON object"; return -1; }
+    if (bson_doc(&j, b, 0)) { *err = j.err ? j.err : "invalid JSON"; return -1; }
+    js_ws(&j);
+    if (j.i != j.n) { *err = "unexpected text after the JSON object"; return -1; }
+    return 0;
+}
+
+/* ---- BSON -> JSON text ---- */
+static void json_str(Buf* o, const uint8_t* p, size_t n) {
+    static const char* hx = "0123456789abcdef";
+    buf_byte(o, '"');
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = p[i];
+        if (c == '"' || c == '\\') { buf_byte(o, '\\'); buf_byte(o, c); }
+        else if (c == '\n') buf_put(o, "\\n", 2);
+        else if (c == '\r') buf_put(o, "\\r", 2);
+        else if (c == '\t') buf_put(o, "\\t", 2);
+        else if (c < 0x20) { char u[7] = { '\\', 'u', '0', '0', hx[c >> 4], hx[c & 15], 0 }; buf_put(o, u, 6); }
+        else buf_byte(o, c);
+    }
+    buf_byte(o, '"');
+}
+static void json_fmt(Buf* o, const char* fmt, long long v) { char t[48]; int l = snprintf(t, sizeof t, fmt, v); buf_put(o, t, (size_t)l); }
+
+/* decimal128 -> string (finite values; scientific form when the exponent is positive or large) */
+static void dec128_str(const uint8_t* p, Buf* o) {
+    uint64_t lo = rd64(p), hi = rd64(p + 8);
+    int neg = (int)(hi >> 63);
+    if ((hi >> 58 & 31) == 31) { buf_put(o, (hi >> 57 & 1) ? "NaN" : neg ? "-Infinity" : "Infinity", (hi >> 57 & 1) ? 3 : neg ? 9 : 8); return; }
+    int exp;
+    uint32_t w[4];
+    if ((hi >> 61 & 3) == 3) { exp = (int)((hi >> 47) & 0x3FFF) - 6176; w[0] = w[1] = w[2] = w[3] = 0; } /* non-canonical: zero */
+    else { exp = (int)((hi >> 49) & 0x3FFF) - 6176; hi &= 0x1FFFFFFFFFFFFULL; w[3] = (uint32_t)(hi >> 32); w[2] = (uint32_t)hi; w[1] = (uint32_t)(lo >> 32); w[0] = (uint32_t)lo; }
+    char digits[64];
+    int nd = 0;
+    do {
+        uint64_t rem = 0;
+        for (int i = 3; i >= 0; i--) { uint64_t cur = rem << 32 | w[i]; w[i] = (uint32_t)(cur / 10); rem = cur % 10; }
+        digits[nd++] = (char)('0' + rem);
+    } while ((w[0] | w[1] | w[2] | w[3]) && nd < 40);
+    char s[96];
+    int l = 0;
+    if (neg) s[l++] = '-';
+    int adjusted = exp + nd - 1;
+    if (exp <= 0 && adjusted >= -6) {
+        if (-exp >= nd) { s[l++] = '0'; s[l++] = '.'; for (int z = 0; z < -exp - nd; z++) s[l++] = '0'; for (int i = nd - 1; i >= 0; i--) s[l++] = digits[i]; }
+        else { for (int i = nd - 1; i >= 0; i--) { s[l++] = digits[i]; if (i == -exp && exp != 0) s[l++] = '.'; } }
+    } else {
+        s[l++] = digits[nd - 1];
+        if (nd > 1) { s[l++] = '.'; for (int i = nd - 2; i >= 0; i--) s[l++] = digits[i]; }
+        l += snprintf(s + l, sizeof s - (size_t)l, "E%+d", adjusted);
+    }
+    buf_put(o, s, (size_t)l);
+}
+
+static int bson_to_json(const uint8_t* p, size_t n, int array, Buf* o, int depth);
+static int bson_value_json(uint8_t t, const uint8_t* v, const uint8_t* end, Buf* o, size_t* used, int depth) {
+    size_t avail = (size_t)(end - v);
+    switch (t) {
+    case 0x01: {
+        if (avail < 8) return -1;
+        double d; uint64_t bits = rd64(v); memcpy(&d, &bits, 8);
+        if (isnan(d) || isinf(d)) { buf_put(o, "{\"$numberDouble\":\"", 18); const char* s = isnan(d) ? "NaN" : d > 0 ? "Infinity" : "-Infinity"; buf_put(o, s, strlen(s)); buf_put(o, "\"}", 2); }
+        else { char s[40]; int l = snprintf(s, sizeof s, "%.17g", d); if (!strpbrk(s, ".eE")) { s[l++] = '.'; s[l++] = '0'; s[l] = 0; } buf_put(o, s, (size_t)l); }
+        *used = 8; return 0;
+    }
+    case 0x02: case 0x0D: case 0x0E: {
+        if (avail < 5) return -1;
+        uint32_t l = rd32(v);
+        if (l < 1 || l > avail - 4) return -1;
+        if (t == 0x0D) buf_put(o, "{\"$code\":", 9);
+        json_str(o, v + 4, l - 1);
+        if (t == 0x0D) buf_byte(o, '}');
+        *used = 4 + l; return 0;
+    }
+    case 0x03: case 0x04: {
+        if (avail < 5) return -1;
+        uint32_t l = rd32(v);
+        if (l < 5 || l > avail) return -1;
+        if (bson_to_json(v, l, t == 0x04, o, depth + 1)) return -1;
+        *used = l; return 0;
+    }
+    case 0x05: {
+        if (avail < 5) return -1;
+        uint32_t l = rd32(v);
+        if (l > avail - 5) return -1;
+        buf_put(o, "{\"$binary\":{\"base64\":\"", 22);
+        b64enc(v + 5, l, o);
+        char st[24]; int sl = snprintf(st, sizeof st, "\",\"subType\":\"%02x\"}}", v[4]);
+        buf_put(o, st, (size_t)sl);
+        *used = 5 + l; return 0;
+    }
+    case 0x06: case 0x0A: buf_put(o, "null", 4); *used = 0; return 0;
+    case 0x07: {
+        if (avail < 12) return -1;
+        char h[40]; int l = 0;
+        l += snprintf(h, sizeof h, "{\"$oid\":\"");
+        for (int i = 0; i < 12; i++) l += snprintf(h + l, sizeof h - (size_t)l, "%02x", v[i]);
+        buf_put(o, h, (size_t)l); buf_put(o, "\"}", 2);
+        *used = 12; return 0;
+    }
+    case 0x08: if (avail < 1) return -1; buf_put(o, v[0] ? "true" : "false", v[0] ? 4 : 5); *used = 1; return 0;
+    case 0x09: if (avail < 8) return -1; json_fmt(o, "{\"$date\":{\"$numberLong\":\"%lld\"}}", (long long)rd64(v)); *used = 8; return 0;
+    case 0x0B: {
+        const uint8_t* a = memchr(v, 0, avail);
+        if (!a) return -1;
+        const uint8_t* b2 = memchr(a + 1, 0, (size_t)(end - a - 1));
+        if (!b2) return -1;
+        buf_put(o, "{\"$regularExpression\":{\"pattern\":", 33); json_str(o, v, (size_t)(a - v));
+        buf_put(o, ",\"options\":", 11); json_str(o, a + 1, (size_t)(b2 - a - 1)); buf_put(o, "}}", 2);
+        *used = (size_t)(b2 - v) + 1; return 0;
+    }
+    case 0x10: if (avail < 4) return -1; json_fmt(o, "%lld", (long long)(int32_t)rd32(v)); *used = 4; return 0;
+    case 0x11: if (avail < 8) return -1; json_fmt(o, "{\"$timestamp\":{\"t\":%lld", (long long)rd32(v + 4)); json_fmt(o, ",\"i\":%lld}}", (long long)rd32(v)); *used = 8; return 0;
+    case 0x12: if (avail < 8) return -1; json_fmt(o, "%lld", (long long)rd64(v)); *used = 8; return 0;
+    case 0x13: if (avail < 16) return -1; buf_put(o, "{\"$numberDecimal\":\"", 19); dec128_str(v, o); buf_put(o, "\"}", 2); *used = 16; return 0;
+    case 0xFF: buf_put(o, "{\"$minKey\":1}", 13); *used = 0; return 0;
+    case 0x7F: buf_put(o, "{\"$maxKey\":1}", 13); *used = 0; return 0;
+    case 0x0C: { /* DBPointer (deprecated): string + ObjectId */
+        if (avail < 5) return -1;
+        uint32_t l = rd32(v);
+        if (l < 1 || l + 4 + 12 > avail) return -1;
+        buf_put(o, "null", 4); *used = 4 + l + 12; return 0;
+    }
+    }
+    return -1;
+}
+static int bson_to_json(const uint8_t* p, size_t n, int array, Buf* o, int depth) {
+    if (depth > 100 || n < 5 || rd32(p) != n || p[n - 1] != 0) return -1;
+    const uint8_t* q = p + 4;
+    const uint8_t* end = p + n - 1;
+    buf_byte(o, array ? '[' : '{');
+    int first = 1;
+    while (q < end) {
+        uint8_t t = *q++;
+        const uint8_t* k = memchr(q, 0, (size_t)(end - q));
+        if (!k) return -1;
+        if (!first) buf_byte(o, ',');
+        first = 0;
+        if (!array) { json_str(o, q, (size_t)(k - q)); buf_byte(o, ':'); }
+        size_t used = 0;
+        if (bson_value_json(t, k + 1, end, o, &used, depth)) return -1;
+        q = k + 1 + used;
+    }
+    buf_byte(o, array ? ']' : '}');
+    return q == end ? 0 : -1;
+}
+
+/* ---- OP_MSG round trip ---- */
+static void mg_err(Mongo* m, const char* what) { set_err(&m->c, "%s", what); }
+
+/* Sends command (BSON) with "$db" added and reads the reply document into reply */
+static int mg_command(Mongo* m, const char* db, const Buf* cmd, Buf* reply) {
+    Buf body = {0};
+    size_t dl = strlen(db);
+    /* the command document minus its terminator, then "$db": db */
+    buf_put(&body, cmd->p, cmd->n - 1);
+    buf_byte(&body, 0x02); buf_put(&body, "$db", 4); le32(&body, (uint32_t)dl + 1); buf_put(&body, db, dl); buf_byte(&body, 0);
+    buf_byte(&body, 0);
+    patch32(&body, 0, (uint32_t)body.n);
+    Buf msg = {0};
+    le32(&msg, (uint32_t)(16 + 4 + 1 + body.n));
+    le32(&msg, (uint32_t)++m->req);
+    le32(&msg, 0);
+    le32(&msg, 2013);
+    le32(&msg, 0);
+    buf_byte(&msg, 0);
+    buf_put(&msg, body.p, body.n);
+    buf_free(&body);
+    int rc = conn_send(&m->c, msg.p, msg.n);
+    buf_free(&msg);
+    if (rc) { m->c.broken = 1; return -1; }
+    uint8_t hdr[16];
+    if (conn_recv(&m->c, hdr, 16)) { m->c.broken = 1; return -1; }
+    uint32_t len = rd32(hdr);
+    if (len < 21 || len > 48 * 1024 * 1024 || rd32(hdr + 12) != 2013) { mg_err(m, "unexpected reply from the server (not OP_MSG)"); m->c.broken = 1; return -1; }
+    Buf rest = {0};
+    if (buf_reserve(&rest, len - 16)) return -1;
+    if (conn_recv(&m->c, rest.p, len - 16)) { buf_free(&rest); m->c.broken = 1; return -1; }
+    rest.n = len - 16;
+    uint32_t flags = rd32(rest.p);
+    size_t end = rest.n - ((flags & 1) ? 4 : 0);
+    size_t at = 4;
+    rc = -1;
+    while (at < end) {
+        uint8_t kind = rest.p[at++];
+        if (at + 4 > end) break;
+        uint32_t sl = rd32(rest.p + at);
+        if (sl > end - at) break;
+        if (kind == 0) { buf_put(reply, rest.p + at, sl); rc = 0; }
+        at += sl;
+    }
+    buf_free(&rest);
+    if (rc) { mg_err(m, "reply has no body section"); m->c.broken = 1; }
+    return rc;
+}
+
+/* JSON in, JSON out (malloc'd); NULL with the error recorded on failure */
+static char* mg_command_json(Mongo* m, const char* db, const char* json) {
+    Buf cmd = {0}, reply = {0}, out = {0};
+    const char* why = NULL;
+    char* res = NULL;
+    if (json_to_bson(json, &cmd, &why)) { set_err(&m->c, "invalid command JSON: %s", why); goto done; }
+    if (mg_command(m, db, &cmd, &reply)) goto done;
+    if (bson_to_json(reply.p, reply.n, 0, &out, 0)) { mg_err(m, "malformed BSON in the reply"); goto done; }
+    res = dup_n((const char*)out.p, out.n);
+done:
+    buf_free(&cmd); buf_free(&reply); buf_free(&out);
+    return res;
+}
+
+/* Value of string member key in a flat JSON reply (enough for the SASL replies) */
+static int json_member(const char* json, const char* key, char* out, size_t cap) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char* p = strstr(json, pat);
+    if (!p) return -1;
+    p += strlen(pat);
+    if (*p == '"') {
+        const char* e = strchr(p + 1, '"');
+        if (!e || (size_t)(e - p - 1) >= cap) return -1;
+        memcpy(out, p + 1, (size_t)(e - p - 1)); out[e - p - 1] = 0;
+        return 0;
+    }
+    size_t n = strcspn(p, ",}");
+    if (n >= cap) return -1;
+    memcpy(out, p, n); out[n] = 0;
+    return 0;
+}
+
+static int mg_scram(Mongo* m, const char* user, const char* pass, const char* authdb) {
+    uint8_t nonce_raw[18];
+    if (os_random(nonce_raw, sizeof nonce_raw)) { mg_err(m, "no random source"); return -1; }
+    Buf nonce = {0}; b64enc(nonce_raw, sizeof nonce_raw, &nonce); buf_byte(&nonce, 0);
+    /* SCRAM user names escape ',' and '=' */
+    char uesc[300]; size_t ul = 0;
+    for (const char* q = user; *q && ul < sizeof uesc - 4; q++) {
+        if (*q == ',') { memcpy(uesc + ul, "=2C", 3); ul += 3; }
+        else if (*q == '=') { memcpy(uesc + ul, "=3D", 3); ul += 3; }
+        else uesc[ul++] = *q;
+    }
+    uesc[ul] = 0;
+    char first_bare[512];
+    snprintf(first_bare, sizeof first_bare, "n=%s,r=%s", uesc, (char*)nonce.p);
+    char cf[600]; snprintf(cf, sizeof cf, "n,,%s", first_bare);
+    Buf p64 = {0}; b64enc((const uint8_t*)cf, strlen(cf), &p64); buf_byte(&p64, 0);
+    char cmd[1200];
+    snprintf(cmd, sizeof cmd, "{\"saslStart\":1,\"mechanism\":\"SCRAM-SHA-256\",\"payload\":{\"$binary\":{\"base64\":\"%s\",\"subType\":\"00\"}},\"autoAuthorize\":1,\"options\":{\"skipEmptyExchange\":true}}", (char*)p64.p);
+    buf_free(&p64);
+    int rc = -1;
+    char* r1 = mg_command_json(m, authdb, cmd);
+    char* r2 = NULL;
+    char* r3 = NULL;
+    char conv[32], pay[1024], okv[16], server_first[1024], rn[512], s64[256], ibuf[32];
+    Buf sf = {0}, salt = {0};
+    if (!r1) goto out;
+    if (json_member(r1, "ok", okv, sizeof okv) || strtod(okv, NULL) != 1.0) {
+        char em[400] = "authentication failed";
+        json_member(r1, "errmsg", em, sizeof em);
+        mg_err(m, em); goto out;
+    }
+    if (json_member(r1, "conversationId", conv, sizeof conv) || json_member(r1, "base64", pay, sizeof pay) || b64dec(pay, strlen(pay), &sf) || sf.n >= sizeof server_first) { mg_err(m, "malformed SASL reply"); goto out; }
+    memcpy(server_first, sf.p, sf.n); server_first[sf.n] = 0;
+    if (scram_attr(server_first, 'r', rn, sizeof rn) || scram_attr(server_first, 's', s64, sizeof s64) || scram_attr(server_first, 'i', ibuf, sizeof ibuf)) { mg_err(m, "malformed SCRAM server message"); goto out; }
+    if (strncmp(rn, (char*)nonce.p, strlen((char*)nonce.p))) { mg_err(m, "SCRAM nonce mismatch"); goto out; }
+    int iters = atoi(ibuf);
+    if (iters < 4096 || iters > 10000000) { mg_err(m, "bad SCRAM iteration count"); goto out; }
+    if (b64dec(s64, strlen(s64), &salt)) { mg_err(m, "bad SCRAM salt"); goto out; }
+    uint8_t salted[32], ckey[32], skey[32], stored[32], sig[32], proof[32], ssig[32];
+    /* ponytail: no SASLprep; non-ASCII passwords need it */
+    pbkdf2_256(pass, salt.p, salt.n, iters, salted);
+    hmac256(salted, 32, (const uint8_t*)"Client Key", 10, ckey);
+    sha256(ckey, 32, stored);
+    char final_wo[700];
+    snprintf(final_wo, sizeof final_wo, "c=biws,r=%s", rn);
+    char auth[2400];
+    snprintf(auth, sizeof auth, "%s,%s,%s", first_bare, server_first, final_wo);
+    hmac256(stored, 32, (const uint8_t*)auth, strlen(auth), sig);
+    for (int i = 0; i < 32; i++) proof[i] = ckey[i] ^ sig[i];
+    hmac256(salted, 32, (const uint8_t*)"Server Key", 10, skey);
+    hmac256(skey, 32, (const uint8_t*)auth, strlen(auth), ssig);
+    Buf pr = {0}, fin64 = {0};
+    b64enc(proof, 32, &pr); buf_byte(&pr, 0);
+    char fm[900]; snprintf(fm, sizeof fm, "%s,p=%s", final_wo, (char*)pr.p);
+    b64enc((const uint8_t*)fm, strlen(fm), &fin64); buf_byte(&fin64, 0);
+    char cmd2[1600];
+    snprintf(cmd2, sizeof cmd2, "{\"saslContinue\":1,\"conversationId\":%s,\"payload\":{\"$binary\":{\"base64\":\"%s\",\"subType\":\"00\"}}}", conv, (char*)fin64.p);
+    buf_free(&pr); buf_free(&fin64);
+    r2 = mg_command_json(m, authdb, cmd2);
+    if (!r2) goto out;
+    if (json_member(r2, "ok", okv, sizeof okv) || strtod(okv, NULL) != 1.0) {
+        char em[400] = "authentication failed";
+        json_member(r2, "errmsg", em, sizeof em);
+        mg_err(m, em); goto out;
+    }
+    /* the server proves it knows the password too */
+    Buf sfin = {0}, v64 = {0};
+    if (json_member(r2, "base64", pay, sizeof pay) || b64dec(pay, strlen(pay), &sfin)) { buf_free(&sfin); mg_err(m, "malformed SASL final"); goto out; }
+    b64enc(ssig, 32, &v64); buf_byte(&v64, 0);
+    char vexp[128]; snprintf(vexp, sizeof vexp, "v=%s", (char*)v64.p);
+    int match = sfin.n == strlen(vexp) && !memcmp(sfin.p, vexp, sfin.n);
+    buf_free(&sfin); buf_free(&v64);
+    if (!match) { mg_err(m, "server SCRAM signature invalid"); goto out; }
+    char done[16] = "";
+    json_member(r2, "done", done, sizeof done);
+    if (strcmp(done, "true")) {
+        char cmd3[200];
+        snprintf(cmd3, sizeof cmd3, "{\"saslContinue\":1,\"conversationId\":%s,\"payload\":{\"$binary\":{\"base64\":\"\",\"subType\":\"00\"}}}", conv);
+        r3 = mg_command_json(m, authdb, cmd3);
+        if (!r3 || json_member(r3, "ok", okv, sizeof okv) || strtod(okv, NULL) != 1.0) { if (r3) mg_err(m, "authentication did not complete"); goto out; }
+    }
+    rc = 0;
+out:
+    buf_free(&nonce); buf_free(&sf); buf_free(&salt);
+    free(r1);
+    free(r2);
+    free(r3);
+    return rc;
+}
+
+static int pct_decode(const char* s, size_t n, char* out, size_t cap) {
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (o + 1 >= cap) return -1;
+        if (s[i] == '%' && i + 2 < n && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+            char h[3] = { s[i + 1], s[i + 2], 0 };
+            out[o++] = (char)strtol(h, NULL, 16);
+            i += 2;
+        } else out[o++] = s[i];
+    }
+    out[o] = 0;
+    return 0;
+}
+
+static long long mg_open(const char* url, long long timeout_ms) {
+    char user[128] = "", pass[128] = "", host[256] = "", authdb[128] = "admin";
+    int port = 27017;
+    g_mg_open_err[0] = 0;
+    if (!url || strncmp(url, "mongodb://", 10)) {
+        snprintf(g_mg_open_err, sizeof g_mg_open_err, "URL must start with mongodb:// (mongodb+srv and TLS are not supported)");
+        return -7;
+    }
+    const char* rest = url + 10;
+    const char* tail = rest + strcspn(rest, "/?");
+    const char* at = NULL;
+    for (const char* q = rest; q < tail; q++) if (*q == '@') at = q;
+    const char* hostp = rest;
+    if (at) {
+        const char* colon = memchr(rest, ':', (size_t)(at - rest));
+        if (pct_decode(rest, (size_t)((colon ? colon : at) - rest), user, sizeof user) ||
+            (colon && pct_decode(colon + 1, (size_t)(at - colon - 1), pass, sizeof pass))) { snprintf(g_mg_open_err, sizeof g_mg_open_err, "user or password too long"); return -7; }
+        hostp = at + 1;
+    }
+    /* first host of a seed list */
+    const char* hend = hostp + strcspn(hostp, ",/?");
+    const char* pc = NULL;
+    if (*hostp == '[') { const char* rb = memchr(hostp, ']', (size_t)(hend - hostp)); if (rb) { pc = rb + 1 < hend && rb[1] == ':' ? rb + 1 : NULL; hostp++; hend = pc ? pc - 1 : rb; } }
+    else pc = memchr(hostp, ':', (size_t)(hend - hostp));
+    size_t hl = (size_t)((pc ? pc : hend) - hostp);
+    if (!hl || hl >= sizeof host) { snprintf(g_mg_open_err, sizeof g_mg_open_err, "URL has no host"); return -7; }
+    memcpy(host, hostp, hl);
+    if (pc) { port = atoi(pc + 1); if (port <= 0 || port > 65535) { snprintf(g_mg_open_err, sizeof g_mg_open_err, "bad port"); return -7; } }
+    const char* slash = strchr(hostp, '/');
+    if (slash && slash[1] && slash[1] != '?') { size_t dl = strcspn(slash + 1, "?"); if (dl < sizeof authdb) { memcpy(authdb, slash + 1, dl); authdb[dl] = 0; } }
+    const char* src = strstr(url, "authSource=");
+    if (src) { size_t sl = strcspn(src + 11, "&"); if (sl < sizeof authdb) { memcpy(authdb, src + 11, sl); authdb[sl] = 0; } }
+    if (strstr(url, "tls=true") || strstr(url, "ssl=true")) { snprintf(g_mg_open_err, sizeof g_mg_open_err, "TLS connections are not supported"); return -7; }
+
+    Mongo* m = (Mongo*)calloc(1, sizeof *m);
+    if (!m) return -11;
+    m->c.sock = DB_BAD_SOCK;
+    m->c.connect_ms = timeout_ms > 0 ? timeout_ms : 5000;
+    m->c.deadline = now_ms() + m->c.connect_ms;
+    int ok = !tcp_connect(&m->c, host, port);
+    if (ok) {
+        Buf cmd = {0}, reply = {0};
+        const char* why = NULL;
+        json_to_bson("{\"hello\":1,\"client\":{\"driver\":{\"name\":\"salivo\",\"version\":\"1.0\"},\"os\":{\"type\":\"unknown\"}}}", &cmd, &why);
+        ok = !mg_command(m, "admin", &cmd, &reply);
+        buf_free(&cmd); buf_free(&reply);
+    }
+    if (ok && user[0]) ok = !mg_scram(m, user, pass, authdb);
+    m->c.deadline = 0;
+    if (!ok) {
+        snprintf(g_mg_open_err, sizeof g_mg_open_err, "%s", m->c.err[0] ? m->c.err : "cannot connect");
+        if (m->c.sock != DB_BAD_SOCK) db_closesock(m->c.sock);
+        free(m);
+        return -8;
+    }
+    tab_lock();
+    long long h = -11;
+    for (int i = 1; i <= MG_MAX; i++) if (!g_mg[i]) { g_mg[i] = m; m->used = 1; h = i; break; }
+    mtx_unlock(&g_tab_mu);
+    if (h < 0) { db_closesock(m->c.sock); free(m); snprintf(g_mg_open_err, sizeof g_mg_open_err, "too many open MongoDB connections"); }
+    return h;
+}
+
+/* Marks the handle busy; NULL (with *code set) when invalid or in use */
+static Mongo* mg_take(long long h, long long* code) {
+    tab_lock();
+    Mongo* m = h >= 1 && h <= MG_MAX ? g_mg[h] : NULL;
+    if (!m) *code = -10;
+    else if (m->busy) { *code = -13; m = NULL; }
+    else m->busy = 1;
+    mtx_unlock(&g_tab_mu);
+    return m;
+}
+static void mg_give(Mongo* m) { tab_lock(); m->busy = 0; mtx_unlock(&g_tab_mu); }
+
+static long long tramp_mg_open(long long a) { DbCall* c = (DbCall*)(intptr_t)a; return mg_open(c->s1, c->a); }
+static long long tramp_mg_command(long long a) {
+    DbCall* c = (DbCall*)(intptr_t)a;
+    long long code = 0;
+    Mongo* m = mg_take(c->a, &code);
+    if (!m) return 0;
+    char* r = NULL;
+    if (m->c.broken) set_err(&m->c, "connection lost%s", "");
+    else {
+        m->c.err[0] = 0;
+        m->c.deadline = c->b > 0 ? now_ms() + c->b : 0;
+        r = mg_command_json(m, c->s1, c->s2);
+        m->c.deadline = 0;
+    }
+    mg_give(m);
+    return (long long)(intptr_t)r;
+}
+
+long long salivo_mongo_open(const char* url, long long timeout_ms) { DbCall c = { timeout_ms, 0, 0, url, NULL, 0 }; return run_offloaded(tramp_mg_open, &c); }
+
+/* Runs one command (JSON object) against db; the reply as JSON, or "" when the call failed
+ * (read the reason with salivo_mongo_error). timeout_ms bounds the round trip (0 = none). */
+char* salivo_mongo_command(long long h, const char* db, const char* json, long long timeout_ms) {
+    DbCall c = { h, timeout_ms, 0, db, json, 0 };
+    char* r = (char*)(intptr_t)run_offloaded(tramp_mg_command, &c);
+    if (!r) return out_str("", 0);
+    char* o = out_str(r, strlen(r));
+    free(r);
+    return o;
+}
+
+char* salivo_mongo_error(long long h) {
+    if (h == 0) { tab_lock(); char* r = out_str(g_mg_open_err, strlen(g_mg_open_err)); mtx_unlock(&g_tab_mu); return r; }
+    tab_lock();
+    Mongo* m = h >= 1 && h <= MG_MAX ? g_mg[h] : NULL;
+    char* r = m ? out_str(m->c.err, strlen(m->c.err)) : out_str("invalid MongoDB handle", 22);
+    mtx_unlock(&g_tab_mu);
+    return r;
+}
+
+long long salivo_mongo_close(long long h) {
+    tab_lock();
+    Mongo* m = h >= 1 && h <= MG_MAX ? g_mg[h] : NULL;
+    if (m && m->busy) { mtx_unlock(&g_tab_mu); return -13; }
+    if (m) g_mg[h] = NULL;
+    mtx_unlock(&g_tab_mu);
+    if (!m) return -10;
+    if (m->c.sock != DB_BAD_SOCK) db_closesock(m->c.sock);
+    free(m);
+    return 0;
+}
+
+/* JSON <-> BSON round trip without a server (tests): "" on invalid JSON */
+char* salivo_mongo_bson_roundtrip(const char* json) {
+    Buf b = {0}, o = {0};
+    const char* why = NULL;
+    char* r;
+    if (json_to_bson(json, &b, &why) || bson_to_json(b.p, b.n, 0, &o, 0)) r = out_str("", 0);
+    else r = out_str((const char*)o.p, o.n);
+    buf_free(&b); buf_free(&o);
+    return r;
+}

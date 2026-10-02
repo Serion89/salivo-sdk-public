@@ -1,0 +1,259 @@
+// Salivo Standard Library: Text Module
+// Everyday string handling on plain `string` values: split, join, lines, words, character classes,
+// counting and safe number parsing. Byte-oriented (ASCII classes); UTF-8 text passes through intact.
+module salivo.std.text;
+
+><salivo.std.collections::{Vec, vecNew, push, get, veclen};
+
+/// Byte value 0..255 at index i (-1 past the end)
+pub func byteAt(s: string, i: int) -> int {
+    if (i < 0 || i >= len(s)) { return 0 - 1; }
+    let b = rtcharat(s, i);
+    if (b < 0) { return b + 256; }
+    return b;
+}
+
+/// One-character string for an ASCII code 1..127 ("" otherwise)
+pub func chr(code: int) -> string {
+    if (code < 32 || code > 126) {
+        if (code == 9) { return "\t"; }
+        if (code == 10) { return "\n"; }
+        if (code == 13) { return "\r"; }
+        return "";
+    }
+    let table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    return slice(table, code - 32, code - 31);
+}
+
+/// ASCII code of the first character (-1 for "")
+pub func ord(s: string) -> int {
+    return byteAt(s, 0);
+}
+
+pub func isDigit(c: int) -> bool { return c >= 48 && c <= 57; }
+pub func isAlpha(c: int) -> bool { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+pub func isAlnum(c: int) -> bool { return isDigit(c) || isAlpha(c); }
+pub func isSpace(c: int) -> bool { return c == 32 || (c >= 9 && c <= 13); }
+pub func isUpper(c: int) -> bool { return c >= 65 && c <= 90; }
+pub func isLower(c: int) -> bool { return c >= 97 && c <= 122; }
+
+/// Index of sub at or after start (-1 when absent)
+pub func findFrom(s: string, sub: string, start: int) -> int {
+    let n = len(s);
+    let m = len(sub);
+    if (m == 0) {
+        if (start <= n) { return start; }
+        return 0 - 1;
+    }
+    let mut i = start;
+    if (i < 0) { i = 0; }
+    while (i + m <= n) {
+        let mut j = 0;
+        while (j < m && rtcharat(s, i + j) == rtcharat(sub, j)) { j = j + 1; }
+        if (j == m) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+/// Pieces of s between occurrences of sep ("a,,b" by "," gives ["a", "", "b"]); an empty sep splits on whitespace
+pub func split(s: string, sep: string) -> Vec<string> {
+    if (sep == "") { return words(s); }
+    return splitN(s, sep, 0 - 1);
+}
+
+/// Like split, but at most maxSplits cuts (the rest stays in the last piece); maxSplits < 0 means no limit
+pub func splitN(s: string, sep: string, maxSplits: int) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let m = len(sep);
+    let mut start = 0;
+    let mut cuts = 0;
+    if (m > 0) {
+        let mut at = findFrom(s, sep, 0);
+        while (at >= 0 && (maxSplits < 0 || cuts < maxSplits)) {
+            out = push<string>(out, slice(s, start, at));
+            start = at + m;
+            cuts = cuts + 1;
+            at = findFrom(s, sep, start);
+        }
+    }
+    out = push<string>(out, slice(s, start, len(s)));
+    return out;
+}
+
+/// Whitespace-separated words (no empty strings)
+pub func words(s: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let n = len(s);
+    let mut i = 0;
+    while (i < n) {
+        while (i < n && isSpace(byteAt(s, i))) { i = i + 1; }
+        let start = i;
+        while (i < n && !isSpace(byteAt(s, i))) { i = i + 1; }
+        if (i > start) { out = push<string>(out, slice(s, start, i)); }
+    }
+    return out;
+}
+
+/// Lines of s without their "\n" / "\r\n" endings; a final newline does not add an empty line
+pub func lines(s: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let n = len(s);
+    let mut start = 0;
+    let mut i = 0;
+    while (i < n) {
+        if (byteAt(s, i) == 10) {
+            let mut end = i;
+            if (end > start && byteAt(s, end - 1) == 13) { end = end - 1; }
+            out = push<string>(out, slice(s, start, end));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < n) {
+        let mut end = n;
+        if (byteAt(s, end - 1) == 13) { end = end - 1; }
+        out = push<string>(out, slice(s, start, end));
+    }
+    return out;
+}
+
+/// parts joined with sep between them
+pub func join(parts: Vec<string>, sep: string) -> string {
+    let n = veclen<string>(parts);
+    let mut out = "";
+    let mut i = 0;
+    while (i < n) {
+        if (i > 0) { out = out + sep; }
+        out = out + get<string>(parts, i);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Non-overlapping occurrences of sub
+pub func count(s: string, sub: string) -> int {
+    if (len(sub) == 0) { return 0; }
+    let mut c = 0;
+    let mut at = findFrom(s, sub, 0);
+    while (at >= 0) {
+        c = c + 1;
+        at = findFrom(s, sub, at + len(sub));
+    }
+    return c;
+}
+
+/// Last index of sub (-1 when absent)
+pub func rfindStr(s: string, sub: string) -> int {
+    let mut last = 0 - 1;
+    let mut at = findFrom(s, sub, 0);
+    while (at >= 0) {
+        last = at;
+        at = findFrom(s, sub, at + 1);
+    }
+    return last;
+}
+
+/// s without leading and trailing characters that appear in chars
+pub func strip(s: string, chars: string) -> string {
+    let mut a = 0;
+    let mut b = len(s);
+    while (a < b && findFrom(chars, slice(s, a, a + 1), 0) >= 0) { a = a + 1; }
+    while (b > a && findFrom(chars, slice(s, b - 1, b), 0) >= 0) { b = b - 1; }
+    return slice(s, a, b);
+}
+
+/// s without prefix when it starts with it
+pub func removePrefix(s: string, prefix: string) -> string {
+    if (startswith(s, prefix)) { return slice(s, len(prefix), len(s)); }
+    return s;
+}
+
+/// s without suffix when it ends with it
+pub func removeSuffix(s: string, suffix: string) -> string {
+    if (endswith(s, suffix)) { return slice(s, 0, len(s) - len(suffix)); }
+    return s;
+}
+
+/// Bytes of s in reverse order
+pub func reverse(s: string) -> string {
+    let mut out = "";
+    let mut i = len(s) - 1;
+    while (i >= 0) {
+        out = out + slice(s, i, i + 1);
+        i = i - 1;
+    }
+    return out;
+}
+
+/// First letter of every word upper case, the rest lower case
+pub func title(s: string) -> string {
+    let mut out = "";
+    let mut start = true;
+    let n = len(s);
+    let mut i = 0;
+    while (i < n) {
+        let ch = slice(s, i, i + 1);
+        if (start) { out = out + upper(ch); } else { out = out + lower(ch); }
+        start = isSpace(byteAt(s, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// s centered in width columns, padded with fill
+pub func center(s: string, width: int, fill: string) -> string {
+    let n = len(s);
+    if (n >= width || fill == "") { return s; }
+    let left = (width - n) / 2;
+    return repeat(fill, left) + s + repeat(fill, width - n - left);
+}
+
+/// True when s is a decimal integer (optional sign)
+pub func isInt(s: string) -> bool {
+    let n = len(s);
+    let mut i = 0;
+    if (n > 0 && (byteAt(s, 0) == 45 || byteAt(s, 0) == 43)) { i = 1; }
+    if (i >= n) { return false; }
+    while (i < n) {
+        if (!isDigit(byteAt(s, i))) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// True when s is a decimal number: optional sign, digits, optional fraction and exponent
+pub func isNumber(s: string) -> bool {
+    let n = len(s);
+    let mut i = 0;
+    if (n > 0 && (byteAt(s, 0) == 45 || byteAt(s, 0) == 43)) { i = 1; }
+    let mut digits = 0;
+    while (i < n && isDigit(byteAt(s, i))) { i = i + 1; digits = digits + 1; }
+    if (i < n && byteAt(s, i) == 46) {
+        i = i + 1;
+        while (i < n && isDigit(byteAt(s, i))) { i = i + 1; digits = digits + 1; }
+    }
+    if (digits == 0) { return false; }
+    if (i < n && (byteAt(s, i) == 101 || byteAt(s, i) == 69)) {
+        i = i + 1;
+        if (i < n && (byteAt(s, i) == 45 || byteAt(s, i) == 43)) { i = i + 1; }
+        let mut ed = 0;
+        while (i < n && isDigit(byteAt(s, i))) { i = i + 1; ed = ed + 1; }
+        if (ed == 0) { return false; }
+    }
+    return i == n;
+}
+
+/// Integer value of s, or fallback when s is not an integer
+pub func toIntOr(s: string, fallback: int) -> int {
+    let t = trim(s);
+    if (!isInt(t)) { return fallback; }
+    return strint(t);
+}
+
+/// Float value of s, or fallback when s is not a number
+pub func toFloatOr(s: string, fallback: float) -> float {
+    let t = trim(s);
+    if (!isNumber(t)) { return fallback; }
+    return strfloat(t);
+}

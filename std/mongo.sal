@@ -1,0 +1,353 @@
+// Salivo Standard Library: MongoDB Module
+// A MongoDB client over the OP_MSG wire protocol (MongoDB 3.6+). Documents, filters, updates and
+// pipelines are Extended JSON text (build them with salivo.std.json): {"$oid": "..."} for
+// ObjectId, {"$date": "2026-10-01T00:00:00Z"} or {"$date": {"$numberLong": "ms"}} for dates,
+// {"$numberLong": "..."} for 64-bit integers. Results come back the same way.
+//   let m = mongoConnect("mongodb://root:secret@localhost:27017");
+//   if (!mongoOk(m)) { panic(mongoError(m)); }
+//   let r = insertOne(m, "shop", "users", "{\"name\": \"Ada\", \"age\": 36}");
+//   let docs = find(m, "shop", "users", "{\"age\": {\"$gt\": 30}}");
+//   for (let mut i = 0; i < veclen<string>(docs.docs); i = i + 1) { outln(get<string>(docs.docs, i)); }
+// Limits: one connection per Mongo value (no pool), plain TCP (no TLS, no mongodb+srv), the
+// first host of a seed list, SCRAM-SHA-256 authentication with ASCII passwords.
+module salivo.std.mongo;
+
+><salivo.std.collections::{Vec, vecNew, push, get, veclen};
+><salivo.std.json::{Json, jsonParse, jsonGet, jsonPath, jsonStr, jsonInt, jsonFloat, jsonRaw, jsonItems, jsonKeys, jsonExists, jsonString, jsonSet, JSON_OBJECT, JSON_NUMBER};
+
+pub struct Mongo {
+    int handle;
+    int timeoutMs;
+}
+
+impl Drop for Mongo {
+    func drop(self) {
+        if (self.handle > 0) {
+            let r = rtdbmgclose(self.handle);
+        }
+    }
+}
+
+/// A command's outcome: ok with the reply (Extended JSON), or the error message
+pub struct MongoResult {
+    bool ok;
+    string json;
+    string error;
+}
+
+/// Documents from a cursor (find, aggregate, ...)
+pub struct MongoDocs {
+    bool ok;
+    Vec<string> docs;
+    string error;
+}
+
+/// Connects (5 s connect timeout); check mongoOk before use
+pub func mongoConnect(url: string) -> Mongo {
+    return Mongo { handle: rtdbmgopen(url, 5000), timeoutMs: 0 };
+}
+
+/// Connects with a connect timeout, and a per-command timeout (0 = none), both in ms
+pub func mongoConnectWith(url: string, connectMs: int, commandMs: int) -> Mongo {
+    return Mongo { handle: rtdbmgopen(url, connectMs), timeoutMs: commandMs };
+}
+
+pub func mongoOk(m: Mongo) -> bool { return m.handle > 0; }
+
+/// Why the connection failed, or the last error of an open connection
+pub func mongoError(m: Mongo) -> string {
+    if (m.handle > 0) { return rtdbmgerror(m.handle); }
+    return rtdbmgerror(0);
+}
+
+func failed(msg: string) -> MongoResult {
+    return MongoResult { ok: false, json: "", error: msg };
+}
+
+/// The error a reply reports: ok 0, write errors or a write concern error ("" when none)
+func replyError(reply: Json) -> string {
+    let okv = jsonGet(reply, "ok");
+    if (jsonExists(okv) && jsonFloat(okv) != 1.0) {
+        let msg = jsonStr(jsonGet(reply, "errmsg"));
+        if (msg == "") { return "command failed: " + jsonRaw(reply); }
+        return msg + " (code " + intstr(jsonInt(jsonGet(reply, "code"))) + ")";
+    }
+    let we = jsonPath(reply, "writeErrors[0].errmsg");
+    if (jsonExists(we)) { return jsonStr(we); }
+    let wce = jsonPath(reply, "writeConcernError.errmsg");
+    if (jsonExists(wce)) { return jsonStr(wce); }
+    return "";
+}
+
+/// Runs any database command, e.g. mongoCommand(m, "admin", "{\"ping\": 1}")
+pub func mongoCommand(m: Mongo, db: string, commandJson: string) -> MongoResult {
+    if (m.handle <= 0) { return failed("not connected: " + mongoError(m)); }
+    let reply = rtdbmgcommand(m.handle, db, commandJson, m.timeoutMs);
+    if (reply == "") { return failed(rtdbmgerror(m.handle)); }
+    let p = jsonParse(reply);
+    if (!p.is_ok) { return failed("unreadable reply"); }
+    let e = replyError(p.value);
+    if (e != "") { return MongoResult { ok: false, json: reply, error: e }; }
+    return MongoResult { ok: true, json: reply, error: "" };
+}
+
+/// True when the server answers a ping
+pub func mongoPing(m: Mongo) -> bool { return mongoCommand(m, "admin", "{\"ping\":1}").ok; }
+
+/// A new ObjectId as 24 hex digits: 4 bytes of Unix time, 8 random bytes
+pub func newObjectId() -> string {
+    let digits = "0123456789abcdef";
+    let secs = rttimenowms() / 1000;
+    let mut out = "";
+    let mut shift = 28;
+    while (shift >= 0) {
+        let d = (secs >> shift) & 15;
+        out = out + slice(digits, d, d + 1);
+        shift = shift - 4;
+    }
+    let a = rtalloc(8, 8);
+    let r = rtcryptorandombytes(a, 8);
+    let mut i = 0;
+    while (i < 8) {
+        let mut b = rtmemreadbyte(a, i);
+        if (b < 0) { b = b + 256; }
+        out = out + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
+        i = i + 1;
+    }
+    rtdeallocate(a, 8, 8);
+    return out;
+}
+
+/// {"$oid": "<hex>"} for an ObjectId's hex digits
+pub func oid(hex: string) -> string { return "{\"$oid\":\"" + hex + "\"}"; }
+
+/// doc with an _id added when it has none; the _id's JSON comes back in the second slot
+func withId(doc: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let p = jsonParse(doc);
+    if (!p.is_ok || p.value.kind != JSON_OBJECT) {
+        out = push<string>(out, "");
+        out = push<string>(out, "");
+        return out;
+    }
+    let id = jsonGet(p.value, "_id");
+    if (jsonExists(id)) {
+        out = push<string>(out, doc);
+        out = push<string>(out, jsonRaw(id));
+        return out;
+    }
+    let newId = oid(newObjectId());
+    out = push<string>(out, jsonSet(doc, "_id", newId));
+    out = push<string>(out, newId);
+    return out;
+}
+
+/// Inserts one document (an _id ObjectId is added when missing); json is the document's _id
+pub func insertOne(m: Mongo, db: string, coll: string, doc: string) -> MongoResult {
+    let d = withId(doc);
+    if (get<string>(d, 0) == "") { return failed("insertOne: the document must be a JSON object"); }
+    let r = mongoCommand(m, db, "{\"insert\":" + jsonString(coll) + ",\"documents\":[" + get<string>(d, 0) + "]}");
+    if (!r.ok) { return r; }
+    return MongoResult { ok: true, json: get<string>(d, 1), error: "" };
+}
+
+/// Inserts documents in order; json is a JSON array of their _ids
+pub func insertMany(m: Mongo, db: string, coll: string, docs: Vec<string>) -> MongoResult {
+    let mut body = "";
+    let mut ids = "";
+    let n = veclen<string>(docs);
+    if (n == 0) { return MongoResult { ok: true, json: "[]", error: "" }; }
+    let mut i = 0;
+    while (i < n) {
+        let d = withId(get<string>(docs, i));
+        if (get<string>(d, 0) == "") { return failed("insertMany: document " + intstr(i) + " must be a JSON object"); }
+        if (i > 0) {
+            body = body + ",";
+            ids = ids + ",";
+        }
+        body = body + get<string>(d, 0);
+        ids = ids + get<string>(d, 1);
+        i = i + 1;
+    }
+    let r = mongoCommand(m, db, "{\"insert\":" + jsonString(coll) + ",\"documents\":[" + body + "]}");
+    if (!r.ok) { return r; }
+    return MongoResult { ok: true, json: "[" + ids + "]", error: "" };
+}
+
+/// All documents of a cursor reply, following getMore until the cursor is exhausted
+func drain(m: Mongo, db: string, coll: string, r: MongoResult) -> MongoDocs {
+    let mut docs = vecNew<string>();
+    if (!r.ok) { return MongoDocs { ok: false, docs: docs, error: r.error }; }
+    let mut reply = jsonParse(r.json).value;
+    let mut batch = jsonPath(reply, "cursor.firstBatch");
+    let mut guard = 0;
+    while (guard < 1000000) {
+        let items = jsonItems(batch);
+        let mut i = 0;
+        while (i < veclen<Json>(items)) {
+            docs = push<string>(docs, jsonRaw(get<Json>(items, i)));
+            i = i + 1;
+        }
+        let id = jsonRaw(jsonPath(reply, "cursor.id"));
+        if (id == "" || id == "0") { return MongoDocs { ok: true, docs: docs, error: "" }; }
+        let more = mongoCommand(m, db, "{\"getMore\":{\"$numberLong\":\"" + id + "\"},\"collection\":" + jsonString(coll) + "}");
+        if (!more.ok) { return MongoDocs { ok: false, docs: docs, error: more.error }; }
+        reply = jsonParse(more.json).value;
+        batch = jsonPath(reply, "cursor.nextBatch");
+        guard = guard + 1;
+    }
+    return MongoDocs { ok: true, docs: docs, error: "" };
+}
+
+/// Documents matching filter ("{}" for all)
+pub func find(m: Mongo, db: string, coll: string, filter: string) -> MongoDocs {
+    return findWith(m, db, coll, filter, "{}");
+}
+
+/// find with options such as {"sort": {"age": -1}, "limit": 10, "skip": 5, "projection": {"name": 1}}
+pub func findWith(m: Mongo, db: string, coll: string, filter: string, options: string) -> MongoDocs {
+    let mut cmd = "{\"find\":" + jsonString(coll) + ",\"filter\":" + filter + "}";
+    let opts = jsonParse(options);
+    if (!opts.is_ok || opts.value.kind != JSON_OBJECT) { return MongoDocs { ok: false, docs: vecNew<string>(), error: "find options must be a JSON object" }; }
+    let keys = jsonKeys(opts.value);
+    let mut i = 0;
+    while (i < veclen<string>(keys)) {
+        let k = get<string>(keys, i);
+        cmd = jsonSet(cmd, k, jsonRaw(jsonGet(opts.value, k)));
+        i = i + 1;
+    }
+    return drain(m, db, coll, mongoCommand(m, db, cmd));
+}
+
+/// The first matching document; ok with json "" when none matches
+pub func findOne(m: Mongo, db: string, coll: string, filter: string) -> MongoResult {
+    let d = findWith(m, db, coll, filter, "{\"limit\":1,\"singleBatch\":true}");
+    if (!d.ok) { return failed(d.error); }
+    if (veclen<string>(d.docs) == 0) { return MongoResult { ok: true, json: "", error: "" }; }
+    return MongoResult { ok: true, json: get<string>(d.docs, 0), error: "" };
+}
+
+func updateWhere(m: Mongo, db: string, coll: string, filter: string, upd: string, multi: bool, upsert: bool) -> MongoResult {
+    let mut flags = "";
+    if (multi) { flags = flags + ",\"multi\":true"; }
+    if (upsert) { flags = flags + ",\"upsert\":true"; }
+    return mongoCommand(m, db, "{\"update\":" + jsonString(coll) + ",\"updates\":[{\"q\":" + filter + ",\"u\":" + upd + flags + "}]}");
+}
+
+/// Applies update operators ({"$set": {...}}) to the first match; json is the reply ("n", "nModified")
+pub func updateOne(m: Mongo, db: string, coll: string, filter: string, upd: string) -> MongoResult {
+    return updateWhere(m, db, coll, filter, upd, false, false);
+}
+
+/// Applies update operators to every match
+pub func updateMany(m: Mongo, db: string, coll: string, filter: string, upd: string) -> MongoResult {
+    return updateWhere(m, db, coll, filter, upd, true, false);
+}
+
+/// Like updateOne, inserting a document when nothing matches
+pub func upsertOne(m: Mongo, db: string, coll: string, filter: string, upd: string) -> MongoResult {
+    return updateWhere(m, db, coll, filter, upd, false, true);
+}
+
+/// Replaces the first match with doc (no update operators)
+pub func replaceOne(m: Mongo, db: string, coll: string, filter: string, doc: string) -> MongoResult {
+    return updateWhere(m, db, coll, filter, doc, false, false);
+}
+
+func deleteWhere(m: Mongo, db: string, coll: string, filter: string, limit: int) -> MongoResult {
+    return mongoCommand(m, db, "{\"delete\":" + jsonString(coll) + ",\"deletes\":[{\"q\":" + filter + ",\"limit\":" + intstr(limit) + "}]}");
+}
+
+pub func deleteOne(m: Mongo, db: string, coll: string, filter: string) -> MongoResult { return deleteWhere(m, db, coll, filter, 1); }
+pub func deleteMany(m: Mongo, db: string, coll: string, filter: string) -> MongoResult { return deleteWhere(m, db, coll, filter, 0); }
+
+/// Documents matched (n) or modified/deleted, read from a write reply
+pub func affected(r: MongoResult) -> int {
+    if (!r.ok || r.json == "") { return 0; }
+    let p = jsonParse(r.json);
+    if (!p.is_ok) { return 0; }
+    let mod = jsonGet(p.value, "nModified");
+    if (jsonExists(mod)) { return jsonInt(mod); }
+    return jsonInt(jsonGet(p.value, "n"));
+}
+
+/// Number of documents matching filter (-1 on error)
+pub func countDocuments(m: Mongo, db: string, coll: string, filter: string) -> int {
+    let d = aggregate(m, db, coll, "[{\"$match\":" + filter + "},{\"$count\":\"n\"}]");
+    if (!d.ok) { return 0 - 1; }
+    if (veclen<string>(d.docs) == 0) { return 0; }
+    return jsonInt(jsonGet(jsonParse(get<string>(d.docs, 0)).value, "n"));
+}
+
+/// Runs an aggregation pipeline (JSON array of stages)
+pub func aggregate(m: Mongo, db: string, coll: string, pipeline: string) -> MongoDocs {
+    return drain(m, db, coll, mongoCommand(m, db, "{\"aggregate\":" + jsonString(coll) + ",\"pipeline\":" + pipeline + ",\"cursor\":{}}"));
+}
+
+/// Distinct values of field among documents matching filter (each as JSON)
+pub func distinct(m: Mongo, db: string, coll: string, field: string, filter: string) -> MongoDocs {
+    let r = mongoCommand(m, db, "{\"distinct\":" + jsonString(coll) + ",\"key\":" + jsonString(field) + ",\"query\":" + filter + "}");
+    let mut out = vecNew<string>();
+    if (!r.ok) { return MongoDocs { ok: false, docs: out, error: r.error }; }
+    let items = jsonItems(jsonGet(jsonParse(r.json).value, "values"));
+    let mut i = 0;
+    while (i < veclen<Json>(items)) {
+        out = push<string>(out, jsonRaw(get<Json>(items, i)));
+        i = i + 1;
+    }
+    return MongoDocs { ok: true, docs: out, error: "" };
+}
+
+/// Creates an index on keys ({"email": 1}); unique rejects duplicates
+pub func createIndex(m: Mongo, db: string, coll: string, keys: string, unique: bool) -> MongoResult {
+    let p = jsonParse(keys);
+    if (!p.is_ok || p.value.kind != JSON_OBJECT) { return failed("createIndex: keys must be a JSON object"); }
+    let names = jsonKeys(p.value);
+    let mut name = "";
+    let mut i = 0;
+    while (i < veclen<string>(names)) {
+        if (i > 0) { name = name + "_"; }
+        name = name + get<string>(names, i) + "_" + jsonRaw(jsonGet(p.value, get<string>(names, i)));
+        i = i + 1;
+    }
+    let mut spec = "{\"key\":" + keys + ",\"name\":" + jsonString(name);
+    if (unique) { spec = spec + ",\"unique\":true"; }
+    return mongoCommand(m, db, "{\"createIndexes\":" + jsonString(coll) + ",\"indexes\":[" + spec + "}]}");
+}
+
+/// Drops a collection (ok when it did not exist)
+pub func dropCollection(m: Mongo, db: string, coll: string) -> MongoResult {
+    let r = mongoCommand(m, db, "{\"drop\":" + jsonString(coll) + "}");
+    if (!r.ok && contains(r.error, "ns not found")) { return MongoResult { ok: true, json: r.json, error: "" }; }
+    return r;
+}
+
+/// Collection names of a database
+pub func listCollections(m: Mongo, db: string) -> MongoDocs {
+    let d = drain(m, db, "", mongoCommand(m, db, "{\"listCollections\":1,\"nameOnly\":true}"));
+    if (!d.ok) { return d; }
+    let mut names = vecNew<string>();
+    let mut i = 0;
+    while (i < veclen<string>(d.docs)) {
+        names = push<string>(names, jsonStr(jsonGet(jsonParse(get<string>(d.docs, i)).value, "name")));
+        i = i + 1;
+    }
+    return MongoDocs { ok: true, docs: names, error: "" };
+}
+
+/// Database names on the server
+pub func listDatabases(m: Mongo) -> MongoDocs {
+    let r = mongoCommand(m, "admin", "{\"listDatabases\":1,\"nameOnly\":true}");
+    let mut names = vecNew<string>();
+    if (!r.ok) { return MongoDocs { ok: false, docs: names, error: r.error }; }
+    let items = jsonItems(jsonGet(jsonParse(r.json).value, "databases"));
+    let mut i = 0;
+    while (i < veclen<Json>(items)) {
+        names = push<string>(names, jsonStr(jsonGet(get<Json>(items, i), "name")));
+        i = i + 1;
+    }
+    return MongoDocs { ok: true, docs: names, error: "" };
+}
+
+/// JSON -> BSON -> JSON through the driver's converter (no server needed); "" when not an object
+pub func bsonRoundTrip(json: string) -> string { return rtdbmgbson(json); }

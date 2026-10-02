@@ -1,0 +1,148 @@
+// Salivo Standard Library: CSV Module
+// RFC 4180 CSV: quoted fields, "" escapes, delimiters and newlines inside quotes, \r\n or \n rows.
+//   let rows = csvParse(text, ",").value;                 // Vec<Vec<string>>
+//   let line = csvRow(fields, ",");                       // quotes only the fields that need it
+module salivo.std.csv;
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.collections::{Vec, vecNew, push, get, veclen};
+><salivo.std.text::{byteAt};
+><salivo.std.io::{readStr, writeStr};
+
+/// All rows of text; a trailing newline does not add an empty row. Errors on an unclosed quote.
+pub func csvParse(text: string, delim: string) -> Result<Vec<Vec<string>>, string> {
+    let mut rows = vecNew<Vec<string>>();
+    let mut row = vecNew<string>();
+    let d = byteAt(delim, 0);
+    let n = len(text);
+    let mut i = 0;
+    let mut field_start = true;
+    let mut row_has_data = false;
+    while (i < n) {
+        let c = byteAt(text, i);
+        if (c == 34 && field_start) {
+            // quoted field: runs to the closing quote, "" is a literal quote
+            let mut val = "";
+            let mut start = i + 1;
+            let mut j = i + 1;
+            let mut closed = false;
+            while (j < n && !closed) {
+                if (byteAt(text, j) == 34) {
+                    if (j + 1 < n && byteAt(text, j + 1) == 34) {
+                        val = val + slice(text, start, j + 1);
+                        j = j + 2;
+                        start = j;
+                    } else {
+                        val = val + slice(text, start, j);
+                        closed = true;
+                        j = j + 1;
+                    }
+                } else {
+                    j = j + 1;
+                }
+            }
+            if (!closed) { return err<Vec<Vec<string>>, string>("unclosed quote in field starting at byte " + intstr(i)); }
+            // text between the closing quote and the next delimiter is kept (lenient, like Python)
+            let mut k = j;
+            while (k < n && byteAt(text, k) != d && byteAt(text, k) != 10 && byteAt(text, k) != 13) { k = k + 1; }
+            row = push<string>(row, val + slice(text, j, k));
+            row_has_data = true;
+            i = k;
+            field_start = false;
+        } else if (c == d) {
+            if (field_start) { row = push<string>(row, ""); }
+            field_start = true;
+            row_has_data = true;
+            i = i + 1;
+        } else if (c == 10 || c == 13) {
+            if (field_start && row_has_data) { row = push<string>(row, ""); }
+            if (row_has_data) { rows = push<Vec<string>>(rows, row); }
+            row = vecNew<string>();
+            row_has_data = false;
+            field_start = true;
+            if (c == 13 && i + 1 < n && byteAt(text, i + 1) == 10) { i = i + 1; }
+            i = i + 1;
+        } else {
+            let mut k = i;
+            while (k < n && byteAt(text, k) != d && byteAt(text, k) != 10 && byteAt(text, k) != 13) { k = k + 1; }
+            row = push<string>(row, slice(text, i, k));
+            row_has_data = true;
+            field_start = false;
+            i = k;
+        }
+    }
+    if (row_has_data) {
+        if (field_start) { row = push<string>(row, ""); }
+        rows = push<Vec<string>>(rows, row);
+    }
+    return ok<Vec<Vec<string>>, string>(rows);
+}
+
+/// One CSV line (no line ending) as fields
+pub func csvParseLine(line: string, delim: string) -> Vec<string> {
+    let r = csvParse(line, delim);
+    if (!r.is_ok || veclen<Vec<string>>(r.value) == 0) { return vecNew<string>(); }
+    return get<Vec<string>>(r.value, 0);
+}
+
+/// field quoted when it contains the delimiter, a quote, or a line break
+pub func csvField(field: string, delim: string) -> string {
+    if (find(field, delim) < 0 && find(field, "\"") < 0 && find(field, "\n") < 0 && find(field, "\r") < 0) { return field; }
+    return "\"" + replace(field, "\"", "\"\"") + "\"";
+}
+
+/// One CSV line from fields (no line ending)
+pub func csvRow(fields: Vec<string>, delim: string) -> string {
+    let mut out = "";
+    let n = veclen<string>(fields);
+    let mut i = 0;
+    while (i < n) {
+        if (i > 0) { out = out + delim; }
+        out = out + csvField(get<string>(fields, i), delim);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// CSV text from rows, "\n" after every row
+pub func csvFormat(rows: Vec<Vec<string>>, delim: string) -> string {
+    let mut out = "";
+    let n = veclen<Vec<string>>(rows);
+    let mut i = 0;
+    while (i < n) {
+        out = out + csvRow(get<Vec<string>>(rows, i), delim) + "\n";
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Reads and parses a CSV file
+pub func csvRead(path: string, delim: string) -> Result<Vec<Vec<string>>, string> {
+    let r = readStr(path);
+    if (!r.is_ok) { return err<Vec<Vec<string>>, string>("cannot read " + path); }
+    return csvParse(r.value, delim);
+}
+
+/// Writes rows to a CSV file (replacing it)
+pub func csvWrite(path: string, rows: Vec<Vec<string>>, delim: string) -> Result<bool, string> {
+    let r = writeStr(path, csvFormat(rows, delim));
+    if (!r.is_ok) { return err<bool, string>("cannot write " + path); }
+    return ok<bool, string>(true);
+}
+
+/// Column index of name in a header row (-1 when absent)
+pub func csvColumn(header: Vec<string>, name: string) -> int {
+    let n = veclen<string>(header);
+    let mut i = 0;
+    while (i < n) {
+        if (get<string>(header, i) == name) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+/// Field `col` of row, or "" when the row is shorter
+pub func csvCell(row: Vec<string>, col: int) -> string {
+    if (col < 0 || col >= veclen<string>(row)) { return ""; }
+    return get<string>(row, col);
+}

@@ -1,0 +1,192 @@
+// Salivo Standard Library: Encoding Module
+// base64 (standard and URL-safe), hex and URL percent-encoding of text.
+// Decoders return Result: malformed input is an error, never silently wrong text.
+// Decoded bytes become a string, so decoded data must not contain a 0 byte.
+module salivo.std.encoding;
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.collections::{Vec, vecNew, push, get, veclen};
+><salivo.std.text::{byteAt};
+
+func b64Alphabet(urlSafe: bool) -> string {
+    if (urlSafe) { return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"; }
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+}
+
+func b64Encode(s: string, urlSafe: bool, pad: bool) -> string {
+    let a = b64Alphabet(urlSafe);
+    let n = len(s);
+    let mut out = "";
+    let mut i = 0;
+    while (i + 2 < n) {
+        let v = byteAt(s, i) * 65536 + byteAt(s, i + 1) * 256 + byteAt(s, i + 2);
+        out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1) +
+            slice(a, (v / 64) % 64, (v / 64) % 64 + 1) + slice(a, v % 64, v % 64 + 1);
+        i = i + 3;
+    }
+    let rest = n - i;
+    if (rest == 1) {
+        let v = byteAt(s, i) * 65536;
+        out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1);
+        if (pad) { out = out + "=="; }
+    } else if (rest == 2) {
+        let v = byteAt(s, i) * 65536 + byteAt(s, i + 1) * 256;
+        out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1) +
+            slice(a, (v / 64) % 64, (v / 64) % 64 + 1);
+        if (pad) { out = out + "="; }
+    }
+    return out;
+}
+
+func b64Value(ch: int, urlSafe: bool) -> int {
+    if (ch >= 65 && ch <= 90) { return ch - 65; }
+    if (ch >= 97 && ch <= 122) { return ch - 71; }
+    if (ch >= 48 && ch <= 57) { return ch + 4; }
+    if (urlSafe) {
+        if (ch == 45) { return 62; }
+        if (ch == 95) { return 63; }
+    } else {
+        if (ch == 43) { return 62; }
+        if (ch == 47) { return 63; }
+    }
+    return 0 - 1;
+}
+
+/// Text from raw bytes; an error when a byte is 0 (strings cannot hold it)
+pub func bytesToText(b: Vec<int>) -> Result<string, string> {
+    let n = veclen<int>(b);
+    if (n == 0) { return ok<string, string>(""); }
+    let a = rtaiobufnew(n);
+    if (a <= 0) { return err<string, string>("out of memory"); }
+    let mut i = 0;
+    while (i < n) {
+        let v = get<int>(b, i);
+        if (v == 0) {
+            let f0 = rtaiobuffree(a);
+            return err<string, string>("decoded data contains a 0 byte");
+        }
+        let x = rtaiobufset(a, i, v);
+        i = i + 1;
+    }
+    let t = rtaiobufstr(a, n);
+    let f = rtaiobuffree(a);
+    return ok<string, string>(t);
+}
+
+func b64Decode(s: string, urlSafe: bool) -> Result<string, string> {
+    let mut n = len(s);
+    while (n > 0 && byteAt(s, n - 1) == 61) { n = n - 1; }
+    if (n % 4 == 1) { return err<string, string>("invalid base64 length"); }
+    let mut out = vecNew<int>();
+    let mut acc = 0;
+    let mut bits = 0;
+    let mut i = 0;
+    while (i < n) {
+        let v = b64Value(byteAt(s, i), urlSafe);
+        if (v < 0) { return err<string, string>("invalid base64 character at " + intstr(i)); }
+        acc = (acc * 64 + v) % 16777216;
+        bits = bits + 6;
+        if (bits >= 8) {
+            bits = bits - 8;
+            let mut d = 1;
+            let mut k = 0;
+            while (k < bits) { d = d * 2; k = k + 1; }
+            out = push<int>(out, (acc / d) % 256);
+        }
+        i = i + 1;
+    }
+    return bytesToText(out);
+}
+
+/// Standard base64 with "=" padding (RFC 4648 section 4)
+pub func base64Encode(s: string) -> string { return b64Encode(s, false, true); }
+
+/// Decodes standard base64 (padding optional)
+pub func base64Decode(s: string) -> Result<string, string> { return b64Decode(s, false); }
+
+/// URL-safe base64 without padding (RFC 4648 section 5), as used by JWT
+pub func base64UrlEncode(s: string) -> string { return b64Encode(s, true, false); }
+
+/// Decodes URL-safe base64 (padding optional)
+pub func base64UrlDecode(s: string) -> Result<string, string> { return b64Decode(s, true); }
+
+/// Lower-case hex of every byte of s
+pub func hexEncode(s: string) -> string {
+    let digits = "0123456789abcdef";
+    let mut out = "";
+    let n = len(s);
+    let mut i = 0;
+    while (i < n) {
+        let b = byteAt(s, i);
+        out = out + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
+        i = i + 1;
+    }
+    return out;
+}
+
+func hexValue(ch: int) -> int {
+    if (ch >= 48 && ch <= 57) { return ch - 48; }
+    if (ch >= 97 && ch <= 102) { return ch - 87; }
+    if (ch >= 65 && ch <= 70) { return ch - 55; }
+    return 0 - 1;
+}
+
+/// Decodes hex (either case)
+pub func hexDecode(s: string) -> Result<string, string> {
+    let n = len(s);
+    if (n % 2 != 0) { return err<string, string>("odd hex length"); }
+    let mut out = vecNew<int>();
+    let mut i = 0;
+    while (i < n) {
+        let hi = hexValue(byteAt(s, i));
+        let lo = hexValue(byteAt(s, i + 1));
+        if (hi < 0 || lo < 0) { return err<string, string>("invalid hex digit at " + intstr(i)); }
+        out = push<int>(out, hi * 16 + lo);
+        i = i + 2;
+    }
+    return bytesToText(out);
+}
+
+func urlUnreserved(b: int) -> bool {
+    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 45 || b == 46 || b == 95 || b == 126;
+}
+
+/// Percent-encodes everything except unreserved characters (RFC 3986), e.g. for query values
+pub func urlEncode(s: string) -> string {
+    let digits = "0123456789ABCDEF";
+    let mut out = "";
+    let n = len(s);
+    let mut start = 0;
+    let mut i = 0;
+    while (i < n) {
+        let b = byteAt(s, i);
+        if (!urlUnreserved(b)) {
+            out = out + slice(s, start, i) + "%" + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return out + slice(s, start, n);
+}
+
+/// Decodes %XX escapes; with plusSpace, "+" becomes a space (form encoding)
+pub func urlDecode(s: string, plusSpace: bool) -> Result<string, string> {
+    let mut out = vecNew<int>();
+    let n = len(s);
+    let mut i = 0;
+    while (i < n) {
+        let b = byteAt(s, i);
+        if (b == 37) {
+            if (i + 2 >= n) { return err<string, string>("truncated % escape at " + intstr(i)); }
+            let hi = hexValue(byteAt(s, i + 1));
+            let lo = hexValue(byteAt(s, i + 2));
+            if (hi < 0 || lo < 0) { return err<string, string>("invalid % escape at " + intstr(i)); }
+            out = push<int>(out, hi * 16 + lo);
+            i = i + 3;
+        } else {
+            if (plusSpace && b == 43) { out = push<int>(out, 32); } else { out = push<int>(out, b); }
+            i = i + 1;
+        }
+    }
+    return bytesToText(out);
+}

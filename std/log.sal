@@ -1,0 +1,58 @@
+// Salivo Standard Library: Log Module
+// Leveled logging with UTC timestamps:
+//   let lg = logger("app", LOG_INFO);                // to stdout
+//   let lg2 = loggerToFile("app", LOG_DEBUG, "app.log");
+//   logInfo(lg, "started");                          // 2026-10-01T12:00:00.123Z INFO app: started
+module salivo.std.log;
+
+><salivo.std.io::{appendStr};
+><salivo.std.datetime::{fromUnixMillis, isoFormat};
+
+pub const LOG_DEBUG = 10;
+pub const LOG_INFO = 20;
+pub const LOG_WARN = 30;
+pub const LOG_ERROR = 40;
+
+pub struct Logger {
+    string name;
+    int level;
+    string path;
+}
+
+/// Logger writing records at or above level to stdout
+pub func logger(name: string, level: int) -> Logger {
+    return Logger { name: name, level: level, path: "" };
+}
+
+/// Logger appending records at or above level to the file at path
+pub func loggerToFile(name: string, level: int, path: string) -> Logger {
+    return Logger { name: name, level: level, path: path };
+}
+
+func levelName(level: int) -> string {
+    if (level >= LOG_ERROR) { return "ERROR"; }
+    if (level >= LOG_WARN) { return "WARN"; }
+    if (level >= LOG_INFO) { return "INFO"; }
+    return "DEBUG";
+}
+
+/// One formatted record (no line ending)
+pub func logFormat(lg: Logger, level: int, msg: string) -> string {
+    return isoFormat(fromUnixMillis(rttimenowms())) + " " + levelName(level) + " " + lg.name + ": " + msg;
+}
+
+/// Writes msg at level when level >= the logger's level; false when the file write failed
+pub func logAt(lg: Logger, level: int, msg: string) -> bool {
+    if (level < lg.level) { return true; }
+    let line = logFormat(lg, level, msg);
+    if (lg.path == "") {
+        outln(line);
+        return true;
+    }
+    return appendStr(lg.path, line + "\n").is_ok;
+}
+
+pub func logDebug(lg: Logger, msg: string) -> bool { return logAt(lg, LOG_DEBUG, msg); }
+pub func logInfo(lg: Logger, msg: string) -> bool { return logAt(lg, LOG_INFO, msg); }
+pub func logWarn(lg: Logger, msg: string) -> bool { return logAt(lg, LOG_WARN, msg); }
+pub func logError(lg: Logger, msg: string) -> bool { return logAt(lg, LOG_ERROR, msg); }

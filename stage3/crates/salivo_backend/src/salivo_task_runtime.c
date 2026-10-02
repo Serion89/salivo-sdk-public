@@ -2832,6 +2832,7 @@ long long salivo_get_active_allocations(void) {
 #define SALIVO_TC_MAX 512
 #define SALIVO_TC_CLASSES (SALIVO_TC_MAX / 16)
 #define SALIVO_TC_DEPTH 64
+#define SALIVO_BIG_BLOCK 4096
 typedef struct { void* head[SALIVO_TC_CLASSES]; int count[SALIVO_TC_CLASSES]; } SalivoTCache;
 #ifdef _WIN32
 static __declspec(thread) SalivoTCache g_tcache;
@@ -2848,6 +2849,12 @@ long long salivo_alloc(long long size_bytes, long long alignment) {
         alignment = 8;
     }
     size_t header_size = sizeof(SalivoMemHeader);
+
+    // Blocks of a page or more start on a cache line: with only malloc's 16-byte alignment every
+    // 64-byte vector load of an array straddles two lines (matmul ran 1.7x slower)
+    if (size_bytes >= SALIVO_BIG_BLOCK && alignment < 64) {
+        alignment = 64;
+    }
 
     // Fast path: standard alignment (<= 16 bytes)
     // On 64-bit systems, malloc returns 16-byte aligned memory.

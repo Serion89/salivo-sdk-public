@@ -1,0 +1,164 @@
+// Salivo Standard Library: Statistics Module
+// Descriptive statistics over Vec<float> (like Python's statistics module).
+// Functions that need at least one value (two for sample variance) panic on too little data.
+module salivo.std.stats;
+
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+><salivo.std.math::{sqrt, floor};
+
+pub func sum(xs: Vec<float>) -> float {
+    let mut s = 0.0;
+    let n = veclen<float>(xs);
+    let mut i = 0;
+    while (i < n) {
+        s = s + get<float>(xs, i);
+        i = i + 1;
+    }
+    return s;
+}
+
+pub func mean(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.mean: no data"); }
+    return sum(xs) / rtinttofloat(n);
+}
+
+pub func minOf(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.minOf: no data"); }
+    let mut m = get<float>(xs, 0);
+    let mut i = 1;
+    while (i < n) {
+        if (get<float>(xs, i) < m) { m = get<float>(xs, i); }
+        i = i + 1;
+    }
+    return m;
+}
+
+pub func maxOf(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.maxOf: no data"); }
+    let mut m = get<float>(xs, 0);
+    let mut i = 1;
+    while (i < n) {
+        if (get<float>(xs, i) > m) { m = get<float>(xs, i); }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// A sorted copy (ascending); merge sort, O(n log n)
+pub func sorted(xs: Vec<float>) -> Vec<float> {
+    let n = veclen<float>(xs);
+    let mut a = vecNew<float>();
+    let mut b = vecNew<float>();
+    let mut i = 0;
+    while (i < n) {
+        a = push<float>(a, get<float>(xs, i));
+        b = push<float>(b, 0.0);
+        i = i + 1;
+    }
+    let mut width = 1;
+    let mut src_is_a = true;
+    while (width < n) {
+        let mut lo = 0;
+        while (lo < n) {
+            let mut mid = lo + width;
+            if (mid > n) { mid = n; }
+            let mut hi = lo + 2 * width;
+            if (hi > n) { hi = n; }
+            let mut p = lo;
+            let mut q = mid;
+            let mut k = lo;
+            while (k < hi) {
+                let mut take_p = q >= hi;
+                if (p < mid && q < hi) {
+                    if (src_is_a) { take_p = get<float>(a, p) <= get<float>(a, q); } else { take_p = get<float>(b, p) <= get<float>(b, q); }
+                }
+                if (p >= mid) { take_p = false; }
+                let mut v = 0.0;
+                if (take_p) {
+                    if (src_is_a) { v = get<float>(a, p); } else { v = get<float>(b, p); }
+                    p = p + 1;
+                } else {
+                    if (src_is_a) { v = get<float>(a, q); } else { v = get<float>(b, q); }
+                    q = q + 1;
+                }
+                if (src_is_a) { set<float>(b, k, v); } else { set<float>(a, k, v); }
+                k = k + 1;
+            }
+            lo = lo + 2 * width;
+        }
+        src_is_a = !src_is_a;
+        width = width * 2;
+    }
+    if (src_is_a) { return a; }
+    return b;
+}
+
+pub func median(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.median: no data"); }
+    let s = sorted(xs);
+    if (n % 2 == 1) { return get<float>(s, n / 2); }
+    return (get<float>(s, n / 2 - 1) + get<float>(s, n / 2)) / 2.0;
+}
+
+/// p-th percentile (0..100) with linear interpolation between closest ranks
+pub func percentile(xs: Vec<float>, p: float) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.percentile: no data"); }
+    let s = sorted(xs);
+    if (p <= 0.0) { return get<float>(s, 0); }
+    if (p >= 100.0) { return get<float>(s, n - 1); }
+    let pos = p / 100.0 * rtinttofloat(n - 1);
+    let lo = floor(pos);
+    let frac = pos - rtinttofloat(lo);
+    if (lo + 1 >= n) { return get<float>(s, n - 1); }
+    return get<float>(s, lo) + (get<float>(s, lo + 1) - get<float>(s, lo)) * frac;
+}
+
+func sumSquares(xs: Vec<float>) -> float {
+    let m = mean(xs);
+    let mut s = 0.0;
+    let n = veclen<float>(xs);
+    let mut i = 0;
+    while (i < n) {
+        let d = get<float>(xs, i) - m;
+        s = s + d * d;
+        i = i + 1;
+    }
+    return s;
+}
+
+/// Sample variance (divides by n - 1)
+pub func variance(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n < 2) { panic("stats.variance: needs at least two values"); }
+    return sumSquares(xs) / rtinttofloat(n - 1);
+}
+
+/// Population variance (divides by n)
+pub func pvariance(xs: Vec<float>) -> float {
+    let n = veclen<float>(xs);
+    if (n == 0) { panic("stats.pvariance: no data"); }
+    return sumSquares(xs) / rtinttofloat(n);
+}
+
+/// Sample standard deviation
+pub func stdev(xs: Vec<float>) -> float { return sqrt(variance(xs)); }
+
+/// Population standard deviation
+pub func pstdev(xs: Vec<float>) -> float { return sqrt(pvariance(xs)); }
+
+/// Vec<float> from Vec<int>
+pub func floats(xs: Vec<int>) -> Vec<float> {
+    let mut out = vecNew<float>();
+    let n = veclen<int>(xs);
+    let mut i = 0;
+    while (i < n) {
+        out = push<float>(out, rtinttofloat(get<int>(xs, i)));
+        i = i + 1;
+    }
+    return out;
+}

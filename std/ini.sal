@@ -1,0 +1,161 @@
+// Salivo Standard Library: INI and .env Module
+// iniParse: "[section]" headers and "key = value" lines; keys come back as "section.key" (top-level
+// keys have no prefix). ";" and "#" start comment lines.
+// dotenvParse: "KEY=value" lines, optional "export ", single or double quotes (double quotes
+// understand \n \t \" \\), "#" comments.
+module salivo.std.ini;
+
+><salivo.std.collections::{Vec, vecNew, push, get, veclen, HashMap, mapNew, put, lookupOr, has};
+><salivo.std.text::{lines, byteAt, findFrom};
+><salivo.std.io::{readStr};
+
+/// Parse result: values when ok, otherwise error names the bad line
+pub struct Config {
+    bool ok;
+    string error;
+    HashMap<string, string> values;
+}
+
+func configError(msg: string) -> Config {
+    return Config { ok: false, error: msg, values: mapNew<string, string>() };
+}
+
+/// Entries of INI text as "section.key" -> value; errors name the bad line
+pub func iniParse(text: string) -> Config {
+    let mut out = mapNew<string, string>();
+    let ls = lines(text);
+    let mut section = "";
+    let n = veclen<string>(ls);
+    let mut i = 0;
+    while (i < n) {
+        let line = trim(get<string>(ls, i));
+        if (line == "" || startswith(line, ";") || startswith(line, "#")) {
+            i = i + 1;
+            continue;
+        }
+        if (startswith(line, "[")) {
+            if (!endswith(line, "]")) { return configError("line " + intstr(i + 1) + ": unclosed section header"); }
+            section = trim(slice(line, 1, len(line) - 1));
+            i = i + 1;
+            continue;
+        }
+        let mut eq = find(line, "=");
+        let colon = find(line, ":");
+        if (eq < 0 || (colon >= 0 && colon < eq)) { eq = colon; }
+        if (eq <= 0) { return configError("line " + intstr(i + 1) + ": expected key = value"); }
+        let key = trim(slice(line, 0, eq));
+        let mut value = trim(slice(line, eq + 1, len(line)));
+        if (len(value) >= 2 && ((startswith(value, "\"") && endswith(value, "\"")) || (startswith(value, "'") && endswith(value, "'")))) {
+            value = slice(value, 1, len(value) - 1);
+        }
+        if (section == "") { out = put<string, string>(out, key, value); }
+        else { out = put<string, string>(out, section + "." + key, value); }
+        i = i + 1;
+    }
+    return Config { ok: true, error: "", values: out };
+}
+
+/// Reads and parses an INI file
+pub func iniRead(path: string) -> Config {
+    let r = readStr(path);
+    if (!r.is_ok) { return configError("cannot read " + path); }
+    return iniParse(r.value);
+}
+
+func unescapeDouble(s: string) -> string {
+    let mut out = "";
+    let n = len(s);
+    let mut start = 0;
+    let mut i = 0;
+    while (i < n) {
+        if (byteAt(s, i) == 92 && i + 1 < n) {
+            out = out + slice(s, start, i);
+            let e = byteAt(s, i + 1);
+            if (e == 110) { out = out + "\n"; }
+            else if (e == 116) { out = out + "\t"; }
+            else if (e == 114) { out = out + "\r"; }
+            else { out = out + slice(s, i + 1, i + 2); }
+            i = i + 2;
+            start = i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return out + slice(s, start, n);
+}
+
+/// Entries of .env text
+pub func dotenvParse(text: string) -> Config {
+    let mut out = mapNew<string, string>();
+    let ls = lines(text);
+    let n = veclen<string>(ls);
+    let mut i = 0;
+    while (i < n) {
+        let mut line = trim(get<string>(ls, i));
+        if (line == "" || startswith(line, "#")) {
+            i = i + 1;
+            continue;
+        }
+        if (startswith(line, "export ")) { line = trim(slice(line, 7, len(line))); }
+        let eq = find(line, "=");
+        if (eq <= 0) { return configError("line " + intstr(i + 1) + ": expected KEY=value"); }
+        let key = trim(slice(line, 0, eq));
+        let mut value = trim(slice(line, eq + 1, len(line)));
+        if (startswith(value, "\"")) {
+            let close = findFrom(value, "\"", 1);
+            let mut c = close;
+            while (c > 0 && byteAt(value, c - 1) == 92) { c = findFrom(value, "\"", c + 1); }
+            if (c < 0) { return configError("line " + intstr(i + 1) + ": unclosed double quote"); }
+            value = unescapeDouble(slice(value, 1, c));
+        } else if (startswith(value, "'")) {
+            let c = findFrom(value, "'", 1);
+            if (c < 0) { return configError("line " + intstr(i + 1) + ": unclosed single quote"); }
+            value = slice(value, 1, c);
+        } else {
+            // an unquoted value ends at " #"
+            let hash = find(value, " #");
+            if (hash >= 0) { value = trim(slice(value, 0, hash)); }
+        }
+        out = put<string, string>(out, key, value);
+        i = i + 1;
+    }
+    return Config { ok: true, error: "", values: out };
+}
+
+/// Reads and parses a .env file
+pub func dotenvRead(path: string) -> Config {
+    let r = readStr(path);
+    if (!r.is_ok) { return configError("cannot read " + path); }
+    return dotenvParse(r.value);
+}
+
+/// The process environment variable key, else the value from vars, else fallback
+pub func envOr(vars: HashMap<string, string>, key: string, fallback: string) -> string {
+    let unset = "<salivo-env-unset>";
+    let osv = env(key, unset);
+    if (osv != unset) { return osv; }
+    return lookupOr<string, string>(vars, key, fallback);
+}
+
+/// Value of key as an integer (fallback when absent or not a number)
+pub func getInt(vars: HashMap<string, string>, key: string, fallback: int) -> int {
+    if (!has<string, string>(vars, key)) { return fallback; }
+    let v = trim(lookupOr<string, string>(vars, key, ""));
+    if (v == "") { return fallback; }
+    let mut i = 0;
+    if (byteAt(v, 0) == 45) { i = 1; }
+    while (i < len(v)) {
+        let c = byteAt(v, i);
+        if (c < 48 || c > 57) { return fallback; }
+        i = i + 1;
+    }
+    return strint(v);
+}
+
+/// Value of key as a boolean: true/yes/on/1 and false/no/off/0 (any case); fallback otherwise
+pub func getBool(vars: HashMap<string, string>, key: string, fallback: bool) -> bool {
+    let v = lower(trim(lookupOr<string, string>(vars, key, "")));
+    if (v == "true" || v == "yes" || v == "on" || v == "1") { return true; }
+    if (v == "false" || v == "no" || v == "off" || v == "0") { return false; }
+    return fallback;
+}

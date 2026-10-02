@@ -1,0 +1,730 @@
+// Salivo Standard Library: Regex Module
+// Regular expressions with Python `re` syntax for the common subset:
+//   literals, . (any byte but \n), [abc] [^a-z] classes, \d \D \w \W \s \S, \b \B, ^ $,
+//   ( ) groups, (?: ) non-capturing groups, |, * + ? {m} {m,} {m,n} and their lazy forms (*? etc.),
+//   escapes \t \n \r \f \v \0 \xHH and \<punctuation>.
+// Matching is leftmost-first (like Python) and runs in O(pattern x text) time: a backtracking VM
+// that never revisits a (instruction, position) state, so no pattern can take exponential time.
+// Bytes, not code points: "." matches one byte, so it splits a multi-byte UTF-8 character.
+//   let re = reCompile("(\\w+)@(\\w+)\\.com");
+//   let m = reSearch(re, "mail bob@example.com now");
+//   if (m.found) { outln(reGroup(m, 1)); }            // bob
+module salivo.std.regex;
+
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen, insert, truncate};
+
+// Instructions are 3 ints: opcode, a, b. Jump targets are relative to the instruction index, so a
+// fragment can be moved or copied without fixing it up.
+const OP_CHAR = 1;
+const OP_ANY = 2;
+const OP_CLASS = 3;
+const OP_CLASSHI = 4;
+const OP_SPLIT = 5;
+const OP_JMP = 6;
+const OP_SAVE = 7;
+const OP_BOL = 8;
+const OP_EOL = 9;
+const OP_WORDB = 10;
+const OP_NWORDB = 11;
+const OP_MATCH = 12;
+
+pub struct Regex {
+    string pattern;
+    Vec<int> code;
+    int groups;
+    string error;
+}
+
+pub struct ReMatch {
+    bool found;
+    string text;
+    Vec<int> spans;
+}
+
+func ub(s: string, i: int) -> int {
+    let b = rtcharat(s, i);
+    if (b < 0) { return b + 256; }
+    return b;
+}
+
+func emit(code: Vec<int>, op: int, a: int, b: int) -> Vec<int> {
+    let mut out: Vec<int> = push<int>(code, op);
+    out = push<int>(out, a);
+    return push<int>(out, b);
+}
+
+func ninstr(code: Vec<int>) -> int { return veclen<int>(code) / 3; }
+
+/// Inserts one instruction at instruction index at (shifts the rest)
+func emitAt(code: Vec<int>, at: int, op: int, a: int, b: int) -> Vec<int> {
+    let mut out: Vec<int> = insert<int>(code, at * 3, b);
+    out = insert<int>(out, at * 3, a);
+    return insert<int>(out, at * 3, op);
+}
+
+func isWordByte(c: int) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+}
+
+// ---- character classes: 128 ASCII bits in two words plus a flag for bytes >= 128 ----
+
+func bitSet(words: Vec<int>, c: int) {
+    if (c >= 128) {
+        set<int>(words, 2, 1);
+        return;
+    }
+    let w = c / 64;
+    set<int>(words, w, get<int>(words, w) | (1 << (c % 64)));
+}
+
+func bitRange(words: Vec<int>, lo: int, hi: int) {
+    let mut c = lo;
+    while (c <= hi) {
+        bitSet(words, c);
+        c = c + 1;
+    }
+}
+
+/// Adds the class escape letter e (d D w W s S) to words; false when e is not a class escape
+func classEscape(words: Vec<int>, e: int) -> bool {
+    let mut tmp = vecNew<int>();
+    tmp = push<int>(tmp, 0);
+    tmp = push<int>(tmp, 0);
+    tmp = push<int>(tmp, 0);
+    let lowerE = e | 32;
+    if (lowerE == 100) { bitRange(tmp, 48, 57); }
+    else if (lowerE == 119) { bitRange(tmp, 48, 57); bitRange(tmp, 65, 90); bitRange(tmp, 97, 122); bitSet(tmp, 95); }
+    else if (lowerE == 115) { bitRange(tmp, 9, 13); bitSet(tmp, 32); }
+    else { return false; }
+    if (e < 97) {
+        // upper case: the complement (all non-ASCII bytes included)
+        set<int>(tmp, 0, 0 - 1 - get<int>(tmp, 0));
+        set<int>(tmp, 1, 0 - 1 - get<int>(tmp, 1));
+        set<int>(tmp, 2, 1);
+    }
+    set<int>(words, 0, get<int>(words, 0) | get<int>(tmp, 0));
+    set<int>(words, 1, get<int>(words, 1) | get<int>(tmp, 1));
+    set<int>(words, 2, get<int>(words, 2) | get<int>(tmp, 2));
+    return true;
+}
+
+func hexv(c: int) -> int {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    if (c >= 65 && c <= 70) { return c - 55; }
+    return 0 - 1;
+}
+
+/// Byte for a single-character escape at pat[i] (after the backslash); st[1] gets the escape length.
+/// -1 when the escape is unknown.
+func escapeByte(pat: string, i: int, st: Vec<int>) -> int {
+    let e = ub(pat, i);
+    set<int>(st, 1, 1);
+    if (e == 116) { return 9; }
+    if (e == 110) { return 10; }
+    if (e == 114) { return 13; }
+    if (e == 102) { return 12; }
+    if (e == 118) { return 11; }
+    if (e == 48) { return 0; }
+    if (e == 120) {
+        if (i + 2 >= len(pat) + 0 || hexv(ub(pat, i + 1)) < 0 || hexv(ub(pat, i + 2)) < 0) { return 0 - 1; }
+        set<int>(st, 1, 3);
+        return hexv(ub(pat, i + 1)) * 16 + hexv(ub(pat, i + 2));
+    }
+    if (isWordByte(e)) { return 0 - 1; }
+    return e;
+}
+
+// ---- parser: st = [pos, scratch, groups, error position (-1 none)] ----
+
+func fail(st: Vec<int>, at: int) {
+    if (get<int>(st, 3) < 0) { set<int>(st, 3, at); }
+}
+
+func parseClass(pat: string, st: Vec<int>, code: Vec<int>) -> Vec<int> {
+    let n = len(pat);
+    let mut i = get<int>(st, 0) + 1;
+    let mut neg = false;
+    if (i < n && ub(pat, i) == 94) {
+        neg = true;
+        i = i + 1;
+    }
+    let mut words = vecNew<int>();
+    words = push<int>(words, 0);
+    words = push<int>(words, 0);
+    words = push<int>(words, 0);
+    let mut first = true;
+    while (i < n && (ub(pat, i) != 93 || first)) {
+        first = false;
+        let mut lo = ub(pat, i);
+        let mut step = 1;
+        if (lo == 92 && i + 1 < n) {
+            if (classEscape(words, ub(pat, i + 1))) {
+                i = i + 2;
+                continue;
+            }
+            lo = escapeByte(pat, i + 1, st);
+            if (lo < 0) {
+                fail(st, i);
+                return code;
+            }
+            step = 1 + get<int>(st, 1);
+        }
+        i = i + step;
+        if (i + 1 < n && ub(pat, i) == 45 && ub(pat, i + 1) != 93) {
+            let mut hi = ub(pat, i + 1);
+            let mut hstep = 1;
+            if (hi == 92 && i + 2 < n) {
+                hi = escapeByte(pat, i + 2, st);
+                hstep = 1 + get<int>(st, 1);
+            }
+            if (hi < lo) {
+                fail(st, i);
+                return code;
+            }
+            bitRange(words, lo, hi);
+            i = i + 1 + hstep;
+        } else {
+            bitSet(words, lo);
+        }
+    }
+    if (i >= n) {
+        fail(st, get<int>(st, 0));
+        return code;
+    }
+    set<int>(st, 0, i + 1);
+    let mut w0 = get<int>(words, 0);
+    let mut w1 = get<int>(words, 1);
+    let mut hi_flag = get<int>(words, 2);
+    if (neg) {
+        w0 = 0 - 1 - w0;
+        w1 = 0 - 1 - w1;
+        hi_flag = 1 - hi_flag;
+    }
+    let c = emit(code, OP_CLASS, w0, w1);
+    return emit(c, OP_CLASSHI, hi_flag, 0);
+}
+
+/// One atom appended to code
+func parseAtom(pat: string, st: Vec<int>, code: Vec<int>) -> Vec<int> {
+    let n = len(pat);
+    let i = get<int>(st, 0);
+    let c = ub(pat, i);
+    if (c == 40) {
+        let mut capture = true;
+        let mut j = i + 1;
+        if (j + 1 < n && ub(pat, j) == 63 && ub(pat, j + 1) == 58) {
+            capture = false;
+            j = j + 2;
+        } else if (j < n && ub(pat, j) == 63) {
+            fail(st, j);
+            return code;
+        }
+        let mut out = code;
+        let mut g = 0;
+        if (capture) {
+            g = get<int>(st, 2) + 1;
+            set<int>(st, 2, g);
+            out = emit(out, OP_SAVE, g * 2, 0);
+        }
+        set<int>(st, 0, j);
+        out = parseAlt(pat, st, out);
+        if (get<int>(st, 3) >= 0) { return out; }
+        if (get<int>(st, 0) >= n || ub(pat, get<int>(st, 0)) != 41) {
+            fail(st, i);
+            return out;
+        }
+        set<int>(st, 0, get<int>(st, 0) + 1);
+        if (capture) { out = emit(out, OP_SAVE, g * 2 + 1, 0); }
+        return out;
+    }
+    if (c == 91) { return parseClass(pat, st, code); }
+    set<int>(st, 0, i + 1);
+    if (c == 46) { return emit(code, OP_ANY, 0, 0); }
+    if (c == 94) { return emit(code, OP_BOL, 0, 0); }
+    if (c == 36) { return emit(code, OP_EOL, 0, 0); }
+    if (c == 41 || c == 42 || c == 43 || c == 63 || c == 123) {
+        fail(st, i);
+        return code;
+    }
+    if (c == 92) {
+        if (i + 1 >= n) {
+            fail(st, i);
+            return code;
+        }
+        let e = ub(pat, i + 1);
+        if (e == 98) {
+            set<int>(st, 0, i + 2);
+            return emit(code, OP_WORDB, 0, 0);
+        }
+        if (e == 66) {
+            set<int>(st, 0, i + 2);
+            return emit(code, OP_NWORDB, 0, 0);
+        }
+        let mut words = vecNew<int>();
+        words = push<int>(words, 0);
+        words = push<int>(words, 0);
+        words = push<int>(words, 0);
+        if (classEscape(words, e)) {
+            set<int>(st, 0, i + 2);
+            let cc = emit(code, OP_CLASS, get<int>(words, 0), get<int>(words, 1));
+            return emit(cc, OP_CLASSHI, get<int>(words, 2), 0);
+        }
+        let b = escapeByte(pat, i + 1, st);
+        if (b < 0) {
+            fail(st, i);
+            return code;
+        }
+        set<int>(st, 0, i + 1 + get<int>(st, 1));
+        return emit(code, OP_CHAR, b, 0);
+    }
+    return emit(code, OP_CHAR, c, 0);
+}
+
+/// Decimal number at pat[i..]; st[1] gets the digit count
+func number(pat: string, i: int, st: Vec<int>) -> int {
+    let mut v = 0;
+    let mut k = i;
+    while (k < len(pat) && ub(pat, k) >= 48 && ub(pat, k) <= 57 && v < 100000) {
+        v = v * 10 + ub(pat, k) - 48;
+        k = k + 1;
+    }
+    set<int>(st, 1, k - i);
+    return v;
+}
+
+/// code with instructions [s, e) repeated min..max times (max < 0: unbounded), greedy unless lazy
+func repeatFrag(code: Vec<int>, s: int, e: int, minR: int, maxR: int, lazy: bool) -> Vec<int> {
+    let len_f = e - s;
+    // the fragment, kept aside, then removed from code
+    let mut frag = vecNew<int>();
+    let mut k = s * 3;
+    while (k < e * 3) {
+        frag = push<int>(frag, get<int>(code, k));
+        k = k + 1;
+    }
+    let mut out = vecNew<int>();
+    k = 0;
+    while (k < s * 3) {
+        out = push<int>(out, get<int>(code, k));
+        k = k + 1;
+    }
+    let mut r = 0;
+    while (r < minR) {
+        k = 0;
+        while (k < len_f * 3) {
+            out = push<int>(out, get<int>(frag, k));
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+    if (maxR < 0) {
+        // L: SPLIT +1, +len+2 ; frag ; JMP -(len+1)
+        if (lazy) { out = emit(out, OP_SPLIT, len_f + 2, 1); } else { out = emit(out, OP_SPLIT, 1, len_f + 2); }
+        k = 0;
+        while (k < len_f * 3) {
+            out = push<int>(out, get<int>(frag, k));
+            k = k + 1;
+        }
+        out = emit(out, OP_JMP, 0 - (len_f + 1), 0);
+    } else {
+        // each optional copy: SPLIT +1, +(rest) ; frag  -- nested so a skipped copy skips the rest
+        let opt = maxR - minR;
+        let mut j = 0;
+        while (j < opt) {
+            let remaining = (opt - j) * (len_f + 1);
+            if (lazy) { out = emit(out, OP_SPLIT, remaining, 1); } else { out = emit(out, OP_SPLIT, 1, remaining); }
+            k = 0;
+            while (k < len_f * 3) {
+                out = push<int>(out, get<int>(frag, k));
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+    }
+    return out;
+}
+
+func parseRepeat(pat: string, st: Vec<int>, code: Vec<int>) -> Vec<int> {
+    let s = ninstr(code);
+    let mut out = parseAtom(pat, st, code);
+    if (get<int>(st, 3) >= 0) { return out; }
+    let n = len(pat);
+    while (get<int>(st, 0) < n) {
+        let i = get<int>(st, 0);
+        let c = ub(pat, i);
+        let mut minR = 0 - 1;
+        let mut maxR = 0 - 1;
+        let mut next = i + 1;
+        if (c == 42) { minR = 0; }
+        else if (c == 43) { minR = 1; }
+        else if (c == 63) { minR = 0; maxR = 1; }
+        else if (c == 123) {
+            let lo = number(pat, i + 1, st);
+            let dl = get<int>(st, 1);
+            if (dl == 0) { return out; }
+            let mut j = i + 1 + dl;
+            let mut hi = lo;
+            if (j < n && ub(pat, j) == 44) {
+                hi = number(pat, j + 1, st);
+                if (get<int>(st, 1) == 0) { hi = 0 - 1; }
+                j = j + 1 + get<int>(st, 1);
+            }
+            if (j >= n || ub(pat, j) != 125) { return out; }
+            if (hi >= 0 && hi < lo) {
+                fail(st, i);
+                return out;
+            }
+            if (lo > 1000 || hi > 1000) {
+                fail(st, i);
+                return out;
+            }
+            minR = lo;
+            maxR = hi;
+            next = j + 1;
+        } else {
+            return out;
+        }
+        let mut lazy = false;
+        if (next < n && ub(pat, next) == 63) {
+            lazy = true;
+            next = next + 1;
+        }
+        let e = ninstr(out);
+        if (e == s) {
+            fail(st, i);
+            return out;
+        }
+        out = repeatFrag(out, s, e, minR, maxR, lazy);
+        set<int>(st, 0, next);
+    }
+    return out;
+}
+
+func parseConcat(pat: string, st: Vec<int>, code: Vec<int>) -> Vec<int> {
+    let mut out = code;
+    let n = len(pat);
+    while (get<int>(st, 0) < n && get<int>(st, 3) < 0) {
+        let c = ub(pat, get<int>(st, 0));
+        if (c == 124 || c == 41) { return out; }
+        out = parseRepeat(pat, st, out);
+    }
+    return out;
+}
+
+func parseAlt(pat: string, st: Vec<int>, code: Vec<int>) -> Vec<int> {
+    let s = ninstr(code);
+    let mut out = parseConcat(pat, st, code);
+    while (get<int>(st, 3) < 0 && get<int>(st, 0) < len(pat) && ub(pat, get<int>(st, 0)) == 124) {
+        set<int>(st, 0, get<int>(st, 0) + 1);
+        // SPLIT +1, +(left+2) ; left ; JMP +(right+1) ; right
+        let left = ninstr(out) - s;
+        out = emitAt(out, s, OP_SPLIT, 1, left + 2);
+        let jmp_at = ninstr(out);
+        out = emit(out, OP_JMP, 0, 0);
+        out = parseConcat(pat, st, out);
+        let right = ninstr(out) - jmp_at - 1;
+        set<int>(out, jmp_at * 3 + 1, right + 1);
+    }
+    return out;
+}
+
+/// Compiles pattern; check reOk / reError before use (matching with a bad pattern finds nothing)
+pub func reCompile(pattern: string) -> Regex {
+    let mut st = vecNew<int>();
+    st = push<int>(st, 0);
+    st = push<int>(st, 0);
+    st = push<int>(st, 0);
+    st = push<int>(st, 0 - 1);
+    let mut code = vecNew<int>();
+    code = emit(code, OP_SAVE, 0, 0);
+    code = parseAlt(pattern, st, code);
+    if (get<int>(st, 3) < 0 && get<int>(st, 0) < len(pattern)) { fail(st, get<int>(st, 0)); }
+    let errAt = get<int>(st, 3);
+    if (errAt >= 0) {
+        return Regex { pattern: pattern, code: vecNew<int>(), groups: 0, error: "bad regex at offset " + intstr(errAt) + ": " + pattern };
+    }
+    code = emit(code, OP_SAVE, 1, 0);
+    code = emit(code, OP_MATCH, 0, 0);
+    return Regex { pattern: pattern, code: code, groups: get<int>(st, 2), error: "" };
+}
+
+pub func reOk(re: Regex) -> bool { return re.error == ""; }
+pub func reError(re: Regex) -> string { return re.error; }
+
+// ---- VM ----
+
+func classHas(w0: int, w1: int, hi: int, c: int) -> bool {
+    if (c >= 128) { return hi != 0; }
+    if (c < 64) { return ((w0 >> c) & 1) == 1; }
+    return ((w1 >> (c - 64)) & 1) == 1;
+}
+
+/// Tries a match starting exactly at `at`; caps[0..] hold group spans on success
+func runAt(code: Vec<int>, text: string, at: int, caps: Vec<int>, visited: int, base: int, width: int, mustEnd: bool) -> bool {
+    let n = len(text);
+    // stack entries: kind, x, y  (kind 0: thread pc=x sp=y; kind 1: restore caps[x] = y)
+    let mut stack = vecNew<int>();
+    stack = push<int>(stack, 0);
+    stack = push<int>(stack, 0);
+    stack = push<int>(stack, at);
+    while (veclen<int>(stack) > 0) {
+        let top = veclen<int>(stack) - 3;
+        let kind = get<int>(stack, top);
+        let x = get<int>(stack, top + 1);
+        let y = get<int>(stack, top + 2);
+        stack = truncate<int>(stack, top);
+        if (kind == 1) {
+            set<int>(caps, x, y);
+            continue;
+        }
+        let mut pc = x;
+        let mut sp = y;
+        let mut alive = true;
+        while (alive) {
+            // a state already explored from here failed (or is being explored): never repeat it
+            let bit = pc * width + (sp - base);
+            let cell = rtmemreadbyte(visited, bit / 8);
+            let mask = 1 << (bit % 8);
+            if ((cell & mask) != 0) {
+                alive = false;
+                continue;
+            }
+            rtmemwritebyte(visited, bit / 8, cell | mask);
+            let op = get<int>(code, pc * 3);
+            let a = get<int>(code, pc * 3 + 1);
+            let b = get<int>(code, pc * 3 + 2);
+            if (op == OP_CHAR) {
+                if (sp < n && ub(text, sp) == a) { pc = pc + 1; sp = sp + 1; } else { alive = false; }
+            } else if (op == OP_ANY) {
+                if (sp < n && ub(text, sp) != 10) { pc = pc + 1; sp = sp + 1; } else { alive = false; }
+            } else if (op == OP_CLASS) {
+                if (sp < n && classHas(a, b, get<int>(code, pc * 3 + 4), ub(text, sp))) { pc = pc + 2; sp = sp + 1; } else { alive = false; }
+            } else if (op == OP_SPLIT) {
+                stack = push<int>(stack, 0);
+                stack = push<int>(stack, pc + b);
+                stack = push<int>(stack, sp);
+                pc = pc + a;
+            } else if (op == OP_JMP) {
+                pc = pc + a;
+            } else if (op == OP_SAVE) {
+                stack = push<int>(stack, 1);
+                stack = push<int>(stack, a);
+                stack = push<int>(stack, get<int>(caps, a));
+                set<int>(caps, a, sp);
+                pc = pc + 1;
+            } else if (op == OP_BOL) {
+                if (sp == 0) { pc = pc + 1; } else { alive = false; }
+            } else if (op == OP_EOL) {
+                if (sp == n || (sp == n - 1 && ub(text, sp) == 10)) { pc = pc + 1; } else { alive = false; }
+            } else if (op == OP_WORDB || op == OP_NWORDB) {
+                let before = sp > 0 && isWordByte(ub(text, sp - 1));
+                let after = sp < n && isWordByte(ub(text, sp));
+                let atB = before != after;
+                if ((op == OP_WORDB) == atB) { pc = pc + 1; } else { alive = false; }
+            } else if (op == OP_MATCH) {
+                if (!mustEnd || sp == n) { return true; }
+                alive = false;
+            } else {
+                alive = false;
+            }
+        }
+    }
+    return false;
+}
+
+func noMatch(text: string) -> ReMatch {
+    return ReMatch { found: false, text: text, spans: vecNew<int>() };
+}
+
+/// Leftmost match at or after `start`
+pub func reSearchFrom(re: Regex, text: string, start: int) -> ReMatch {
+    if (re.error != "" || start < 0 || start > len(text)) { return noMatch(text); }
+    let ni = ninstr(re.code);
+    let width = len(text) - start + 1;
+    let bytes = ni * width / 8 + 1;
+    let visited = rtalloczeroed(bytes, 8);
+    let mut caps = vecNew<int>();
+    let mut g = 0;
+    while (g < (re.groups + 1) * 2) {
+        caps = push<int>(caps, 0 - 1);
+        g = g + 1;
+    }
+    let mut at = start;
+    let mut found = false;
+    while (at <= len(text) && !found) {
+        found = runAt(re.code, text, at, caps, visited, start, width, false);
+        if (!found) { at = at + 1; }
+    }
+    rtdeallocate(visited, bytes, 8);
+    if (!found) { return noMatch(text); }
+    return ReMatch { found: true, text: text, spans: caps };
+}
+
+/// Leftmost match anywhere in text (Python re.search)
+pub func reSearch(re: Regex, text: string) -> ReMatch { return reSearchFrom(re, text, 0); }
+
+func anchored(re: Regex, text: string, mustEnd: bool) -> ReMatch {
+    if (re.error != "") { return noMatch(text); }
+    let ni = ninstr(re.code);
+    let width = len(text) + 1;
+    let bytes = ni * width / 8 + 1;
+    let visited = rtalloczeroed(bytes, 8);
+    let mut caps = vecNew<int>();
+    let mut g = 0;
+    while (g < (re.groups + 1) * 2) {
+        caps = push<int>(caps, 0 - 1);
+        g = g + 1;
+    }
+    let found = runAt(re.code, text, 0, caps, visited, 0, width, mustEnd);
+    rtdeallocate(visited, bytes, 8);
+    if (!found) { return noMatch(text); }
+    return ReMatch { found: true, text: text, spans: caps };
+}
+
+/// Match that must start at offset 0 (Python re.match)
+pub func reMatch(re: Regex, text: string) -> ReMatch { return anchored(re, text, false); }
+
+/// Match covering the whole text (Python re.fullmatch)
+pub func reFullMatch(re: Regex, text: string) -> ReMatch { return anchored(re, text, true); }
+
+/// True when the pattern occurs anywhere in text
+pub func reTest(re: Regex, text: string) -> bool { return reSearch(re, text).found; }
+
+/// Text of group g (0 = whole match); "" when the group did not take part
+pub func reGroup(m: ReMatch, g: int) -> string {
+    if (!m.found || g * 2 + 1 >= veclen<int>(m.spans)) { return ""; }
+    let s = get<int>(m.spans, g * 2);
+    let e = get<int>(m.spans, g * 2 + 1);
+    if (s < 0 || e < 0) { return ""; }
+    return slice(m.text, s, e);
+}
+
+/// Start offset of group g (-1 when absent)
+pub func reStart(m: ReMatch, g: int) -> int {
+    if (!m.found || g * 2 >= veclen<int>(m.spans)) { return 0 - 1; }
+    return get<int>(m.spans, g * 2);
+}
+
+/// End offset of group g (-1 when absent)
+pub func reEnd(m: ReMatch, g: int) -> int {
+    if (!m.found || g * 2 + 1 >= veclen<int>(m.spans)) { return 0 - 1; }
+    return get<int>(m.spans, g * 2 + 1);
+}
+
+/// Every non-overlapping match, left to right
+pub func reFindAll(re: Regex, text: string) -> Vec<ReMatch> {
+    let mut out = vecNew<ReMatch>();
+    let mut pos = 0;
+    while (pos <= len(text)) {
+        let m = reSearchFrom(re, text, pos);
+        if (!m.found) { return out; }
+        out = push<ReMatch>(out, m);
+        let e = get<int>(m.spans, 1);
+        if (e == get<int>(m.spans, 0)) { pos = e + 1; } else { pos = e; }
+    }
+    return out;
+}
+
+/// Text of every match (group 1 when the pattern has groups, like Python re.findall with one group)
+pub func reFindAllText(re: Regex, text: string) -> Vec<string> {
+    let ms = reFindAll(re, text);
+    let mut out = vecNew<string>();
+    let mut g = 0;
+    if (re.groups >= 1) { g = 1; }
+    let mut i = 0;
+    while (i < veclen<ReMatch>(ms)) {
+        out = push<string>(out, reGroup(get<ReMatch>(ms, i), g));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Expands \0..\9 and \g<n>-free replacement text: "\1" is group 1, "\\" a backslash
+func expand(m: ReMatch, repl: string) -> string {
+    let mut out = "";
+    let n = len(repl);
+    let mut i = 0;
+    let mut start = 0;
+    while (i < n) {
+        if (ub(repl, i) == 92 && i + 1 < n) {
+            let d = ub(repl, i + 1);
+            out = out + slice(repl, start, i);
+            if (d >= 48 && d <= 57) { out = out + reGroup(m, d - 48); }
+            else { out = out + slice(repl, i + 1, i + 2); }
+            i = i + 2;
+            start = i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return out + slice(repl, start, n);
+}
+
+/// text with matches replaced by repl (\1..\9 insert groups); count <= 0 replaces all (Python re.sub)
+pub func reReplace(re: Regex, text: string, repl: string, count: int) -> string {
+    let mut out = "";
+    let mut pos = 0;
+    let mut last = 0;
+    let mut done = 0;
+    while (pos <= len(text) && (count <= 0 || done < count)) {
+        let m = reSearchFrom(re, text, pos);
+        if (!m.found) { return out + slice(text, last, len(text)); }
+        let s = get<int>(m.spans, 0);
+        let e = get<int>(m.spans, 1);
+        out = out + slice(text, last, s) + expand(m, repl);
+        last = e;
+        done = done + 1;
+        if (e == s) {
+            if (e < len(text)) { out = out + slice(text, e, e + 1); }
+            last = e + 1;
+            pos = e + 1;
+        } else {
+            pos = e;
+        }
+    }
+    if (last >= len(text)) { return out; }
+    return out + slice(text, last, len(text));
+}
+
+/// Pieces of text between matches (Python re.split without groups)
+pub func reSplit(re: Regex, text: string) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let mut pos = 0;
+    let mut last = 0;
+    while (pos <= len(text)) {
+        let m = reSearchFrom(re, text, pos);
+        if (!m.found) {
+            pos = len(text) + 1;
+        } else {
+            let s = get<int>(m.spans, 0);
+            let e = get<int>(m.spans, 1);
+            if (e == s) {
+                pos = e + 1;
+                if (s > last && s < len(text)) {
+                    out = push<string>(out, slice(text, last, s));
+                    last = s;
+                }
+            } else {
+                out = push<string>(out, slice(text, last, s));
+                last = e;
+                pos = e;
+            }
+        }
+    }
+    return push<string>(out, slice(text, last, len(text)));
+}
+
+/// text with every regex metacharacter escaped
+pub func reEscape(text: string) -> string {
+    let mut out = "";
+    let meta = ".^$*+?{}[]\\|()";
+    let mut i = 0;
+    while (i < len(text)) {
+        let ch = slice(text, i, i + 1);
+        if (find(meta, ch) >= 0) { out = out + "\\"; }
+        out = out + ch;
+        i = i + 1;
+    }
+    return out;
+}

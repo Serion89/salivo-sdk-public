@@ -29,3 +29,36 @@ pub func runParallel(cmds: string) -> int {
     return rtrunparallel(cmds);
 }
 
+
+// ---- Running commands and capturing their output (like Python's subprocess.run) ----
+
+/// What a finished command produced
+pub struct ProcessResult {
+    int code;
+    string stdout;
+    string stderr;
+    bool started;
+}
+
+/// Runs cmd through the system shell (cmd.exe or /bin/sh) and waits; stdout and stderr captured
+pub func run(cmd: string) -> ProcessResult { return runInput(cmd, ""); }
+
+/// Like run, with input fed to the command's stdin
+pub func runInput(cmd: string, input: string) -> ProcessResult {
+    let h = rtsysrun(cmd, input);
+    if (h <= 0) { return ProcessResult { code: 0 - 1, stdout: "", stderr: "could not start: " + cmd, started: false }; }
+    let res = ProcessResult { code: rtsysruncode(h), stdout: rtsysrunout(h), stderr: rtsysrunerr(h), started: true };
+    let f = rtsysrunfree(h);
+    return res;
+}
+
+/// stdout of cmd with trailing newlines removed (like $(cmd) in a shell); "" when it fails
+pub func output(cmd: string) -> string {
+    let r = run(cmd);
+    let mut s = r.stdout;
+    while (len(s) > 0 && (endswith(s, "\n") || endswith(s, "\r"))) { s = slice(s, 0, len(s) - 1); }
+    return s;
+}
+
+/// True when cmd ran and exited with code 0
+pub func succeeded(r: ProcessResult) -> bool { return r.started && r.code == 0; }

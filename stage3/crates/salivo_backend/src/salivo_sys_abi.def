@@ -1,0 +1,56 @@
+# Salivo Stage 38 system telemetry ABI - the single canonical definition (C: salivo_sys_runtime.c).
+#
+# Consumers: crates/salivo_common (aio_abi.rs) for the semantic analyzer and the backend, and
+# compiler/stage3 (runtimeIntrinsic reads this file for `rtsys*` names).
+#
+# Every value is a 64-bit integer (`int`) or a NUL-terminated UTF-8 string (`string`). Process
+# snapshots, service snapshots, counter queries and counters cross the boundary as small handles.
+# Negative `int` results are error codes: -7 invalid argument, -8 OS failure, -10 invalid
+# handle, -11 table full, -12 unsupported platform; rtsysterminate returns -<Win32 error>.
+# Windows only (the text store works everywhere); other platforms report -12 and empty strings.
+# Not thread-safe.
+#
+# Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
+@abi_version 38000
+rtsysprocsnap|salivo_sys_proc_snap|int||brief (kernel query, window enumeration)|one thread|caller owns the snapshot until rtsysprocfree (16 live at most)
+rtsysproccount|salivo_sys_proc_count|int|int|never|one thread|borrows the snapshot
+rtsysprocint|salivo_sys_proc_int|int|int,int,int|never|one thread|field 0 pid 1 ppid 2 threads 3 handles 4 session 5 working set 6 private bytes 7 cpu time (100 ns) 8 create time 9 state (0 running 1 suspended 2 not responding) 10 has window 11 io read 12 io write 13 io other (bytes)
+rtsysproctext|salivo_sys_proc_text|string|int,int,int|never|one thread|field 0 image name 1 main window title; new string owned by the caller
+rtsysprocfree|salivo_sys_proc_free|int|int|never|one thread|frees the snapshot
+rtsysprocpath|salivo_sys_proc_path|string|int|brief|any thread|full executable path or "" when Windows denies access; new string owned by the caller
+rtsysterminate|salivo_sys_terminate|int|int|brief|any thread|0 ended; -7 for pid <= 4; -<Win32 error> otherwise
+rtsysheapblocks|salivo_sys_heap_blocks|int|int,int,int|walks every process heap (locks each briefly)|any thread|busy heap blocks with size in [min, max]: which 0 count, 1 bytes
+rtsysalive|salivo_sys_alive|int|int|never|any thread|1 while the process exists
+rtsyspdhopen|salivo_sys_pdh_open|int||never|one thread|caller owns the query until rtsyspdhclose (16 live at most)
+rtsyspdhadd|salivo_sys_pdh_add|int|int,string|brief|one thread|English counter path (wildcards allowed); the counter lives as long as its query
+rtsyspdhcollect|salivo_sys_pdh_collect|int|int|brief|one thread|samples every counter of the query; rate counters need two samples
+rtsyspdhcount|salivo_sys_pdh_count|int|int|never|one thread|instances in the last sample
+rtsyspdhname|salivo_sys_pdh_name|string|int,int|never|one thread|instance name; new string owned by the caller
+rtsyspdhvalue|salivo_sys_pdh_value|int|int,int|never|one thread|value x 1000 (12.5 reads 12500)
+rtsyspdhclose|salivo_sys_pdh_close|int|int|never|one thread|closes the query and its counters
+rtsysmem|salivo_sys_mem|int|int|never|any thread|0 physical 1 available 2 installed 3 committed 4 commit limit 5 system cache 6 paged pool 7 non-paged pool (bytes) 8 handles 9 processes 10 threads
+rtsysuptimems|salivo_sys_uptime_ms|int||never|any thread|milliseconds since boot
+rtsysregnames|salivo_sys_reg_names|string|int,string|brief|any thread|root 1 HKCU 2 HKLM; value names one per line; new string owned by the caller
+rtsysregkeys|salivo_sys_reg_keys|string|int,string|brief|any thread|subkey names one per line; new string owned by the caller
+rtsysregstr|salivo_sys_reg_str|string|int,string,string|brief|any thread|string or number value as text, "" when absent; new string owned by the caller
+rtsysregbyte|salivo_sys_reg_byte|int|int,string,string,int|brief|any thread|byte at index of a value, -1 when absent
+rtsysfileinfo|salivo_sys_file_info|string|string,string|disk|any thread|version resource string (FileDescription, CompanyName, ...); new string owned by the caller
+rtsysiconpng|salivo_sys_icon_png|int|string,string|disk|one thread|writes the file's 32x32 icon as PNG to the second path; 0 on success
+rtsyssvcsnap|salivo_sys_svc_snap|int||brief (service manager queries)|one thread|caller owns the snapshot until rtsyssvcfree (4 live at most)
+rtsyssvccount|salivo_sys_svc_count|int|int|never|one thread|borrows the snapshot
+rtsyssvcint|salivo_sys_svc_int|int|int,int,int|never|one thread|field 0 state (1 stopped 4 running) 1 pid 2 start type (2 auto 3 manual 4 disabled) 3 delayed auto start
+rtsyssvctext|salivo_sys_svc_text|string|int,int,int|never|one thread|field 0 name 1 display name; new string owned by the caller
+rtsyssvcfree|salivo_sys_svc_free|int|int|never|one thread|frees the snapshot
+rtsysinfo|salivo_sys_info|string|string|brief (first call per key)|one thread|cpu_name computer user gpu_names gpu_drivers disk_model net_name net_desc net_ipv4 net_ipv6; new string owned by the caller
+rtsysinfoint|salivo_sys_info_int|int|string|brief (first call per key)|one thread|cpu_mhz cpu_sockets cpu_cores cpu_logical cpu_l2_kb cpu_l3_kb cpu_virt mem_speed_mts mem_slots mem_slots_used mem_form gpu_total_mb disk_size_gb disk_ssd disk_count net_link_bps session pid
+rtsysopen|salivo_sys_open|int|string|never|any thread|opens a URL or file with its default handler
+rtsysreveal|salivo_sys_reveal|int|string|never|any thread|opens Explorer with the file selected; -7 when the file does not exist
+rtsystextset|salivo_sys_text_set|int|int,string|never|one thread|copies the text into slot 0..65535 (runtime memory, survives request heaps); frees the slot's previous text
+rtsystextget|salivo_sys_text_get|string|int|never|one thread|copy of the slot's text ("" when empty); new string owned by the caller
+rtsysargc|salivo_sys_argc|int||never|any thread|number of command-line arguments, the program itself included (all platforms)
+rtsysargv|salivo_sys_argv|string|int|never|any thread|argument i (0 = the program), UTF-8; "" out of range; new string owned by the caller
+rtsysrun|salivo_sys_run|int|string,string|until the child exits|any thread|runs a command through the system shell with the given stdin text, capturing stdout and stderr; caller owns the result handle until rtsysrunfree (64 live at most); -7 empty command, -8 could not start
+rtsysruncode|salivo_sys_run_code|int|int|never|any thread|the child's exit code
+rtsysrunout|salivo_sys_run_out|string|int|never|any thread|captured stdout; new string owned by the caller
+rtsysrunerr|salivo_sys_run_err|string|int|never|any thread|captured stderr; new string owned by the caller
+rtsysrunfree|salivo_sys_run_free|int|int|never|any thread|frees the result

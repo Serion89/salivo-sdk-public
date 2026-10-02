@@ -1,0 +1,54 @@
+// Salivo Standard Library: Template Module
+// "{{name}}" placeholders filled from a HashMap<string, string>. Whitespace inside the braces is
+// ignored; "{{{{" writes a literal "{{". A missing key is an error, never silently blank.
+// renderHtml escapes values for HTML (& < > " ').
+module salivo.std.template;
+
+><salivo.std.core::{Result, ok, err};
+><salivo.std.collections::{HashMap, has, lookupOr};
+><salivo.std.text::{findFrom};
+
+func renderWith(tpl: string, vars: HashMap<string, string>, html: bool) -> Result<string, string> {
+    let mut out = "";
+    let n = len(tpl);
+    let mut i = 0;
+    while (i < n) {
+        let open = findFrom(tpl, "{{", i);
+        if (open < 0) {
+            out = out + slice(tpl, i, n);
+            i = n;
+        } else if (slice(tpl, open, open + 4) == "{{{{") {
+            out = out + slice(tpl, i, open) + "{{";
+            i = open + 4;
+        } else {
+            let close = findFrom(tpl, "}}", open + 2);
+            if (close < 0) { return err<string, string>("unclosed {{ at byte " + intstr(open)); }
+            let key = trim(slice(tpl, open + 2, close));
+            if (!has<string, string>(vars, key)) { return err<string, string>("missing template value '" + key + "'"); }
+            let mut v = lookupOr<string, string>(vars, key, "");
+            if (html) { v = escapeHtml(v); }
+            out = out + slice(tpl, i, open) + v;
+            i = close + 2;
+        }
+    }
+    return ok<string, string>(out);
+}
+
+/// tpl with every {{key}} replaced by its value
+pub func render(tpl: string, vars: HashMap<string, string>) -> Result<string, string> {
+    return renderWith(tpl, vars, false);
+}
+
+/// Like render, with values HTML-escaped
+pub func renderHtml(tpl: string, vars: HashMap<string, string>) -> Result<string, string> {
+    return renderWith(tpl, vars, true);
+}
+
+/// s safe for HTML text and quoted attributes
+pub func escapeHtml(s: string) -> string {
+    let mut out = replace(s, "&", "&amp;");
+    out = replace(out, "<", "&lt;");
+    out = replace(out, ">", "&gt;");
+    out = replace(out, "\"", "&quot;");
+    return replace(out, "'", "&#39;");
+}

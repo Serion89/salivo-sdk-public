@@ -259,8 +259,8 @@ pub func log10(float v) -> float {
 
 /// Floor function returning largest integer <= v
 pub func floor(float v) -> int {
-    let int_v = v;
-    if (v < 0.0 && v != int_v) {
+    let int_v = rtfloattoint(v);
+    if (v < 0.0 && rtinttofloat(int_v) != v) {
         return int_v - 1;
     }
     return int_v;
@@ -268,8 +268,8 @@ pub func floor(float v) -> int {
 
 /// Ceiling function returning smallest integer >= v
 pub func ceil(float v) -> int {
-    let int_v = v;
-    if (v > 0.0 && v != int_v) {
+    let int_v = rtfloattoint(v);
+    if (v > 0.0 && rtinttofloat(int_v) != v) {
         return int_v + 1;
     }
     return int_v;
@@ -285,13 +285,12 @@ pub func round(float v) -> int {
 
 /// Truncates float decimal part
 pub func trunc(float v) -> int {
-    let int_v = v;
-    return int_v;
+    return rtfloattoint(v);
 }
 
 /// Returns fractional part of float v - trunc(v)
 pub func fract(float v) -> float {
-    return v - trunc(v);
+    return v - rtinttofloat(trunc(v));
 }
 
 // -----------------------------------------------------------------------------

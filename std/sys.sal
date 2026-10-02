@@ -1,0 +1,140 @@
+module salivo.std.sys;
+
+// Stage 38 system telemetry (crates/salivo_backend/src/salivo_sys_abi.def). Windows only; on
+// other platforms every call reports -12 and every string is empty.
+//
+// Snapshots and counter queries are int handles: release them with procFree / svcFree /
+// counterClose. Negative results are error codes: -7 invalid argument, -8 OS failure,
+// -10 invalid handle, -11 table full, -12 unsupported. Not thread-safe: call from one thread
+// (or one async worker).
+
+// ---- Processes ----
+
+/// Takes a snapshot of every process (pid, parent, threads, handles, memory, CPU time, main window)
+pub func procSnapshot() -> int { return rtsysprocsnap(); }
+pub func procFree(snap: int) -> int { return rtsysprocfree(snap); }
+pub func procCount(snap: int) -> int { return rtsysproccount(snap); }
+
+pub func procPid(snap: int, i: int) -> int { return rtsysprocint(snap, i, 0); }
+pub func procParent(snap: int, i: int) -> int { return rtsysprocint(snap, i, 1); }
+pub func procThreads(snap: int, i: int) -> int { return rtsysprocint(snap, i, 2); }
+pub func procHandles(snap: int, i: int) -> int { return rtsysprocint(snap, i, 3); }
+pub func procSession(snap: int, i: int) -> int { return rtsysprocint(snap, i, 4); }
+/// Working set in bytes
+pub func procMemory(snap: int, i: int) -> int { return rtsysprocint(snap, i, 5); }
+/// Private bytes
+pub func procPrivate(snap: int, i: int) -> int { return rtsysprocint(snap, i, 6); }
+/// Total CPU time in 100 ns units
+pub func procCpuTime(snap: int, i: int) -> int { return rtsysprocint(snap, i, 7); }
+pub func procCreated(snap: int, i: int) -> int { return rtsysprocint(snap, i, 8); }
+/// 0 running, 1 suspended, 2 not responding
+pub func procState(snap: int, i: int) -> int { return rtsysprocint(snap, i, 9); }
+pub func procHasWindow(snap: int, i: int) -> bool { return rtsysprocint(snap, i, 10) == 1; }
+/// Bytes read, written and other I/O since the process started
+pub func procIoRead(snap: int, i: int) -> int { return rtsysprocint(snap, i, 11); }
+pub func procIoWrite(snap: int, i: int) -> int { return rtsysprocint(snap, i, 12); }
+pub func procIoOther(snap: int, i: int) -> int { return rtsysprocint(snap, i, 13); }
+/// Image name, such as "chrome.exe"
+pub func procName(snap: int, i: int) -> string { return rtsysproctext(snap, i, 0); }
+/// Title of the main window, "" without one
+pub func procTitle(snap: int, i: int) -> string { return rtsysproctext(snap, i, 1); }
+
+/// Full executable path, "" when Windows denies access
+pub func procPath(pid: int) -> string { return rtsysprocpath(pid); }
+/// Ends a process: 0, -7 for system processes (pid <= 4), -<Win32 error> otherwise
+pub func terminate(pid: int) -> int { return rtsysterminate(pid); }
+pub func processAlive(pid: int) -> bool { return rtsysalive(pid) == 1; }
+/// Busy blocks of this process's heaps with size in [minSize, maxSize] (finding memory a program keeps)
+pub func heapBlocks(minSize: int, maxSize: int) -> int { return rtsysheapblocks(minSize, maxSize, 0); }
+/// Bytes in those blocks
+pub func heapBytes(minSize: int, maxSize: int) -> int { return rtsysheapblocks(minSize, maxSize, 1); }
+
+// ---- Performance counters ----
+
+/// New counter query; add counters with counterAdd, then sample with counterCollect
+pub func counterQuery() -> int { return rtsyspdhopen(); }
+/// Adds an English counter path such as "\Processor(*)\% Processor Time" (wildcards allowed)
+pub func counterAdd(query: int, path: string) -> int { return rtsyspdhadd(query, path); }
+/// Samples every counter of the query. Rate counters read zero until the second sample.
+pub func counterCollect(query: int) -> int { return rtsyspdhcollect(query); }
+pub func counterClose(query: int) -> int { return rtsyspdhclose(query); }
+/// Instances in the last sample (1 for a counter without a wildcard)
+pub func counterInstances(counter: int) -> int { return rtsyspdhcount(counter); }
+pub func counterInstance(counter: int, i: int) -> string { return rtsyspdhname(counter, i); }
+/// Value in thousandths: 12.5 reads 12500
+pub func counterMilli(counter: int, i: int) -> int { return rtsyspdhvalue(counter, i); }
+/// Sum of every instance, in thousandths
+pub func counterSumMilli(counter: int) -> int {
+    let n = rtsyspdhcount(counter);
+    let mut total = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        total = total + rtsyspdhvalue(counter, i);
+    }
+    return total;
+}
+
+// ---- Memory and uptime ----
+
+pub func memTotal() -> int { return rtsysmem(0); }
+pub func memAvailable() -> int { return rtsysmem(1); }
+pub func memInstalled() -> int { return rtsysmem(2); }
+pub func memCommitted() -> int { return rtsysmem(3); }
+pub func memCommitLimit() -> int { return rtsysmem(4); }
+pub func memSystemCache() -> int { return rtsysmem(5); }
+pub func memPagedPool() -> int { return rtsysmem(6); }
+pub func memNonPagedPool() -> int { return rtsysmem(7); }
+pub func systemHandles() -> int { return rtsysmem(8); }
+pub func systemProcesses() -> int { return rtsysmem(9); }
+pub func systemThreads() -> int { return rtsysmem(10); }
+pub func uptimeMs() -> int { return rtsysuptimems(); }
+
+// ---- Services ----
+
+pub func svcSnapshot() -> int { return rtsyssvcsnap(); }
+pub func svcFree(snap: int) -> int { return rtsyssvcfree(snap); }
+pub func svcCount(snap: int) -> int { return rtsyssvccount(snap); }
+pub func svcName(snap: int, i: int) -> string { return rtsyssvctext(snap, i, 0); }
+pub func svcDisplayName(snap: int, i: int) -> string { return rtsyssvctext(snap, i, 1); }
+/// 1 stopped, 2 start pending, 3 stop pending, 4 running, 5-7 continue/pause pending, paused
+pub func svcState(snap: int, i: int) -> int { return rtsyssvcint(snap, i, 0); }
+pub func svcPid(snap: int, i: int) -> int { return rtsyssvcint(snap, i, 1); }
+/// 0 boot, 1 system, 2 automatic, 3 manual, 4 disabled
+pub func svcStartType(snap: int, i: int) -> int { return rtsyssvcint(snap, i, 2); }
+pub func svcDelayed(snap: int, i: int) -> bool { return rtsyssvcint(snap, i, 3) == 1; }
+
+// ---- Registry and files ----
+
+pub func regCurrentUser() -> int { return 1; }
+pub func regLocalMachine() -> int { return 2; }
+/// Value names of a key, one per line
+pub func regValueNames(root: int, path: string) -> string { return rtsysregnames(root, path); }
+/// Subkey names of a key, one per line
+pub func regSubkeys(root: int, path: string) -> string { return rtsysregkeys(root, path); }
+/// String or number value as text, "" when absent
+pub func regText(root: int, path: string, name: string) -> string { return rtsysregstr(root, path, name); }
+/// Byte at index of a value, -1 when absent
+pub func regByte(root: int, path: string, name: string, index: int) -> int { return rtsysregbyte(root, path, name, index); }
+
+/// Version resource string of a file: "FileDescription", "CompanyName", "ProductName", ...
+pub func fileVersionText(path: string, key: string) -> string { return rtsysfileinfo(path, key); }
+/// Writes a file's 32x32 icon as a PNG; 0 on success
+pub func iconToPng(file: string, pngPath: string) -> int { return rtsysiconpng(file, pngPath); }
+/// Opens a URL or file with its default program
+pub func shellOpen(target: string) -> int { return rtsysopen(target); }
+/// Opens Explorer with the file selected
+pub func revealInExplorer(path: string) -> int { return rtsysreveal(path); }
+
+// ---- Hardware facts ----
+
+/// Text facts: cpu_name computer user gpu_names gpu_drivers disk_model net_name net_desc net_ipv4 net_ipv6
+pub func sysInfo(key: string) -> string { return rtsysinfo(key); }
+/// Numeric facts: cpu_mhz cpu_sockets cpu_cores cpu_logical cpu_l2_kb cpu_l3_kb cpu_virt mem_speed_mts
+/// mem_slots mem_slots_used mem_form gpu_total_mb disk_size_gb disk_ssd disk_count net_link_bps session pid
+pub func sysInfoInt(key: string) -> int { return rtsysinfoint(key); }
+
+// ---- Text store ----
+
+/// Keeps a copy of text in slot 0..65535 (runtime memory, outlives request heaps); replaces and frees the old text
+pub func textStore(slot: int, text: string) -> int { return rtsystextset(slot, text); }
+/// Text in a slot, "" when empty
+pub func textLoad(slot: int) -> string { return rtsystextget(slot); }

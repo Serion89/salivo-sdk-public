@@ -1,0 +1,104 @@
+// Salivo Standard Library: Command-Line Arguments (Python's sys.argv plus simple flag parsing)
+//   prog --name Ada -v input.txt
+//   argCount() == 5, arg(1) == "--name", option("--name", "") == "Ada", hasFlag("-v") == true,
+//   positionalExcept(["--name"]) == ["input.txt"]
+// "--key=value" works wherever "--key value" does; "--" ends option parsing.
+module salivo.std.args;
+
+><salivo.std.collections::{Vec, vecNew, push, get, veclen};
+
+/// Number of arguments, the program itself included
+pub func argCount() -> int { return rtsysargc(); }
+
+/// Argument i (0 = the program); "" out of range
+pub func arg(i: int) -> string { return rtsysargv(i); }
+
+/// All arguments after the program name
+pub func argv() -> Vec<string> {
+    let mut out = vecNew<string>();
+    let n = rtsysargc();
+    let mut i = 1;
+    while (i < n) {
+        out = push<string>(out, rtsysargv(i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// The program path as it was started
+pub func programName() -> string { return rtsysargv(0); }
+
+/// True when name ("-v", "--verbose") appears before a "--" separator
+pub func hasFlag(name: string) -> bool {
+    let n = rtsysargc();
+    let mut i = 1;
+    while (i < n) {
+        let a = rtsysargv(i);
+        if (a == "--") { return false; }
+        if (a == name) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// Value of "--name value" or "--name=value"; fallback when absent
+pub func option(name: string, fallback: string) -> string {
+    let n = rtsysargc();
+    let mut i = 1;
+    while (i < n) {
+        let a = rtsysargv(i);
+        if (a == "--") { return fallback; }
+        if (a == name && i + 1 < n) { return rtsysargv(i + 1); }
+        if (startswith(a, name + "=")) { return slice(a, len(name) + 1, len(a)); }
+        i = i + 1;
+    }
+    return fallback;
+}
+
+/// Integer value of an option; fallback when absent or not a number
+pub func optionInt(name: string, fallback: int) -> int {
+    let v = trim(option(name, ""));
+    if (v == "") { return fallback; }
+    let mut i = 0;
+    if (startswith(v, "-")) { i = 1; }
+    if (i >= len(v)) { return fallback; }
+    while (i < len(v)) {
+        let c = charat(v, i);
+        if (c < 48 || c > 57) { return fallback; }
+        i = i + 1;
+    }
+    return strint(v);
+}
+
+/// Arguments that are not options: anything not starting with "-", plus everything after "--".
+/// Options listed in valueOptions (e.g. ["--name", "-o"]) consume the argument after them.
+pub func positionalExcept(valueOptions: Vec<string>) -> Vec<string> {
+    let mut out = vecNew<string>();
+    let n = rtsysargc();
+    let mut i = 1;
+    let mut rest = false;
+    while (i < n) {
+        let a = rtsysargv(i);
+        if (rest) {
+            out = push<string>(out, a);
+        } else if (a == "--") {
+            rest = true;
+        } else if (startswith(a, "-") && a != "-") {
+            let mut j = 0;
+            while (j < veclen<string>(valueOptions)) {
+                if (get<string>(valueOptions, j) == a) {
+                    i = i + 1;
+                    j = veclen<string>(valueOptions);
+                }
+                j = j + 1;
+            }
+        } else {
+            out = push<string>(out, a);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Arguments that are not options (no option takes a value)
+pub func positional() -> Vec<string> { return positionalExcept(vecNew<string>()); }

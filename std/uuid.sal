@@ -1,0 +1,47 @@
+// Salivo Standard Library: UUID Module
+// Random (version 4) UUIDs from the OS secure random source, plus validation.
+module salivo.std.uuid;
+
+><salivo.std.text::{byteAt};
+
+/// A random version 4 UUID, e.g. "3f2b8c1e-9d4a-4f6b-8e2c-1a7d5b9c0e3f"
+pub func uuid4() -> string {
+    let digits = "0123456789abcdef";
+    let a = rtalloc(16, 8);
+    let r = rtcryptorandombytes(a, 16);
+    if (r < 0) {
+        rtdeallocate(a, 16, 8);
+        panic("uuid4: OS random source unavailable");
+    }
+    let mut out = "";
+    let mut i = 0;
+    while (i < 16) {
+        let mut b = rtmemreadbyte(a, i);
+        if (b < 0) { b = b + 256; }
+        // version 4 in the high nibble of byte 6, RFC 4122 variant (10xx) in byte 8
+        if (i == 6) { b = 64 + b % 16; }
+        if (i == 8) { b = 128 + b % 64; }
+        if (i == 4 || i == 6 || i == 8 || i == 10) { out = out + "-"; }
+        out = out + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
+        i = i + 1;
+    }
+    rtdeallocate(a, 16, 8);
+    return out;
+}
+
+/// True when s has the 8-4-4-4-12 hex UUID form (either case)
+pub func isUuid(s: string) -> bool {
+    if (len(s) != 36) { return false; }
+    let mut i = 0;
+    while (i < 36) {
+        let c = byteAt(s, i);
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != 45) { return false; }
+        } else {
+            let hex = (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+            if (!hex) { return false; }
+        }
+        i = i + 1;
+    }
+    return true;
+}

@@ -2259,7 +2259,18 @@ func applyLimits(srv: WebServer, conn: int) -> bool {
 }
 
 /// One connection: HTTP/1.1 requests are served in order; HTTP/2 streams run concurrently.
+/// Connection task. It runs in its own heap, ended when the connection closes, so what the
+/// connection allocates (limits, results, loop temporaries) is freed with it; shared server
+/// state is touched only with the heap detached (registerConn may grow the server's vectors).
 func serveConn(cs: ConnState) -> int {
+    let heap = rtaioheap(0, 0);
+    let r = serveConnIn(cs, heap);
+    // Locals of serveConnIn are gone by now; nothing here refers to the connection heap
+    if (heap > 0) { let e = rtaioheap(3, heap); }
+    return r;
+}
+
+func serveConnIn(cs: ConnState, heap: int) -> int {
     let srv = cs.srv;
     let conn = rtaiohttpserver(cs.sock, protoAuto());
     if (conn < 0) {
@@ -2271,7 +2282,9 @@ func serveConn(cs: ConnState) -> int {
         return 0;
     }
     cs.conn = conn;
+    if (heap > 0) { let dh = rtaioheap(1, 0); }
     cs.slot = registerConn(srv, cs.sock, conn);
+    if (heap > 0) { let ah = rtaioheap(2, heap); }
     cs.inflight = rtatomicintcreate(0);
     let mut open = true;
     while (open) {

@@ -7,7 +7,7 @@
 **A compiled systems language with a self-hosted compiler, deterministic cleanup and tiny native binaries**
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
-[![Version](https://img.shields.io/badge/version-v1.0.15-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.16-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux%20x64-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
@@ -36,6 +36,16 @@
 - [Author & Maintainer](#author--maintainer)
 
 ---
+
+## What's new in 1.0.16
+
+- **`salivo.std.sys`** (Windows): processes (CPU time, memory, threads, handles, window titles, responsiveness), performance counters by English path (CPU per core, disk, network, GPU, memory lists), services, registry, executable version strings and icons, hardware facts (CPU caches, memory slots and speed, disks, GPUs, network adapter), `terminate`, `shellOpen`, `revealInExplorer`, a text store for long-lived strings and a heap census.
+- **`std.args`** and **`std.process.run`** (captured stdout, stderr and exit code).
+- New libraries: text, regex, json, csv, encoding, datetime, stats, uuid, ini, template, log, and a MongoDB client in `salivo.std.db`.
+- **`spm run <script>`** runs `[scripts]` from `salivo.toml`; `spm run --list` shows them.
+- Stage 3 prints assert messages and builds packages; `std.web` runs each connection in its own heap.
+- VS Code / Antigravity extension 1.0.16.
+- Linux builds stay at 1.0.15 for this release.
 
 ## What Salivo is
 
@@ -101,7 +111,7 @@ Salivo builds faster, lighter and smaller than Zig; Zig currently generates fast
 
 ### Windows (x64)
 
-1. Download **`salivo-sdk-1.0.15-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
+1. Download **`salivo-sdk-1.0.16-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
 2. Double-click **`Salivo Setup.exe`**. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
 3. Open a new terminal (or restart VS Code).
 

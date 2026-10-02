@@ -39,3 +39,8 @@ rtdbsetlimit|salivo_db_set_limit|int|int,int,int|never|any thread|key 0 connect 
 rtdbtokennew|salivo_db_token_new|int||never|any thread|caller owns the cancellation token until rtdbtokenfree
 rtdbtokencancel|salivo_db_token_cancel|int|int|never|any thread|the checkout or statement using the token stops within 50 ms
 rtdbtokenfree|salivo_db_token_free|int|int|never|any thread|none
+rtdbmgopen|salivo_mongo_open|int|string,int|network|any thread|MongoDB connection (mongodb:// URL, connect timeout ms; 0 = 5000) authenticated with SCRAM-SHA-256 when the URL has a user; caller owns the handle until rtdbmgclose; -7 bad URL, -8 connect/auth failure (rtdbmgerror(0))
+rtdbmgcommand|salivo_mongo_command|string|int,string,string,int|network|one thread per handle|runs a command (Extended JSON object) against a database, timeout ms (0 = none); reply as Extended JSON, "" on failure (rtdbmgerror); new string owned by the caller
+rtdbmgerror|salivo_mongo_error|string|int|never|any thread|last error of a handle, or of the last open (0); new string owned by the caller
+rtdbmgclose|salivo_mongo_close|int|int|never|any thread|closes the connection; -13 while a command runs, -10 invalid handle
+rtdbmgbson|salivo_mongo_bson_roundtrip|string|string|never|any thread|JSON -> BSON -> JSON (tests); "" when the JSON is not an object
