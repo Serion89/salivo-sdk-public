@@ -1,13 +1,15 @@
 module salivo.std.game;
 
-// Stage 38.2 2D/3D game layer (docs/STAGE_38_2_GAME.md) on top of the Stage 38.1 desktop platform
+// Stage 38.2 2D/3D game layer (docs/STAGE_38_2_GAME.md; sprite sheets, animation and text: Stage 38.3,
+// docs/STAGE_38_3_ENGINE.md) on top of the Stage 38.1 desktop platform
 // (salivo.std.desktop): one native window, its event queue and its OpenGL context. Windows only.
 //
 // Frame order, every frame:
 //   gameFrame   poll window events, update input state (held / pressed / released), advance time
 //   (your fixed updates: gameFixedSteps) and variable update using gameDelta
 //   gameBegin   start the frame and clear it
-//   draw calls  drawSprite / sceneDraw (2D), camera3d + drawMesh (3D)
+//   draw calls  drawSprite / drawRegion / drawAnim / drawText / sceneDraw (2D), camera3d + drawMesh (3D),
+//               cameraScreen for a HUD
 //   gameEnd     present (paced by vsync)
 // Focus policy: losing focus pauses the game (gameDelta is 0, keys are released); regaining it
 // resumes without a time jump. Closing the window ends gameFrame's loop; gameShutdown destroys
@@ -20,7 +22,8 @@ module salivo.std.game;
 ><salivo.std.desktop::{
     windowCreate, windowDestroy, windowShow, eventPoll, eventKey, eventFocused, eventX, eventY,
     eventButton, frameBegin, frameClear, present, timeMicros, EventClose, EventFocus, EventKeyDown,
-    EventKeyUp, EventMouseMove, EventMouseDown, EventMouseUp, EventResize, eventWidth, eventHeight
+    EventKeyUp, EventMouseMove, EventMouseDown, EventMouseUp, EventResize, eventWidth, eventHeight,
+    keyDown, mouseDown
 };
 ><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
 
@@ -127,6 +130,25 @@ pub func gameFrame(g: Game) -> bool {
         g.running = false;
         return false;
     }
+    // The runtime's key and button state is authoritative: repair whatever an event dropped by a
+    // full queue left out of date, so nothing stays stuck.
+    for (let mut k = 0; k < 256; k = k + 1) {
+        let mut down = 0;
+        if (keyDown(k)) { down = 1; }
+        if (get<int>(g.keys, k) != down) {
+            if (down == 1) { set<int>(g.pressed, k, 1); } else { set<int>(g.released, k, 1); }
+            set<int>(g.keys, k, down);
+        }
+    }
+    for (let mut b = 1; b <= 3; b = b + 1) {
+        let held = (g.buttons / bit(b)) % 2 == 1;
+        if (mouseDown(b) && !held) {
+            g.buttons = g.buttons + bit(b);
+            if ((g.clicked / bit(b)) % 2 == 0) { g.clicked = g.clicked + bit(b); }
+        } else if (!mouseDown(b) && held) {
+            g.buttons = g.buttons - bit(b);
+        }
+    }
     let now = timeMicros();
     let mut dt = now - g.lastUs;
     g.lastUs = now;
@@ -186,9 +208,15 @@ pub func keyReleased(g: Game, key: int) -> bool {
     if (key < 0 || key > 255) { return false; }
     return get<int>(g.released, key) == 1;
 }
-pub func mouseHeld(g: Game, button: int) -> bool { return (g.buttons / bit(button)) % 2 == 1; }
+pub func mouseHeld(g: Game, button: int) -> bool {
+    if (button < 1 || button > 3) { return false; }
+    return (g.buttons / bit(button)) % 2 == 1;
+}
 /// Went down since the previous gameFrame
-pub func mouseClicked(g: Game, button: int) -> bool { return (g.clicked / bit(button)) % 2 == 1; }
+pub func mouseClicked(g: Game, button: int) -> bool {
+    if (button < 1 || button > 3) { return false; }
+    return (g.clicked / bit(button)) % 2 == 1;
+}
 pub func pointerX(g: Game) -> int { return g.mx; }
 pub func pointerY(g: Game) -> int { return g.my; }
 pub func pointerDeltaX(g: Game) -> int { return g.mx - g.pmx; }
@@ -205,12 +233,16 @@ pub func gameBegin(g: Game, color: int) -> int {
 pub func gameEnd(g: Game) -> int { return present(g.win); }
 
 /// Destroys the window with every texture, mesh and shader created for it. Idempotent for the
-/// game: later frames return false and draw calls return -10.
+/// game: later frames return false and draw calls return -10. On failure (-13 from another
+/// thread) the game keeps the handle, so shutdown can be retried from the owning thread.
 pub func gameShutdown(g: Game) -> int {
     g.running = false;
     if (g.win <= 0) { return 0; }
     let rc = windowDestroy(g.win);
-    g.win = -10;
+    if (rc == 0 || rc == -10) {
+        g.win = -10;
+        return 0;
+    }
     return rc;
 }
 
@@ -222,6 +254,112 @@ pub func camera2d(g: Game, x: int, y: int, zoom: int, rotation: int) -> int { re
 pub func drawSprite(g: Game, x: int, y: int, width: int, height: int, rotation: int, color: int, texture: int) -> int {
     return rtsysdrawquad(g.win, x, y, width, height, rotation, color, texture);
 }
+
+/// Screen pixels again (origin top-left) for the rest of the frame: drops a 2D or 3D camera. Draw a
+/// HUD or GUI after it.
+pub func cameraScreen(g: Game) -> int { return rtsyscamscreen(g.win); }
+
+// ---- Sprite sheets, animation and text (Stage 38.3) ----
+
+/// Draws the texel rectangle (sx, sy, sw, sh) of a texture (a sprite-sheet frame or a tile) as a
+/// quad centered on (x, y), width x height (a negative size mirrors), rotated, tinted by color.
+/// -7 when the rectangle leaves the texture, -10 for texture 0.
+pub func drawRegion(g: Game, x: int, y: int, width: int, height: int, rotation: int, color: int, texture: int, sx: int, sy: int, sw: int, sh: int) -> int {
+    return rtsysdrawregion(g.win, x, y, width, height, rotation, color, texture, sx, sy, sw, sh);
+}
+
+/// Frame animation over a sprite sheet cut into frameW x frameH cells, numbered row-major from 0
+pub struct SpriteAnim {
+    int texture;
+    int frameW;
+    int frameH;
+    int first;
+    int count;
+    int frameUs;
+    bool looping;
+    int frame;
+    int elapsed;
+    bool done;
+}
+
+func animFrameMicros(fps: int) -> int {
+    if (fps <= 0) { return 0; }
+    return 1000000 / fps;
+}
+
+/// Clip of count cells starting at cell first, fps frames per second (0 holds the first frame),
+/// looping or stopping on its last frame
+pub func animNew(texture: int, frameW: int, frameH: int, first: int, count: int, fps: int, looping: bool) -> SpriteAnim {
+    return SpriteAnim {
+        texture: texture, frameW: frameW, frameH: frameH, first: first, count: count, frameUs: animFrameMicros(fps),
+        looping: looping, frame: 0, elapsed: 0, done: false
+    };
+}
+/// Switches to another clip of the same sheet. Playing the clip already running changes nothing.
+pub func animPlay(a: SpriteAnim, first: int, count: int, fps: int, looping: bool) {
+    let us = animFrameMicros(fps);
+    if (a.first == first && a.count == count && a.frameUs == us && a.looping == looping) { return; }
+    a.first = first;
+    a.count = count;
+    a.frameUs = us;
+    a.looping = looping;
+    animReset(a);
+}
+/// Back to the clip's first frame
+pub func animReset(a: SpriteAnim) {
+    a.frame = 0;
+    a.elapsed = 0;
+    a.done = false;
+}
+/// Advances by dt microseconds (gameDelta). A clip that does not loop ends once its last frame has
+/// been shown for a full frame time.
+pub func animUpdate(a: SpriteAnim, dt: int) {
+    if (a.count <= 0 || a.frameUs <= 0 || a.done || dt <= 0) { return; }
+    a.elapsed = a.elapsed + dt;
+    let steps = a.elapsed / a.frameUs;
+    a.elapsed = a.elapsed % a.frameUs;
+    if (a.looping) {
+        a.frame = (a.frame + steps) % a.count;
+    } else if (a.frame + steps >= a.count) {
+        a.frame = a.count - 1;
+        a.elapsed = 0;
+        a.done = true;
+    } else {
+        a.frame = a.frame + steps;
+    }
+}
+/// Sheet cell being shown
+pub func animCell(a: SpriteAnim) -> int { return a.first + a.frame; }
+/// Frame index within the clip (0 .. count - 1)
+pub func animFrame(a: SpriteAnim) -> int { return a.frame; }
+/// True once a clip that does not loop has finished
+pub func animDone(a: SpriteAnim) -> bool { return a.done; }
+/// Draws the current frame centered on (x, y), width x height; flip mirrors it horizontally.
+/// -7 when the cell lies outside the sheet.
+pub func drawAnim(g: Game, a: SpriteAnim, x: int, y: int, width: int, height: int, rotation: int, color: int, flip: bool) -> int {
+    let tw = rtsystexsize(a.texture, 0);
+    if (tw < 0) { return tw; }
+    if (a.frameW <= 0 || a.frameH <= 0 || a.count <= 0 || a.first < 0) { return -7; }
+    let cols = tw / a.frameW;
+    if (cols <= 0) { return -7; }
+    let cell = animCell(a);
+    let mut w = width;
+    if (flip) { w = 0 - width; }
+    return rtsysdrawregion(g.win, x, y, w, height, rotation, color, a.texture, (cell % cols) * a.frameW, (cell / cols) * a.frameH, a.frameW, a.frameH);
+}
+
+/// Font from a .ttf / .otf / .ttc file or an installed family name ("Arial", "Consolas"), em height
+/// size pixels (4..256). It is a texture of the game's window (textureDestroy frees it). -16 missing
+/// file or unknown family, -17 unreadable font file. Code points 32..255 render; others draw as ?.
+pub func fontLoad(g: Game, source: string, size: int) -> int { return rtsysfontload(g.win, source, size); }
+/// Draws text with its top-left at (x, y) (newline starts a line). Returns the widest line in pixels.
+pub func drawText(g: Game, font: int, text: string, x: int, y: int, color: int) -> int {
+    return rtsysdrawtext(g.win, font, text, x, y, color);
+}
+/// Width of the widest line in pixels
+pub func textWidth(font: int, text: string) -> int { return rtsystextsize(font, text, 0); }
+/// Lines x line height in pixels ("" is one line)
+pub func textHeight(font: int, text: string) -> int { return rtsystextsize(font, text, 1); }
 
 // ---- Textures (owned by the game's window) ----
 
@@ -245,13 +383,16 @@ pub func meshVertex(mesh: int, x: int, y: int, z: int, color: int, u: int, v: in
 pub func meshVertexCount(mesh: int) -> int { return rtsysmeshcount(mesh); }
 pub func meshDestroy(mesh: int) -> int { return rtsysmeshdestroy(mesh); }
 
-func face(m: int, ax: int, ay: int, az: int, bx: int, by: int, bz: int, cx: int, cy: int, cz: int, dx: int, dy: int, dz: int, color: int) {
-    meshVertex(m, ax, ay, az, color, 0, 0);
-    meshVertex(m, bx, by, bz, color, 1000, 0);
-    meshVertex(m, cx, cy, cz, color, 1000, 1000);
-    meshVertex(m, ax, ay, az, color, 0, 0);
-    meshVertex(m, cx, cy, cz, color, 1000, 1000);
-    meshVertex(m, dx, dy, dz, color, 0, 1000);
+// Two triangles; returns the first error, else 0
+func face(m: int, ax: int, ay: int, az: int, bx: int, by: int, bz: int, cx: int, cy: int, cz: int, dx: int, dy: int, dz: int, color: int) -> int {
+    let mut rc = meshVertex(m, ax, ay, az, color, 0, 0);
+    if (rc >= 0) { rc = meshVertex(m, bx, by, bz, color, 1000, 0); }
+    if (rc >= 0) { rc = meshVertex(m, cx, cy, cz, color, 1000, 1000); }
+    if (rc >= 0) { rc = meshVertex(m, ax, ay, az, color, 0, 0); }
+    if (rc >= 0) { rc = meshVertex(m, cx, cy, cz, color, 1000, 1000); }
+    if (rc >= 0) { rc = meshVertex(m, dx, dy, dz, color, 0, 1000); }
+    if (rc < 0) { return rc; }
+    return 0;
 }
 
 /// Cube centered on the origin with edge length size (milli-units), one color per face
@@ -260,12 +401,16 @@ pub func meshCube(g: Game, size: int, colorFront: int, colorBack: int, colorLeft
     let m = meshCreate(g);
     if (m < 0) { return m; }
     let h = size / 2;
-    face(m, 0 - h, 0 - h, h, h, 0 - h, h, h, h, h, 0 - h, h, h, colorFront);
-    face(m, h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, colorBack);
-    face(m, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, h, 0 - h, colorLeft);
-    face(m, h, 0 - h, h, h, 0 - h, 0 - h, h, h, 0 - h, h, h, h, colorRight);
-    face(m, 0 - h, h, h, h, h, h, h, h, 0 - h, 0 - h, h, 0 - h, colorTop);
-    face(m, 0 - h, 0 - h, 0 - h, h, 0 - h, 0 - h, h, 0 - h, h, 0 - h, 0 - h, h, colorBottom);
+    let mut rc = face(m, 0 - h, 0 - h, h, h, 0 - h, h, h, h, h, 0 - h, h, h, colorFront);
+    if (rc == 0) { rc = face(m, h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, colorBack); }
+    if (rc == 0) { rc = face(m, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, h, 0 - h, colorLeft); }
+    if (rc == 0) { rc = face(m, h, 0 - h, h, h, 0 - h, 0 - h, h, h, 0 - h, h, h, h, colorRight); }
+    if (rc == 0) { rc = face(m, 0 - h, h, h, h, h, h, h, h, 0 - h, 0 - h, h, 0 - h, colorTop); }
+    if (rc == 0) { rc = face(m, 0 - h, 0 - h, 0 - h, h, 0 - h, 0 - h, h, 0 - h, h, 0 - h, 0 - h, h, colorBottom); }
+    if (rc < 0) {
+        meshDestroy(m); // fail closed: no partial cube escapes
+        return rc;
+    }
     return m;
 }
 
@@ -383,9 +528,16 @@ pub func entityMove(s: Scene, id: int, dx: int, dy: int) -> int {
     set<int>(s.y, slot, get<int>(s.y, slot) + dy);
     return 0;
 }
+/// Size, tint and texture (0 = solid color) of an entity: -7 for a size outside 0..1048576, -10 for
+/// a dead entity or a destroyed texture. A texture of another window is still caught by sceneDraw (-14).
 pub func entitySprite(s: Scene, id: int, width: int, height: int, color: int, texture: int) -> int {
     let slot = slotOf(s, id);
     if (slot < 0) { return -10; }
+    if (width < 0 || height < 0 || width > 1048576 || height > 1048576) { return -7; }
+    if (texture != 0) {
+        let tw = rtsystexsize(texture, 0);
+        if (tw < 0) { return tw; }
+    }
     set<int>(s.w, slot, width);
     set<int>(s.h, slot, height);
     set<int>(s.color, slot, color);

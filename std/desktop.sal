@@ -125,7 +125,10 @@ pub func keyDown(key: int) -> bool { return rtsyskeydown(key) == 1; }
 pub func mouseX() -> int { return rtsysmouse(0); }
 pub func mouseY() -> int { return rtsysmouse(1); }
 /// True while the button (1 left, 2 right, 3 middle) is held
-pub func mouseDown(button: int) -> bool { return (rtsysmouse(2) / pow2(button)) % 2 == 1; }
+pub func mouseDown(button: int) -> bool {
+    if (button < 1 || button > 3) { return false; }
+    return (rtsysmouse(2) / pow2(button)) % 2 == 1;
+}
 
 func pow2(n: int) -> int {
     let mut r = 1;
@@ -155,7 +158,7 @@ pub func rgba(r: int, g: int, b: int, a: int) -> int { return r * 16777216 + g *
 pub func timeMicros() -> int { return rtsystimeus(); }
 
 /// Live native objects: 0 windows, 1 textures, 2 meshes, 3 shaders; 4 draw calls so far,
-/// 5 events dropped because the queue (1024) was full, 6 queued events
+/// 5 events dropped because the queue (1024) was full, 6 queued events, 7 live sounds (salivo.std.audio)
 pub func desktopStat(which: int) -> int { return rtsysgfxstat(which); }
 
 /// OpenGL driver string of the window's context: 0 vendor, 1 renderer, 2 version ("" when invalid)

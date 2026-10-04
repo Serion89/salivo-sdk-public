@@ -1,0 +1,632 @@
+module salivo.std.physics2d;
+
+// Stage 38.3 2D physics (docs/STAGE_38_3_ENGINE.md). Pure Salivo, integer math, deterministic.
+//
+// Units: positions and sizes in pixels (kept in milli-pixels inside, so slow motion is not lost),
+// velocities in pixels per second, gravity in pixels per second squared, time in microseconds,
+// restitution and friction x1000 (1000 = 1.0). y grows downward, like the screen.
+//
+// Bodies are axis-aligned boxes or circles, static (never move) or dynamic (moved by gravity,
+// velocity and contacts; every dynamic body has the same mass). A sensor reports overlap
+// (bodiesOverlap) but never collides. Ids carry a generation like scene entities: a destroyed id
+// is rejected (-10) forever.
+//
+// worldStep, per dynamic body: gravity, then motion. With a tile grid (worldSetGrid, or
+// tilemapAttach in salivo.std.tilemap) the body moves along x and then along y, swept tile by tile
+// against solid cells, so it never tunnels through a tile and never catches on the seams between
+// tiles; a circle uses its bounding box against the grid. Then every pair of colliding bodies is
+// separated and gets an impulse (restitution: the larger of the two; Coulomb friction: the geometric
+// mean, so a frictionless body slides on anything; against the grid the body's own friction).
+// A body pushed upward by a contact is grounded until the next step.
+//
+// ponytail: O(n^2) body pairs per step and no swept body-body test: fine for a few hundred bodies
+// stepped at a fixed rate (gameFixedSteps); add a grid broadphase and swept shapes beyond that.
+
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+
+pub struct World {
+    int gx;
+    int gy;
+    Vec<int> gen;
+    Vec<int> alive;
+    Vec<int> dyn;
+    Vec<int> sensor;
+    Vec<int> circle;
+    Vec<int> x;
+    Vec<int> y;
+    Vec<int> hw;
+    Vec<int> hh;
+    Vec<int> vx;
+    Vec<int> vy;
+    Vec<int> rest;
+    Vec<int> fric;
+    Vec<int> ground;
+    int live;
+    int gcols;
+    int grows;
+    int gtw;
+    int gth;
+    Vec<int> grid;
+    int cnx;
+    int cny;
+    int cdepth;
+    int rayX;
+    int rayY;
+    int rayT;
+}
+
+const PHYSMAX = 1000000;
+const PHYSBOUNCEMIN = 50000; // milli-px/s: slower impacts do not bounce (no jitter at rest)
+
+/// Empty world with gravity in pixels per second squared (y down: 980 pulls downward)
+pub func worldNew(gravityX: int, gravityY: int) -> World {
+    return World {
+        gx: gravityX * 1000, gy: gravityY * 1000, gen: vecNew<int>(), alive: vecNew<int>(), dyn: vecNew<int>(),
+        sensor: vecNew<int>(), circle: vecNew<int>(), x: vecNew<int>(), y: vecNew<int>(), hw: vecNew<int>(),
+        hh: vecNew<int>(), vx: vecNew<int>(), vy: vecNew<int>(), rest: vecNew<int>(), fric: vecNew<int>(),
+        ground: vecNew<int>(), live: 0, gcols: 0, grows: 0, gtw: 0, gth: 0, grid: vecNew<int>(), cnx: 0,
+        cny: 0, cdepth: 0, rayX: 0, rayY: 0, rayT: 0
+    };
+}
+
+pub func worldSetGravity(w: World, gravityX: int, gravityY: int) {
+    w.gx = gravityX * 1000;
+    w.gy = gravityY * 1000;
+}
+
+func physAbs(v: int) -> int {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+func physMin(a: int, b: int) -> int {
+    if (a < b) { return a; }
+    return b;
+}
+func physMax(a: int, b: int) -> int {
+    if (a > b) { return a; }
+    return b;
+}
+func physClamp(v: int, lo: int, hi: int) -> int { return physMax(lo, physMin(v, hi)); }
+/// Rounds toward minus infinity (b > 0)
+func physFloorDiv(a: int, b: int) -> int {
+    let q = a / b;
+    if (a % b != 0 && a < 0) { return q - 1; }
+    return q;
+}
+func physSqrt(v: int) -> int {
+    if (v <= 0) { return 0; }
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    return x;
+}
+
+/// Slot of a live body id, or -1
+func physSlot(w: World, id: int) -> int {
+    if (id <= 0) { return -1; }
+    let slot = id % 65536 - 1;
+    if (slot < 0 || slot >= veclen<int>(w.gen)) { return -1; }
+    if (get<int>(w.alive, slot) == 0 || get<int>(w.gen, slot) != id / 65536) { return -1; }
+    return slot;
+}
+
+func physAddBody(w: World, x: int, y: int, hw: int, hh: int, dynamic: bool, circle: bool) -> int {
+    let n = veclen<int>(w.gen);
+    let mut slot = -1;
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (slot < 0 && get<int>(w.alive, i) == 0) { slot = i; }
+    }
+    if (slot < 0) {
+        if (n >= 65535) { return -11; }
+        w.gen = push<int>(w.gen, 0);
+        w.alive = push<int>(w.alive, 0);
+        w.dyn = push<int>(w.dyn, 0);
+        w.sensor = push<int>(w.sensor, 0);
+        w.circle = push<int>(w.circle, 0);
+        w.x = push<int>(w.x, 0);
+        w.y = push<int>(w.y, 0);
+        w.hw = push<int>(w.hw, 0);
+        w.hh = push<int>(w.hh, 0);
+        w.vx = push<int>(w.vx, 0);
+        w.vy = push<int>(w.vy, 0);
+        w.rest = push<int>(w.rest, 0);
+        w.fric = push<int>(w.fric, 0);
+        w.ground = push<int>(w.ground, 0);
+        slot = n;
+    }
+    let g = get<int>(w.gen, slot) + 1;
+    set<int>(w.gen, slot, g);
+    set<int>(w.alive, slot, 1);
+    let mut d = 0;
+    if (dynamic) { d = 1; }
+    set<int>(w.dyn, slot, d);
+    set<int>(w.sensor, slot, 0);
+    let mut c = 0;
+    if (circle) { c = 1; }
+    set<int>(w.circle, slot, c);
+    set<int>(w.x, slot, x * 1000);
+    set<int>(w.y, slot, y * 1000);
+    set<int>(w.hw, slot, hw);
+    set<int>(w.hh, slot, hh);
+    set<int>(w.vx, slot, 0);
+    set<int>(w.vy, slot, 0);
+    set<int>(w.rest, slot, 0);
+    set<int>(w.fric, slot, 500);
+    set<int>(w.ground, slot, 0);
+    w.live = w.live + 1;
+    return g * 65536 + slot + 1;
+}
+
+/// Box centered on (x, y), width x height pixels (1..1000000). Returns its id, or -7.
+pub func bodyBox(w: World, x: int, y: int, width: int, height: int, dynamic: bool) -> int {
+    if (width < 1 || height < 1 || width > PHYSMAX || height > PHYSMAX) { return -7; }
+    return physAddBody(w, x, y, width * 500, height * 500, dynamic, false);
+}
+/// Circle centered on (x, y) with radius pixels (1..1000000). Returns its id, or -7.
+pub func bodyCircle(w: World, x: int, y: int, radius: int, dynamic: bool) -> int {
+    if (radius < 1 || radius > PHYSMAX) { return -7; }
+    return physAddBody(w, x, y, radius * 1000, radius * 1000, dynamic, true);
+}
+/// 0, or -10 when the id is not a live body
+pub func bodyDestroy(w: World, id: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return -10; }
+    set<int>(w.alive, slot, 0);
+    w.live = w.live - 1;
+    return 0;
+}
+pub func bodyAlive(w: World, id: int) -> bool { return physSlot(w, id) >= 0; }
+pub func worldCount(w: World) -> int { return w.live; }
+
+/// Center x in pixels (0 for a dead id: check bodyAlive)
+pub func bodyX(w: World, id: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return 0; }
+    return physFloorDiv(get<int>(w.x, slot), 1000);
+}
+pub func bodyY(w: World, id: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return 0; }
+    return physFloorDiv(get<int>(w.y, slot), 1000);
+}
+/// Velocity in pixels per second
+pub func bodyVX(w: World, id: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return 0; }
+    return get<int>(w.vx, slot) / 1000;
+}
+pub func bodyVY(w: World, id: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return 0; }
+    return get<int>(w.vy, slot) / 1000;
+}
+/// True when something held the body up during the last step (it can jump)
+pub func bodyGrounded(w: World, id: int) -> bool {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return false; }
+    return get<int>(w.ground, slot) == 1;
+}
+
+pub func bodySetPosition(w: World, id: int, x: int, y: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return -10; }
+    set<int>(w.x, slot, x * 1000);
+    set<int>(w.y, slot, y * 1000);
+    return 0;
+}
+/// Velocity in pixels per second (static bodies ignore it)
+pub func bodySetVelocity(w: World, id: int, vx: int, vy: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return -10; }
+    if (physAbs(vx) > PHYSMAX || physAbs(vy) > PHYSMAX) { return -7; }
+    set<int>(w.vx, slot, vx * 1000);
+    set<int>(w.vy, slot, vy * 1000);
+    return 0;
+}
+/// Restitution (bounciness) and friction, each 0..1000. Defaults: 0 and 500.
+pub func bodySetMaterial(w: World, id: int, restitution: int, friction: int) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return -10; }
+    if (restitution < 0 || restitution > 1000 || friction < 0 || friction > 1000) { return -7; }
+    set<int>(w.rest, slot, restitution);
+    set<int>(w.fric, slot, friction);
+    return 0;
+}
+/// A sensor overlaps without colliding (pickups, triggers)
+pub func bodySetSensor(w: World, id: int, sensor: bool) -> int {
+    let slot = physSlot(w, id);
+    if (slot < 0) { return -10; }
+    let mut s = 0;
+    if (sensor) { s = 1; }
+    set<int>(w.sensor, slot, s);
+    return 0;
+}
+
+// ---- Tile grid ----
+
+/// Solid-cell grid with its top-left at the world origin: cols x rows cells of tileW x tileH
+/// pixels, all empty. Cells outside the grid are empty. 0, or -7.
+pub func worldSetGrid(w: World, cols: int, rows: int, tileW: int, tileH: int) -> int {
+    if (cols < 0 || rows < 0 || cols * rows > 16777216 || tileW < 1 || tileH < 1 || tileW > PHYSMAX || tileH > PHYSMAX) { return -7; }
+    let mut grid = vecNew<int>();
+    for (let mut i = 0; i < cols * rows; i = i + 1) { grid = push<int>(grid, 0); }
+    w.grid = grid;
+    w.gcols = cols;
+    w.grows = rows;
+    w.gtw = tileW * 1000;
+    w.gth = tileH * 1000;
+    return 0;
+}
+/// Marks one grid cell solid or empty. 0, or -7 outside the grid.
+pub func worldGridSet(w: World, col: int, row: int, solid: bool) -> int {
+    if (col < 0 || row < 0 || col >= w.gcols || row >= w.grows) { return -7; }
+    let mut v = 0;
+    if (solid) { v = 1; }
+    set<int>(w.grid, row * w.gcols + col, v);
+    return 0;
+}
+func physSolidCell(w: World, col: int, row: int) -> bool {
+    if (col < 0 || row < 0 || col >= w.gcols || row >= w.grows) { return false; }
+    return get<int>(w.grid, row * w.gcols + col) == 1;
+}
+func physSolidRows(w: World, col: int, r0: int, r1: int) -> bool {
+    for (let mut r = r0; r <= r1; r = r + 1) {
+        if (physSolidCell(w, col, r)) { return true; }
+    }
+    return false;
+}
+func physSolidCols(w: World, row: int, c0: int, c1: int) -> bool {
+    for (let mut c = c0; c <= c1; c = c + 1) {
+        if (physSolidCell(w, c, row)) { return true; }
+    }
+    return false;
+}
+
+/// Velocity after hitting a surface: bounce when fast enough, else stop
+func physBounce(v: int, rest: int) -> int {
+    if (physAbs(v) < PHYSBOUNCEMIN) { return 0; }
+    return (0 - v) * rest / 1000;
+}
+
+/// Moves body i by (dx, dy) milli-px against the grid: x first, then y, each swept cell by cell
+func physGridMove(w: World, i: int, dx: int, dy: int) {
+    let hw = get<int>(w.hw, i);
+    let hh = get<int>(w.hh, i);
+    let rest = get<int>(w.rest, i);
+    let x = get<int>(w.x, i);
+    let mut nx = x + dx;
+    let r0 = physFloorDiv(get<int>(w.y, i) - hh, w.gth);
+    let r1 = physFloorDiv(get<int>(w.y, i) + hh - 1, w.gth);
+    if (dx > 0) {
+        let last = physFloorDiv(nx + hw - 1, w.gtw);
+        let mut c = physFloorDiv(x + hw - 1, w.gtw) + 1;
+        while (c <= last) {
+            if (physSolidRows(w, c, r0, r1)) {
+                nx = c * w.gtw - hw;
+                set<int>(w.vx, i, physBounce(get<int>(w.vx, i), rest));
+                c = last;
+            }
+            c = c + 1;
+        }
+    } else if (dx < 0) {
+        let last = physFloorDiv(nx - hw, w.gtw);
+        let mut c = physFloorDiv(x - hw, w.gtw) - 1;
+        while (c >= last) {
+            if (physSolidRows(w, c, r0, r1)) {
+                nx = (c + 1) * w.gtw + hw;
+                set<int>(w.vx, i, physBounce(get<int>(w.vx, i), rest));
+                c = last;
+            }
+            c = c - 1;
+        }
+    }
+    set<int>(w.x, i, nx);
+    let y = get<int>(w.y, i);
+    let mut ny = y + dy;
+    let c0 = physFloorDiv(nx - hw, w.gtw);
+    let c1 = physFloorDiv(nx + hw - 1, w.gtw);
+    if (dy > 0) {
+        let last = physFloorDiv(ny + hh - 1, w.gth);
+        let mut r = physFloorDiv(y + hh - 1, w.gth) + 1;
+        while (r <= last) {
+            if (physSolidCols(w, r, c0, c1)) {
+                ny = r * w.gth - hh;
+                set<int>(w.vy, i, physBounce(get<int>(w.vy, i), rest));
+                set<int>(w.ground, i, 1);
+                r = last;
+            }
+            r = r + 1;
+        }
+    } else if (dy < 0) {
+        let last = physFloorDiv(ny - hh, w.gth);
+        let mut r = physFloorDiv(y - hh, w.gth) - 1;
+        while (r >= last) {
+            if (physSolidCols(w, r, c0, c1)) {
+                ny = (r + 1) * w.gth + hh;
+                set<int>(w.vy, i, physBounce(get<int>(w.vy, i), rest));
+                r = last;
+            }
+            r = r - 1;
+        }
+    }
+    set<int>(w.y, i, ny);
+    // standing on the grid: Coulomb friction from the body's weight (mu * g * dt)
+    if (get<int>(w.ground, i) == 0 && dy >= 0 && physSolidCols(w, physFloorDiv(ny + hh, w.gth), c0, c1) && ny + hh == physFloorDiv(ny + hh, w.gth) * w.gth) {
+        set<int>(w.ground, i, 1);
+    }
+}
+
+// ---- Contacts ----
+
+/// Contact between bodies i and j: normal (x1000) pushing i away from j and depth in milli-px in
+/// w.cnx / w.cny / w.cdepth. True when they overlap.
+func physContact(w: World, i: int, j: int) -> bool {
+    let ci = get<int>(w.circle, i) == 1;
+    let cj = get<int>(w.circle, j) == 1;
+    let dx = get<int>(w.x, i) - get<int>(w.x, j);
+    let dy = get<int>(w.y, i) - get<int>(w.y, j);
+    if (!ci && !cj) {
+        let ox = get<int>(w.hw, i) + get<int>(w.hw, j) - physAbs(dx);
+        let oy = get<int>(w.hh, i) + get<int>(w.hh, j) - physAbs(dy);
+        if (ox <= 0 || oy <= 0) { return false; }
+        return physAxisContact(w, dx, dy, ox, oy);
+    }
+    if (ci && cj) {
+        let r = get<int>(w.hw, i) + get<int>(w.hw, j);
+        let d2 = dx * dx + dy * dy;
+        if (d2 >= r * r) { return false; }
+        let d = physSqrt(d2);
+        if (d == 0) {
+            w.cnx = 0;
+            w.cny = -1000;
+            w.cdepth = r;
+            return true;
+        }
+        w.cnx = dx * 1000 / d;
+        w.cny = dy * 1000 / d;
+        w.cdepth = r - d;
+        return true;
+    }
+    // circle against box: the normal points from the box to the circle
+    let mut c = i;
+    let mut b = j;
+    if (!ci) {
+        c = j;
+        b = i;
+    }
+    let r = get<int>(w.hw, c);
+    let bx = get<int>(w.x, b);
+    let by = get<int>(w.y, b);
+    let cx = get<int>(w.x, c);
+    let cy = get<int>(w.y, c);
+    let px = physClamp(cx, bx - get<int>(w.hw, b), bx + get<int>(w.hw, b));
+    let py = physClamp(cy, by - get<int>(w.hh, b), by + get<int>(w.hh, b));
+    let ex = cx - px;
+    let ey = cy - py;
+    let d2 = ex * ex + ey * ey;
+    let mut hit = false;
+    if (d2 == 0) {
+        // center inside the box: push out along the shallower axis
+        hit = physAxisContact(w, cx - bx, cy - by, get<int>(w.hw, b) + r - physAbs(cx - bx), get<int>(w.hh, b) + r - physAbs(cy - by));
+    } else if (d2 < r * r) {
+        let d = physSqrt(d2);
+        w.cnx = ex * 1000 / d;
+        w.cny = ey * 1000 / d;
+        w.cdepth = r - d;
+        hit = true;
+    }
+    if (hit && !ci) {
+        w.cnx = 0 - w.cnx;
+        w.cny = 0 - w.cny;
+    }
+    return hit;
+}
+
+/// Box-style contact along the axis of least overlap (ties go to y: resting contacts)
+func physAxisContact(w: World, dx: int, dy: int, ox: int, oy: int) -> bool {
+    if (ox < oy) {
+        w.cny = 0;
+        w.cnx = 1000;
+        if (dx < 0) { w.cnx = -1000; }
+        w.cdepth = ox;
+    } else {
+        w.cnx = 0;
+        w.cny = -1000;
+        if (dy > 0) { w.cny = 1000; }
+        w.cdepth = oy;
+    }
+    return true;
+}
+
+/// Separates bodies i (dynamic) and j and applies restitution and friction impulses
+func physResolve(w: World, i: int, j: int) {
+    if (!physContact(w, i, j)) { return; }
+    let nx = w.cnx;
+    let ny = w.cny;
+    let depth = w.cdepth;
+    let mut invj = 0;
+    if (get<int>(w.dyn, j) == 1) { invj = 1; }
+    let total = 1 + invj;
+    set<int>(w.x, i, get<int>(w.x, i) + nx * depth / 1000 / total);
+    set<int>(w.y, i, get<int>(w.y, i) + ny * depth / 1000 / total);
+    if (invj == 1) {
+        set<int>(w.x, j, get<int>(w.x, j) - nx * depth / 1000 / total);
+        set<int>(w.y, j, get<int>(w.y, j) - ny * depth / 1000 / total);
+    }
+    if (ny < -500) { set<int>(w.ground, i, 1); }
+    if (invj == 1 && ny > 500) { set<int>(w.ground, j, 1); }
+    let rvx = get<int>(w.vx, i) - get<int>(w.vx, j);
+    let rvy = get<int>(w.vy, i) - get<int>(w.vy, j);
+    let vn = (rvx * nx + rvy * ny) / 1000;
+    if (vn >= 0) { return; } // already separating
+    let mut e = physMax(get<int>(w.rest, i), get<int>(w.rest, j));
+    if (0 - vn < PHYSBOUNCEMIN) { e = 0; }
+    let jn = (0 - vn) * (1000 + e) / 1000 / total;
+    // Coulomb friction: the tangential impulse is at most mu times the normal impulse
+    let tx = 0 - ny;
+    let ty = nx;
+    let vt = (rvx * tx + rvy * ty) / 1000;
+    let mu = physSqrt(get<int>(w.fric, i) * get<int>(w.fric, j));
+    let limit = jn * mu / 1000;
+    let jt = physClamp((0 - vt) / total, 0 - limit, limit);
+    set<int>(w.vx, i, get<int>(w.vx, i) + (jn * nx + jt * tx) / 1000);
+    set<int>(w.vy, i, get<int>(w.vy, i) + (jn * ny + jt * ty) / 1000);
+    if (invj == 1) {
+        set<int>(w.vx, j, get<int>(w.vx, j) - (jn * nx + jt * tx) / 1000);
+        set<int>(w.vy, j, get<int>(w.vy, j) - (jn * ny + jt * ty) / 1000);
+    }
+}
+
+/// Advances the world by dt microseconds (0..1000000; use a fixed step from gameFixedSteps). 0, or -7.
+pub func worldStep(w: World, dt: int) -> int {
+    if (dt < 0 || dt > 1000000) { return -7; }
+    let n = veclen<int>(w.gen);
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<int>(w.alive, i) == 1 && get<int>(w.dyn, i) == 1) {
+            set<int>(w.ground, i, 0);
+            let vx = get<int>(w.vx, i) + w.gx * dt / 1000000;
+            let vy = get<int>(w.vy, i) + w.gy * dt / 1000000;
+            set<int>(w.vx, i, vx);
+            set<int>(w.vy, i, vy);
+            let dx = vx * dt / 1000000;
+            let dy = vy * dt / 1000000;
+            if (w.gcols > 0 && w.grows > 0) {
+                physGridMove(w, i, dx, dy);
+                if (get<int>(w.ground, i) == 1 && get<int>(w.sensor, i) == 0) { physGridFriction(w, i, dt); }
+            } else {
+                set<int>(w.x, i, get<int>(w.x, i) + dx);
+                set<int>(w.y, i, get<int>(w.y, i) + dy);
+            }
+        }
+    }
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<int>(w.alive, i) == 1 && get<int>(w.dyn, i) == 1 && get<int>(w.sensor, i) == 0) {
+            for (let mut j = 0; j < n; j = j + 1) {
+                if (j != i && get<int>(w.alive, j) == 1 && get<int>(w.sensor, j) == 0 && (get<int>(w.dyn, j) == 0 || j > i)) {
+                    physResolve(w, i, j);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/// Friction of a body resting on the grid: slows its x velocity by mu * g * dt, never past zero
+func physGridFriction(w: World, i: int, dt: int) {
+    let slow = get<int>(w.fric, i) * physAbs(w.gy) / 1000 * dt / 1000000;
+    let vx = get<int>(w.vx, i);
+    if (physAbs(vx) <= slow) {
+        set<int>(w.vx, i, 0);
+    } else if (vx > 0) {
+        set<int>(w.vx, i, vx - slow);
+    } else {
+        set<int>(w.vx, i, vx + slow);
+    }
+}
+
+/// True while two live bodies overlap (sensors included)
+pub func bodiesOverlap(w: World, a: int, b: int) -> bool {
+    let sa = physSlot(w, a);
+    let sb = physSlot(w, b);
+    if (sa < 0 || sb < 0 || sa == sb) { return false; }
+    return physContact(w, sa, sb);
+}
+
+// ---- Ray casts ----
+
+/// Entry fraction (x1000) of segment p + t*d into the box, or -1
+func physRayBox(x0: int, y0: int, dx: int, dy: int, minx: int, miny: int, maxx: int, maxy: int) -> int {
+    let mut tmin = 0;
+    let mut tmax = 1000;
+    if (dx == 0) {
+        if (x0 < minx || x0 > maxx) { return -1; }
+    } else {
+        let mut t1 = (minx - x0) * 1000 / dx;
+        let mut t2 = (maxx - x0) * 1000 / dx;
+        if (t1 > t2) {
+            let t = t1;
+            t1 = t2;
+            t2 = t;
+        }
+        tmin = physMax(tmin, t1);
+        tmax = physMin(tmax, t2);
+        if (tmin > tmax) { return -1; }
+    }
+    if (dy == 0) {
+        if (y0 < miny || y0 > maxy) { return -1; }
+    } else {
+        let mut t1 = (miny - y0) * 1000 / dy;
+        let mut t2 = (maxy - y0) * 1000 / dy;
+        if (t1 > t2) {
+            let t = t1;
+            t1 = t2;
+            t2 = t;
+        }
+        tmin = physMax(tmin, t1);
+        tmax = physMin(tmax, t2);
+        if (tmin > tmax) { return -1; }
+    }
+    return tmin;
+}
+
+/// Entry fraction (x1000) of segment p + t*d into the circle, or -1 (0 when p starts inside)
+func physRayCircle(x0: int, y0: int, dx: int, dy: int, cx: int, cy: int, r: int) -> int {
+    let fx = cx - x0;
+    let fy = cy - y0;
+    if (fx * fx + fy * fy <= r * r) { return 0; }
+    let a = dx * dx + dy * dy;
+    if (a == 0) { return -1; }
+    let tc = (fx * dx + fy * dy) * 1000 / a;
+    let px = x0 + dx * tc / 1000;
+    let py = y0 + dy * tc / 1000;
+    let d2 = (cx - px) * (cx - px) + (cy - py) * (cy - py);
+    if (d2 > r * r) { return -1; }
+    let t = tc - physSqrt(r * r - d2) * 1000 / physSqrt(a);
+    if (t < 0 || t > 1000) { return -1; }
+    return t;
+}
+
+/// Casts the segment (x0, y0) -> (x1, y1) in pixels (coordinates within +-1000000) against every
+/// body that is not a sensor. Returns the id of the nearest body hit (0 when none); rayHitX /
+/// rayHitY / rayHitFraction (x1000 along the segment) describe the hit. A segment that starts
+/// inside a body hits it at fraction 0.
+pub func worldRaycast(w: World, x0: int, y0: int, x1: int, y1: int) -> int {
+    if (physAbs(x0) > PHYSMAX || physAbs(y0) > PHYSMAX || physAbs(x1) > PHYSMAX || physAbs(y1) > PHYSMAX) { return -7; }
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let n = veclen<int>(w.gen);
+    let mut best = 1001;
+    let mut hit = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<int>(w.alive, i) == 1 && get<int>(w.sensor, i) == 0) {
+            let cx = physFloorDiv(get<int>(w.x, i), 1000);
+            let cy = physFloorDiv(get<int>(w.y, i), 1000);
+            let hw = get<int>(w.hw, i) / 1000;
+            let hh = get<int>(w.hh, i) / 1000;
+            let mut t = -1;
+            if (get<int>(w.circle, i) == 1) {
+                t = physRayCircle(x0, y0, dx, dy, cx, cy, hw);
+            } else {
+                t = physRayBox(x0, y0, dx, dy, cx - hw, cy - hh, cx + hw, cy + hh);
+            }
+            if (t >= 0 && t < best) {
+                best = t;
+                hit = get<int>(w.gen, i) * 65536 + i + 1;
+            }
+        }
+    }
+    if (hit > 0) {
+        w.rayT = best;
+        w.rayX = x0 + dx * best / 1000;
+        w.rayY = y0 + dy * best / 1000;
+    }
+    return hit;
+}
+/// Hit point of the last worldRaycast that hit something, in pixels
+pub func rayHitX(w: World) -> int { return w.rayX; }
+pub func rayHitY(w: World) -> int { return w.rayY; }
+/// How far along the segment (x1000) the last hit was
+pub func rayHitFraction(w: World) -> int { return w.rayT; }

@@ -1,0 +1,181 @@
+module salivo.std.tilemap;
+
+// Stage 38.3 tile maps (docs/STAGE_38_3_ENGINE.md). Pure Salivo.
+//
+// A map is cols x rows cells of tileW x tileH pixels with its top-left at the world origin. A
+// cell holds a tile id: 0 is empty, id n > 0 draws frame n - 1 of a tileset texture (frames of
+// tileW x tileH, row-major, tilesetCols per row) and is solid for physics. tilemapDraw draws only
+// the cells inside the camera's view. tilemapAttach copies the solid cells into a physics world's
+// grid (salivo.std.physics2d): attach again after editing tiles that bodies should feel.
+// Use even tile sizes for seamless tiles: a tile is drawn as a quad centered on its cell.
+
+><salivo.std.game::{Game, gameWidth, gameHeight, drawSprite, drawRegion};
+><salivo.std.physics2d::{World, worldSetGrid, worldGridSet};
+><salivo.std.text::{byteAt};
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+
+pub struct Tilemap {
+    int cols;
+    int rows;
+    int tileW;
+    int tileH;
+    Vec<int> tiles;
+}
+
+const TILEMAXCELLS = 16777216;
+
+/// Empty map. Sizes outside 1..65536 cells per side, 1..4096 pixels per tile or more than 16777216
+/// cells give a 0 x 0 map (tilemapCols is 0).
+pub func tilemapNew(cols: int, rows: int, tileW: int, tileH: int) -> Tilemap {
+    let mut c = cols;
+    let mut r = rows;
+    if (cols < 1 || rows < 1 || cols > 65536 || rows > 65536 || cols * rows > TILEMAXCELLS || tileW < 1 || tileH < 1 || tileW > 4096 || tileH > 4096) {
+        c = 0;
+        r = 0;
+    }
+    let mut tiles = vecNew<int>();
+    for (let mut i = 0; i < c * r; i = i + 1) { tiles = push<int>(tiles, 0); }
+    return Tilemap { cols: c, rows: r, tileW: tileW, tileH: tileH, tiles: tiles };
+}
+
+/// Map from text, one line per row: a character at position k of legend becomes tile id k + 1,
+/// every other character (and a short line's missing cells) is empty. "\r" is ignored.
+pub func tilemapFromText(text: string, legend: string, tileW: int, tileH: int) -> Tilemap {
+    let n = len(text);
+    let mut cols = 0;
+    let mut rows = 0;
+    let mut cur = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(text, i);
+        if (ch == 10) {
+            cols = tileMax(cols, cur);
+            cur = 0;
+            rows = rows + 1;
+        } else if (ch != 13) {
+            cur = cur + 1;
+        }
+    }
+    if (cur > 0) {
+        cols = tileMax(cols, cur);
+        rows = rows + 1;
+    }
+    let m = tilemapNew(cols, rows, tileW, tileH);
+    if (m.cols == 0) { return m; }
+    let mut row = 0;
+    let mut col = 0;
+    for (let mut i = 0; i < n; i = i + 1) {
+        let ch = byteAt(text, i);
+        if (ch == 10) {
+            row = row + 1;
+            col = 0;
+        } else if (ch != 13) {
+            set<int>(m.tiles, row * cols + col, tileLegendId(legend, ch));
+            col = col + 1;
+        }
+    }
+    return m;
+}
+
+func tileLegendId(legend: string, ch: int) -> int {
+    let n = len(legend);
+    for (let mut k = 0; k < n; k = k + 1) {
+        if (byteAt(legend, k) == ch) { return k + 1; }
+    }
+    return 0;
+}
+
+func tileMax(a: int, b: int) -> int {
+    if (a > b) { return a; }
+    return b;
+}
+func tileMin(a: int, b: int) -> int {
+    if (a < b) { return a; }
+    return b;
+}
+/// Rounds toward minus infinity (b > 0)
+func tileFloorDiv(a: int, b: int) -> int {
+    let q = a / b;
+    if (a % b != 0 && a < 0) { return q - 1; }
+    return q;
+}
+
+pub func tilemapCols(m: Tilemap) -> int { return m.cols; }
+pub func tilemapRows(m: Tilemap) -> int { return m.rows; }
+/// Size in pixels
+pub func tilemapWidth(m: Tilemap) -> int { return m.cols * m.tileW; }
+pub func tilemapHeight(m: Tilemap) -> int { return m.rows * m.tileH; }
+
+/// 0, or -7 outside the map or for a negative id
+pub func tileSet(m: Tilemap, col: int, row: int, id: int) -> int {
+    if (col < 0 || row < 0 || col >= m.cols || row >= m.rows || id < 0) { return -7; }
+    set<int>(m.tiles, row * m.cols + col, id);
+    return 0;
+}
+/// Tile id of a cell, -7 outside the map
+pub func tileGet(m: Tilemap, col: int, row: int) -> int {
+    if (col < 0 || row < 0 || col >= m.cols || row >= m.rows) { return -7; }
+    return get<int>(m.tiles, row * m.cols + col);
+}
+/// Tile id under a world pixel (0 outside the map)
+pub func tileAt(m: Tilemap, x: int, y: int) -> int {
+    if (m.cols == 0) { return 0; }
+    let t = tileGet(m, tileFloorDiv(x, m.tileW), tileFloorDiv(y, m.tileH));
+    if (t < 0) { return 0; }
+    return t;
+}
+/// Cell column / row under a world pixel
+pub func tileCol(m: Tilemap, x: int) -> int {
+    if (m.cols == 0) { return 0; }
+    return tileFloorDiv(x, m.tileW);
+}
+pub func tileRow(m: Tilemap, y: int) -> int {
+    if (m.cols == 0) { return 0; }
+    return tileFloorDiv(y, m.tileH);
+}
+
+/// Draws the cells visible through a camera centered on (camX, camY) at zoom (x1000, as camera2d;
+/// unrotated). tileset 0 draws solid squares of color; otherwise tile n shows frame n - 1 of the
+/// tileset tinted by color. Returns the number of tiles drawn or the first error (-7 bad zoom or
+/// tilesetCols).
+pub func tilemapDraw(g: Game, m: Tilemap, tileset: int, tilesetCols: int, camX: int, camY: int, zoom: int, color: int) -> int {
+    if (zoom <= 0 || zoom > 1000000 || (tileset != 0 && tilesetCols <= 0)) { return -7; }
+    if (m.cols == 0) { return 0; }
+    let halfW = gameWidth(g) * 500 / zoom + 1;
+    let halfH = gameHeight(g) * 500 / zoom + 1;
+    let c0 = tileMax(0, tileFloorDiv(camX - halfW, m.tileW));
+    let c1 = tileMin(m.cols - 1, tileFloorDiv(camX + halfW, m.tileW));
+    let r0 = tileMax(0, tileFloorDiv(camY - halfH, m.tileH));
+    let r1 = tileMin(m.rows - 1, tileFloorDiv(camY + halfH, m.tileH));
+    let mut drawn = 0;
+    for (let mut r = r0; r <= r1; r = r + 1) {
+        for (let mut c = c0; c <= c1; c = c + 1) {
+            let id = get<int>(m.tiles, r * m.cols + c);
+            if (id > 0) {
+                let cx = c * m.tileW + m.tileW / 2;
+                let cy = r * m.tileH + m.tileH / 2;
+                let mut rc = 0;
+                if (tileset == 0) {
+                    rc = drawSprite(g, cx, cy, m.tileW, m.tileH, 0, color, 0);
+                } else {
+                    let f = id - 1;
+                    rc = drawRegion(g, cx, cy, m.tileW, m.tileH, 0, color, tileset, (f % tilesetCols) * m.tileW, (f / tilesetCols) * m.tileH, m.tileW, m.tileH);
+                }
+                if (rc < 0) { return rc; }
+                drawn = drawn + 1;
+            }
+        }
+    }
+    return drawn;
+}
+
+/// Gives a physics world this map's solid cells as its tile grid. 0, or a negative error.
+pub func tilemapAttach(m: Tilemap, w: World) -> int {
+    let rc = worldSetGrid(w, m.cols, m.rows, m.tileW, m.tileH);
+    if (rc < 0) { return rc; }
+    for (let mut r = 0; r < m.rows; r = r + 1) {
+        for (let mut c = 0; c < m.cols; c = c + 1) {
+            if (get<int>(m.tiles, r * m.cols + c) > 0) { worldGridSet(w, c, r, true); }
+        }
+    }
+    return 0;
+}

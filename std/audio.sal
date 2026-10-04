@@ -1,0 +1,30 @@
+module salivo.std.audio;
+
+// Stage 38.3 audio (docs/STAGE_38_3_ENGINE.md): sound effects and music through the Windows media
+// control interface (winmm MCI, DirectShow decoders). WAV and MP3 (and any format an installed
+// DirectShow decoder reads). Any number of sounds play at once, mixed by the OS; one sound plays one
+// instance at a time, so load an effect twice to overlap it. Latency is tens of milliseconds.
+// A sound is a generation handle owned by the program until soundDestroy (not tied to a window).
+// Calls belong to the platform thread (the one that created the first window), -13 elsewhere.
+// Windows only (-12 elsewhere). Errors: -7 invalid argument, -8 OS failure, -10 destroyed or
+// invalid sound, -11 table full, -16 missing file, -17 not decodable.
+
+/// Opens a sound file: a handle (> 0) or a negative error
+pub func soundLoad(path: string) -> int { return rtsyssoundload(path); }
+/// Plays once from the start (restarts it when already playing)
+pub func soundPlay(sound: int) -> int { return rtsyssoundplay(sound, 0); }
+/// Plays from the start and repeats until soundStop (music)
+pub func soundLoop(sound: int) -> int { return rtsyssoundplay(sound, 1); }
+/// Stops and rewinds
+pub func soundStop(sound: int) -> int { return rtsyssoundstop(sound); }
+/// Volume 0 (silent) .. 1000 (full)
+pub func soundSetVolume(sound: int, volume: int) -> int { return rtsyssoundvolume(sound, volume); }
+pub func soundVolume(sound: int) -> int { return rtsyssoundint(sound, 3); }
+/// True while the sound plays
+pub func soundPlaying(sound: int) -> bool { return rtsyssoundint(sound, 0) == 1; }
+/// Duration in milliseconds
+pub func soundLength(sound: int) -> int { return rtsyssoundint(sound, 1); }
+/// Playback position in milliseconds
+pub func soundPosition(sound: int) -> int { return rtsyssoundint(sound, 2); }
+/// Closes the sound; -10 when already destroyed
+pub func soundDestroy(sound: int) -> int { return rtsyssounddestroy(sound); }

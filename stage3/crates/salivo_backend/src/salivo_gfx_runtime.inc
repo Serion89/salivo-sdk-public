@@ -2,7 +2,7 @@
  *
  * Included at the end of salivo_sys_runtime.c, so it shares that file's string helpers, error
  * codes and link step. ABI rows: the `rtsysgfx*` / `rtsyswin*` / ... lines of salivo_sys_abi.def.
- * Public Salivo API: std/desktop.sal (38.1) and std/game.sal (38.2).
+ * Public Salivo API: std/desktop.sal (38.1), std/game.sal (38.2) and std/audio.sal (38.3).
  *
  * Model
  *  - One platform thread: the first thread that creates a window owns every window, the event
@@ -36,6 +36,7 @@
 #ifdef _WIN32
 
 #include <math.h>
+#include <stdarg.h>
 #include <GL/gl.h>
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "user32.lib")
@@ -130,12 +131,12 @@ static int gl_has_glsl(void) {
 
 /* ---------- generation handle table ---------- */
 
-enum { K_FREE = 0, K_WIN, K_TEX, K_MESH, K_SHADER };
+enum { K_FREE = 0, K_WIN, K_TEX, K_MESH, K_SHADER, K_SOUND };
 #define GFX_SLOTS 4096
 
 typedef struct { int kind; unsigned gen; long long owner; void* p; } GfxSlot;
 static GfxSlot g_slots[GFX_SLOTS];
-static int g_live[5];
+static int g_live[6];
 static DWORD g_gfx_thread;
 
 static long long slot_new(int kind, void* p, long long owner) {
@@ -220,7 +221,23 @@ static void ev_push(long long type, long long win, long long a, long long b, lon
         GfxEvent* last = &g_q[(g_qhead + g_qlen - 1) % GFX_QUEUE];
         if (type == 8 && last->type == 8 && last->win == win) { last->x = x; last->y = y; return; }
     }
-    if (g_qlen == GFX_QUEUE) { g_dropped++; return; }
+    if (g_qlen == GFX_QUEUE) {
+        /* Full: ordinary traffic is dropped. A close, focus change, key-up or button-up evicts the
+         * oldest ordinary event instead (a close evicts any non-close one), so a stalled program
+         * still sees every release and close. */
+        int critical = type == 1 || type == 4 || type == 6 || type == 10, victim = -1;
+        for (int i = 0; critical && victim < 0 && i < g_qlen; i++) {
+            long long t = g_q[(g_qhead + i) % GFX_QUEUE].type;
+            if (t != 1 && t != 4 && t != 6 && t != 10) victim = i;
+        }
+        for (int i = 0; type == 1 && victim < 0 && i < g_qlen; i++) {
+            if (g_q[(g_qhead + i) % GFX_QUEUE].type != 1) victim = i;
+        }
+        g_dropped++;
+        if (victim < 0) return; /* only possible for a duplicate close: one is already queued */
+        for (int i = victim; i < g_qlen - 1; i++) g_q[(g_qhead + i) % GFX_QUEUE] = g_q[(g_qhead + i + 1) % GFX_QUEUE];
+        g_qlen--;
+    }
     GfxEvent* e = &g_q[(g_qhead + g_qlen) % GFX_QUEUE];
     e->type = type; e->win = win; e->a = a; e->b = b; e->c = c; e->x = x; e->y = y;
     g_qlen++;
@@ -567,6 +584,7 @@ long long salivo_sys_ev_wait(long long timeout_ms) {
 
 /* field of the current event: 0 window, 1 a, 2 b, 3 c, 4 x, 5 y */
 long long salivo_sys_ev_field(long long field) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
     switch (field) {
     case 0: return g_ev.win;
     case 1: return g_ev.a;
@@ -579,12 +597,14 @@ long long salivo_sys_ev_field(long long field) {
 }
 
 long long salivo_sys_key_down(long long vk) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
     if (vk < 0 || vk > 255) return SYS_INVALID_ARG;
     return g_keys[vk];
 }
 
 /* which: 0 x, 1 y, 2 button bitmask (bit 1 left, 2 right, 3 middle), 3 window under the mouse */
 long long salivo_sys_mouse(long long which) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
     switch (which) {
     case 0: return g_mx;
     case 1: return g_my;
@@ -712,7 +732,17 @@ long long salivo_sys_cam2d(long long win, long long cx, long long cy, long long 
     return 0;
 }
 
-typedef struct { GLuint id; int w, h, dirty; unsigned char* px; } GfxTex;
+/* Screen pixels again (origin top-left) for the rest of the frame: drops a 2D or 3D camera (HUD, GUI). */
+long long salivo_sys_cam_screen(long long win) {
+    long long err = 0;
+    GfxWin* w = frame_win(win, &err);
+    if (!w) return err;
+    pixel_projection(w);
+    return 0;
+}
+
+/* A font is a texture whose atlas holds code points 32..255 in a 16-column grid of cw x ch cells. */
+typedef struct { GLuint id; int w, h, dirty; unsigned char* px; int cw, ch; short* adv; } GfxTex;
 typedef struct { float x, y, z, u, v; unsigned char rgba[4]; } GfxVertex;
 typedef struct { GLuint vbo; int count, cap, dirty; GfxVertex* v; } GfxMesh;
 typedef struct { GLuint prog; GLint tint, tex, use_tex; } GfxShader;
@@ -737,7 +767,7 @@ static long long check_res(long long h, int kind, long long win, void** out) {
     return 0;
 }
 
-static void tex_free(GfxTex* t) { glDeleteTextures(1, &t->id); free(t->px); free(t); }
+static void tex_free(GfxTex* t) { glDeleteTextures(1, &t->id); free(t->px); free(t->adv); free(t); }
 static void mesh_free(GfxMesh* m) { if (m->vbo) gl.DeleteBuffers(1, &m->vbo); free(m->v); free(m); }
 static void shader_free(GfxShader* s) { gl.DeleteProgram(s->prog); free(s); }
 
@@ -794,7 +824,73 @@ long long salivo_sys_tex_create(long long win, long long wd, long long ht) {
 static unsigned rd16(const unsigned char* p) { return p[0] | (p[1] << 8); }
 static unsigned rd32(const unsigned char* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned)p[3] << 24); }
 
-/* Uncompressed 24- or 32-bit BMP file. */
+/* ---- 38.3: PNG / JPEG / GIF / TIFF through GDI+ (part of Windows; loaded on first use) ---- */
+
+typedef struct { UINT32 ver; void* cb; BOOL no_thread; BOOL no_codecs; } GpStartup;
+typedef struct { UINT w, h; INT stride; INT fmt; void* scan0; UINT_PTR reserved; } GpData;
+typedef struct { INT x, y, w, h; } GpRect;
+static struct {
+    int tried, ok;
+    int(WINAPI* FromFile)(const WCHAR*, void**);
+    int(WINAPI* Width)(void*, UINT*);
+    int(WINAPI* Height)(void*, UINT*);
+    int(WINAPI* Lock)(void*, const GpRect*, UINT, INT, GpData*);
+    int(WINAPI* Unlock)(void*, GpData*);
+    int(WINAPI* Dispose)(void*);
+} gp;
+
+/* ponytail: GDI+ stays started for the life of the process (one token, freed by the OS at exit). */
+static int gp_load(void) {
+    if (gp.tried) return gp.ok;
+    gp.tried = 1;
+    HMODULE m = LoadLibraryW(L"gdiplus.dll");
+    if (!m) return 0;
+    int(WINAPI * startup)(ULONG_PTR*, const GpStartup*, void*) = (int(WINAPI*)(ULONG_PTR*, const GpStartup*, void*))GetProcAddress(m, "GdiplusStartup");
+    gp.FromFile = (int(WINAPI*)(const WCHAR*, void**))GetProcAddress(m, "GdipCreateBitmapFromFile");
+    gp.Width = (int(WINAPI*)(void*, UINT*))GetProcAddress(m, "GdipGetImageWidth");
+    gp.Height = (int(WINAPI*)(void*, UINT*))GetProcAddress(m, "GdipGetImageHeight");
+    gp.Lock = (int(WINAPI*)(void*, const GpRect*, UINT, INT, GpData*))GetProcAddress(m, "GdipBitmapLockBits");
+    gp.Unlock = (int(WINAPI*)(void*, GpData*))GetProcAddress(m, "GdipBitmapUnlockBits");
+    gp.Dispose = (int(WINAPI*)(void*))GetProcAddress(m, "GdipDisposeImage");
+    ULONG_PTR token = 0;
+    GpStartup in = { 1, 0, FALSE, FALSE };
+    gp.ok = startup && gp.FromFile && gp.Width && gp.Height && gp.Lock && gp.Unlock && gp.Dispose && startup(&token, &in, 0) == 0;
+    return gp.ok;
+}
+
+/* First frame of any image GDI+ decodes, as straight RGBA. */
+static long long tex_load_gdiplus(long long win, const char* path) {
+    if (!gp_load()) return GFX_BAD_ASSET;
+    wchar_t* wp = widen(path);
+    void* bmp = 0;
+    int st = wp ? gp.FromFile(wp, &bmp) : 1;
+    free(wp);
+    if (st != 0 || !bmp) return GFX_BAD_ASSET;
+    UINT wd = 0, ht = 0;
+    GpData d;
+    long long rc = GFX_BAD_ASSET;
+    if (gp.Width(bmp, &wd) == 0 && gp.Height(bmp, &ht) == 0 && tex_dims_ok(wd, ht)) {
+        GpRect r = { 0, 0, (INT)wd, (INT)ht };
+        if (gp.Lock(bmp, &r, 1 /* read */, 0x26200A /* 32bpp ARGB */, &d) == 0) {
+            unsigned char* px = (unsigned char*)malloc((size_t)wd * ht * 4);
+            if (px) {
+                for (UINT y = 0; y < ht; y++) {
+                    const unsigned char* row = (const unsigned char*)d.scan0 + (ptrdiff_t)y * d.stride;
+                    for (UINT x = 0; x < wd; x++) {
+                        unsigned char* o = px + ((size_t)y * wd + x) * 4;
+                        o[0] = row[x * 4 + 2]; o[1] = row[x * 4 + 1]; o[2] = row[x * 4]; o[3] = row[x * 4 + 3];
+                    }
+                }
+            }
+            gp.Unlock(bmp, &d);
+            rc = px ? tex_new(win, (int)wd, (int)ht, px) : SYS_OS;
+        }
+    }
+    gp.Dispose(bmp);
+    return rc;
+}
+
+/* Uncompressed 24- or 32-bit BMP file; any other format goes to GDI+ (PNG, JPEG, GIF, TIFF). */
 long long salivo_sys_tex_load(long long win, const char* path) {
     long long err = 0;
     if (!win_get(win, &err)) return err;
@@ -806,13 +902,14 @@ long long salivo_sys_tex_load(long long win, const char* path) {
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (size < 54 || size > (1L << 28)) { fclose(f); return GFX_BAD_ASSET; }
+    if (size < 2 || size > (1L << 28)) { fclose(f); return GFX_BAD_ASSET; }
     unsigned char* b = (unsigned char*)malloc((size_t)size);
     if (!b) { fclose(f); return SYS_OS; }
     size_t got = fread(b, 1, (size_t)size, f);
     fclose(f);
     long long rc = GFX_BAD_ASSET;
-    if (got == (size_t)size && b[0] == 'B' && b[1] == 'M') {
+    if (got == (size_t)size && !(b[0] == 'B' && b[1] == 'M')) { free(b); return tex_load_gdiplus(win, path); }
+    if (got == (size_t)size && size >= 54) {
         unsigned off = rd32(b + 10), hdr = rd32(b + 14), comp = rd32(b + 30), bpp = rd16(b + 28);
         long long wd = (int)rd32(b + 18), ht = (int)rd32(b + 22);
         int bottom_up = ht > 0;
@@ -879,33 +976,53 @@ static void bind_tex(GfxTex* t) {
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 }
 
-/* Quad centered on (x, y), w x h, rotated rot degrees clockwise (y down), tinted rgba, texture or 0.
- * Model transform = translate(x, y) * rotate(rot) * scale(w, h) on the unit quad [-0.5, 0.5]. */
-long long salivo_sys_draw_quad(long long win, long long x, long long y, long long wd, long long ht, long long rot, long long rgba, long long tex) {
+/* Textured quad centered on (x, y), w x h, rotated rot degrees clockwise (y down), tinted rgba,
+ * showing texture coordinates (u0, v0)..(u1, v1). Model transform = translate(x, y) * rotate(rot) *
+ * scale(w, h) on the unit quad [-0.5, 0.5]; a negative w or h mirrors. */
+static long long quad(long long win, long long x, long long y, long long wd, long long ht, long long rot, long long rgba,
+                      long long tex, int need_tex, long long sx, long long sy, long long sw, long long sh) {
     long long err = 0;
     GfxWin* w = frame_win(win, &err);
     if (!w) return err;
     if (w->mode != 1) return GFX_STATE; /* a 3D camera is active: switch back with frameBegin/camera2d */
-    if (wd < 0 || ht < 0 || wd > 1 << 20 || ht > 1 << 20) return SYS_INVALID_ARG;
+    if (wd < -(1 << 20) || ht < -(1 << 20) || wd > 1 << 20 || ht > 1 << 20) return SYS_INVALID_ARG;
     void* tp;
     long long rc = check_res(tex, K_TEX, win, &tp);
     if (rc) return rc;
+    GfxTex* t = (GfxTex*)tp;
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+    if (need_tex) {
+        if (!t) return SYS_INVALID_HANDLE;
+        if (sx < 0 || sy < 0 || sw < 1 || sh < 1 || sx + sw > t->w || sy + sh > t->h) return SYS_INVALID_ARG;
+        u0 = (float)sx / t->w; v0 = (float)sy / t->h; u1 = (float)(sx + sw) / t->w; v1 = (float)(sy + sh) / t->h;
+    }
     glPushMatrix();
     glTranslatef((float)x, (float)y, 0);
     glRotatef((float)rot, 0, 0, 1);
     glScalef((float)wd, (float)ht, 1);
-    bind_tex((GfxTex*)tp);
+    bind_tex(t);
     set_color(rgba);
     glBegin(GL_QUADS);
-    glTexCoord2f(0, 0); glVertex2f(-0.5f, -0.5f);
-    glTexCoord2f(1, 0); glVertex2f(0.5f, -0.5f);
-    glTexCoord2f(1, 1); glVertex2f(0.5f, 0.5f);
-    glTexCoord2f(0, 1); glVertex2f(-0.5f, 0.5f);
+    glTexCoord2f(u0, v0); glVertex2f(-0.5f, -0.5f);
+    glTexCoord2f(u1, v0); glVertex2f(0.5f, -0.5f);
+    glTexCoord2f(u1, v1); glVertex2f(0.5f, 0.5f);
+    glTexCoord2f(u0, v1); glVertex2f(-0.5f, 0.5f);
     glEnd();
     glPopMatrix();
     glDisable(GL_TEXTURE_2D);
     g_draws++;
     return glGetError() == GL_NO_ERROR ? 0 : GFX_GRAPHICS;
+}
+
+long long salivo_sys_draw_quad(long long win, long long x, long long y, long long wd, long long ht, long long rot, long long rgba, long long tex) {
+    if (wd < 0 || ht < 0) return SYS_INVALID_ARG;
+    return quad(win, x, y, wd, ht, rot, rgba, tex, 0, 0, 0, 0, 0);
+}
+
+/* Sub-rectangle (sx, sy, sw, sh) of a texture (sprite-sheet frame, tile, glyph); negative wd/ht mirror. */
+long long salivo_sys_draw_region(long long win, long long x, long long y, long long wd, long long ht, long long rot, long long rgba,
+                                 long long tex, long long sx, long long sy, long long sw, long long sh) {
+    return quad(win, x, y, wd, ht, rot, rgba, tex, 1, sx, sy, sw, sh);
 }
 
 long long salivo_sys_mesh_create(long long win) {
@@ -1082,7 +1199,7 @@ long long salivo_sys_draw_mesh(long long win, long long mesh, long long shader, 
     if (!rc) rc = check_res(tex, K_TEX, win, &tp);
     if (rc) return rc;
     GfxMesh* m = (GfxMesh*)mp;
-    if (m->count < 3) return GFX_STATE;
+    if (m->count < 3 || m->count % 3) return GFX_STATE; /* a triangle list: whole triangles only */
     if (!m->vbo) gl.GenBuffers(1, &m->vbo);
     gl.BindBuffer(GL_ARRAY_BUFFER_, m->vbo);
     if (m->dirty) {
@@ -1133,6 +1250,7 @@ char* salivo_sys_gfx_info(long long win, long long which) {
 /* which: 0 live windows, 1 textures, 2 meshes, 3 shaders, 4 draw calls so far, 5 dropped events,
  * 6 queued events */
 long long salivo_sys_gfx_stat(long long which) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
     switch (which) {
     case 0: return g_live[K_WIN];
     case 1: return g_live[K_TEX];
@@ -1141,9 +1259,357 @@ long long salivo_sys_gfx_stat(long long which) {
     case 4: return g_draws;
     case 5: return g_dropped;
     case 6: return g_qlen;
+    case 7: return g_live[K_SOUND];
     }
     return SYS_INVALID_ARG;
 }
+
+/* ---------- 38.3: fonts (GDI glyph atlas held in a window-owned texture) ---------- */
+
+static unsigned be16(const unsigned char* p) { return ((unsigned)p[0] << 8) | p[1]; }
+static unsigned be32(const unsigned char* p) { return ((unsigned)p[0] << 24) | ((unsigned)p[1] << 16) | ((unsigned)p[2] << 8) | p[3]; }
+
+/* Family name (name id 1, Windows platform, US English preferred) of the first face of a
+ * TrueType / OpenType file or collection. */
+static int ttf_family(const unsigned char* b, size_t n, wchar_t* out, size_t cap) {
+    size_t base = n >= 16 && !memcmp(b, "ttcf", 4) ? be32(b + 12) : 0;
+    if (base + 12 > n) return 0;
+    unsigned tables = be16(b + base + 4);
+    for (unsigned i = 0; i < tables; i++) {
+        size_t rec = base + 12 + 16 * (size_t)i;
+        if (rec + 16 > n) return 0;
+        if (memcmp(b + rec, "name", 4)) continue;
+        size_t off = be32(b + rec + 8), len = be32(b + rec + 12);
+        if (off + 6 > n || off + len > n) return 0;
+        unsigned count = be16(b + off + 2), strs = be16(b + off + 4);
+        int best = 0;
+        size_t at = 0, bytes = 0;
+        for (unsigned k = 0; k < count; k++) {
+            size_t r = off + 6 + 12 * (size_t)k;
+            if (r + 12 > off + len) break;
+            if (be16(b + r) != 3 || be16(b + r + 6) != 1) continue;
+            int score = be16(b + r + 4) == 0x409 ? 2 : 1;
+            if (score > best) { best = score; at = off + strs + be16(b + r + 10); bytes = be16(b + r + 8); }
+        }
+        if (!best || bytes < 2 || at + bytes > n || bytes / 2 >= cap) return 0;
+        for (size_t k = 0; k < bytes / 2; k++) out[k] = (wchar_t)be16(b + at + 2 * k);
+        out[bytes / 2] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int ends_with_ci(const char* s, const char* suffix) {
+    size_t n = strlen(s), k = strlen(suffix);
+    return n >= k && _stricmp(s + n - k, suffix) == 0;
+}
+
+/* Font from a .ttf/.otf/.ttc file or an installed family name, size = em height in pixels (4..256).
+ * Rasterizes code points 32..255 (antialiased) into a texture owned by the window. */
+long long salivo_sys_font_load(long long win, const char* src, long long size) {
+    long long err = 0;
+    if (!win_get(win, &err)) return err;
+    if (!src || !*src || strlen(src) > 4096 || size < 4 || size > 256) return SYS_INVALID_ARG;
+    wchar_t family[LF_FACESIZE];
+    int is_file = ends_with_ci(src, ".ttf") || ends_with_ci(src, ".otf") || ends_with_ci(src, ".ttc");
+    wchar_t* ws = widen(src);
+    if (!ws) return SYS_OS;
+    if (is_file) {
+        FILE* f = _wfopen(ws, L"rb");
+        if (!f) { free(ws); return GFX_NOT_FOUND; }
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        unsigned char* b = n >= 12 && n <= (1L << 28) ? (unsigned char*)malloc((size_t)n) : 0;
+        int ok = b && fread(b, 1, (size_t)n, f) == (size_t)n && ttf_family(b, (size_t)n, family, LF_FACESIZE);
+        fclose(f);
+        free(b);
+        /* ponytail: a private font stays registered for the life of the process (repeat loads only bump its count) */
+        if (ok) ok = AddFontResourceExW(ws, FR_PRIVATE, 0) > 0;
+        free(ws);
+        if (!ok) return GFX_BAD_ASSET;
+    } else {
+        size_t n = wcslen(ws);
+        if (n >= LF_FACESIZE) { free(ws); return SYS_INVALID_ARG; }
+        memcpy(family, ws, (n + 1) * sizeof(wchar_t));
+        free(ws);
+    }
+    HDC dc = CreateCompatibleDC(0);
+    HFONT font = dc ? CreateFontW(-(int)size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                                  CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, family) : 0;
+    if (!font) { if (dc) DeleteDC(dc); return SYS_OS; }
+    HGDIOBJ old_font = SelectObject(dc, font);
+    wchar_t face[LF_FACESIZE] = { 0 };
+    GetTextFaceW(dc, LF_FACESIZE, face);
+    long long rc = _wcsicmp(face, family) ? (is_file ? GFX_BAD_ASSET : GFX_NOT_FOUND) : 0; /* GDI substituted another face */
+    short adv[224];
+    int cw = 1, ch = 0;
+    if (!rc) {
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        ch = tm.tmHeight;
+        for (int i = 0; i < 224; i++) {
+            wchar_t c = (wchar_t)(32 + i);
+            SIZE sz;
+            adv[i] = GetTextExtentPoint32W(dc, &c, 1, &sz) ? (short)sz.cx : 0;
+            if (adv[i] > cw) cw = adv[i];
+        }
+        cw += 2 + tm.tmOverhang; /* room for overhang, so neighbouring cells do not bleed */
+        if (ch < 1 || !tex_dims_ok(16LL * cw, 14LL * ch)) rc = SYS_INVALID_ARG;
+    }
+    unsigned char* px = 0;
+    if (!rc) {
+        int W = 16 * cw, H = 14 * ch;
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = W;
+        bi.bmiHeader.biHeight = -H; /* top-down rows, like every texture */
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = 0;
+        HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+        px = bm && bits ? (unsigned char*)malloc((size_t)W * H * 4) : 0;
+        if (!px) {
+            rc = SYS_OS;
+        } else {
+            HGDIOBJ old_bm = SelectObject(dc, bm);
+            memset(bits, 0, (size_t)W * H * 4);
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkMode(dc, TRANSPARENT);
+            for (int i = 0; i < 224; i++) {
+                wchar_t c = (wchar_t)(32 + i);
+                TextOutW(dc, (i % 16) * cw + 1, (i / 16) * ch, &c, 1);
+            }
+            GdiFlush();
+            const unsigned char* g = (const unsigned char*)bits;
+            for (size_t k = 0; k < (size_t)W * H; k++) { /* white glyphs; coverage becomes alpha */
+                unsigned char a = g[k * 4] > g[k * 4 + 1] ? g[k * 4] : g[k * 4 + 1];
+                if (g[k * 4 + 2] > a) a = g[k * 4 + 2];
+                px[k * 4] = px[k * 4 + 1] = px[k * 4 + 2] = 255;
+                px[k * 4 + 3] = a;
+            }
+            SelectObject(dc, old_bm);
+        }
+        if (bm) DeleteObject(bm);
+    }
+    SelectObject(dc, old_font);
+    DeleteObject(font);
+    DeleteDC(dc);
+    if (rc) { free(px); return rc; }
+    long long h = tex_new(win, 16 * cw, 14 * ch, px); /* frees px on failure */
+    if (h < 0) return h;
+    GfxTex* t = (GfxTex*)slot_get(h, K_TEX)->p;
+    t->adv = (short*)malloc(sizeof adv);
+    if (!t->adv) { salivo_sys_tex_destroy(h); return SYS_OS; }
+    memcpy(t->adv, adv, sizeof adv);
+    t->cw = cw;
+    t->ch = ch;
+    return h;
+}
+
+/* One UTF-8 code point; a malformed sequence reads as '?'. */
+static unsigned utf8_next(const unsigned char** p) {
+    const unsigned char* s = *p;
+    unsigned c = *s++;
+    int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+    if (c >= 0x80 && c < 0xC0) { *p = s; return '?'; }
+    if (extra) {
+        c &= 0x3Fu >> extra;
+        for (int i = 0; i < extra; i++) {
+            if ((*s & 0xC0) != 0x80) { *p = s; return '?'; }
+            c = (c << 6) | (*s++ & 0x3F);
+        }
+    }
+    *p = s;
+    return c;
+}
+
+static int glyph_of(unsigned c) { return c < 32 || c > 255 ? '?' - 32 : (int)c - 32; }
+
+/* Draws UTF-8 text with its top-left at (x, y) ('\n' starts a new line; code points outside
+ * 32..255 draw as '?'). Returns the width of the widest line in pixels. */
+long long salivo_sys_draw_text(long long win, long long font, const char* text, long long x, long long y, long long rgba) {
+    long long err = 0;
+    GfxWin* w = frame_win(win, &err);
+    if (!w) return err;
+    if (w->mode != 1) return GFX_STATE;
+    if (!text) return SYS_INVALID_ARG;
+    void* tp;
+    long long rc = check_res(font, K_TEX, win, &tp);
+    if (rc) return rc;
+    GfxTex* t = (GfxTex*)tp;
+    if (!t) return SYS_INVALID_HANDLE;
+    if (!t->adv) return SYS_INVALID_ARG; /* a plain texture, not a font */
+    bind_tex(t);
+    set_color(rgba);
+    float cw = (float)t->cw, ch = (float)t->ch, cx = (float)x, cy = (float)y;
+    long long widest = 0;
+    const unsigned char* p = (const unsigned char*)text;
+    glBegin(GL_QUADS);
+    while (*p) {
+        unsigned c = utf8_next(&p);
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (cx - x > widest) widest = (long long)(cx - x);
+            cx = (float)x;
+            cy += ch;
+            continue;
+        }
+        int i = glyph_of(c);
+        float u0 = (float)((i % 16) * t->cw) / t->w, v0 = (float)((i / 16) * t->ch) / t->h;
+        float u1 = u0 + cw / t->w, v1 = v0 + ch / t->h, qx = cx - 1; /* glyphs sit 1 px into their cell */
+        glTexCoord2f(u0, v0); glVertex2f(qx, cy);
+        glTexCoord2f(u1, v0); glVertex2f(qx + cw, cy);
+        glTexCoord2f(u1, v1); glVertex2f(qx + cw, cy + ch);
+        glTexCoord2f(u0, v1); glVertex2f(qx, cy + ch);
+        cx += t->adv[i];
+    }
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+    if (cx - x > widest) widest = (long long)(cx - x);
+    g_draws++;
+    return glGetError() == GL_NO_ERROR ? widest : GFX_GRAPHICS;
+}
+
+/* which: 0 width of the widest line, 1 height (lines x line height; "" is one line) */
+long long salivo_sys_text_size(long long font, const char* text, long long which) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
+    GfxSlot* s = slot_get(font, K_TEX);
+    if (!s) return SYS_INVALID_HANDLE;
+    GfxTex* t = (GfxTex*)s->p;
+    if (!t->adv || !text || (which != 0 && which != 1)) return SYS_INVALID_ARG;
+    long long cur = 0, widest = 0, lines = 1;
+    const unsigned char* p = (const unsigned char*)text;
+    while (*p) {
+        unsigned c = utf8_next(&p);
+        if (c == '\r') continue;
+        if (c == '\n') { if (cur > widest) widest = cur; cur = 0; lines++; continue; }
+        cur += t->adv[glyph_of(c)];
+    }
+    if (cur > widest) widest = cur;
+    return which ? lines * t->ch : widest;
+}
+
+/* ---------- 38.3: audio through MCI (winmm, part of Windows; loaded on first use) ---------- */
+/* ponytail: MCI mpegvideo (DirectShow) mixes any number of open sounds; latency is tens of ms and one
+ * sound plays one instance at a time (load a sound twice to overlap it). XAudio2 if that ever matters. */
+
+static DWORD(WINAPI* g_mci)(const wchar_t*, wchar_t*, UINT, HWND);
+static char g_sound_tag; /* a sound's native state is its MCI alias "salivo<slot>" and its volume */
+static short g_volume[GFX_SLOTS]; /* the volume as set: MCI reads back a dB-rounded value */
+
+static int mci_load(void) {
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        HMODULE m = LoadLibraryW(L"winmm.dll");
+        if (m) g_mci = (DWORD(WINAPI*)(const wchar_t*, wchar_t*, UINT, HWND))GetProcAddress(m, "mciSendStringW");
+    }
+    return g_mci != 0;
+}
+
+static DWORD mci(wchar_t* reply, UINT cap, const wchar_t* fmt, ...) {
+    wchar_t cmd[4300];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vswprintf(cmd, sizeof cmd / sizeof cmd[0], fmt, ap);
+    va_end(ap);
+    if (reply && cap) reply[0] = 0;
+    return n < 0 ? 1 : g_mci(cmd, reply, reply ? cap : 0, 0);
+}
+
+static long long mci_int(int idx, const wchar_t* item) {
+    wchar_t r[64];
+    if (mci(r, 64, L"status salivo%d %ls", idx, item)) return SYS_OS;
+    return _wtoi64(r);
+}
+
+static GfxSlot* sound_get(long long h, long long* err) {
+    if (!gfx_thread_ok()) { *err = GFX_WRONG_THREAD; return 0; }
+    GfxSlot* s = slot_get(h, K_SOUND);
+    if (!s) *err = SYS_INVALID_HANDLE;
+    return s;
+}
+
+/* WAV, MP3 or any format a DirectShow decoder handles. -16 missing file, -17 not decodable. */
+long long salivo_sys_sound_load(const char* path) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
+    if (!path || !*path || strlen(path) > 4000 || strchr(path, '"')) return SYS_INVALID_ARG;
+    if (!mci_load()) return SYS_UNSUPPORTED;
+    wchar_t* wp = widen(path);
+    if (!wp) return SYS_OS;
+    DWORD attr = GetFileAttributesW(wp);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) { free(wp); return GFX_NOT_FOUND; }
+    long long h = slot_new(K_SOUND, &g_sound_tag, 0);
+    if (h < 0) { free(wp); return h; }
+    int idx = (int)(h & 0xFFFF) - 1;
+    DWORD e = mci(0, 0, L"open \"%ls\" type mpegvideo alias salivo%d", wp, idx);
+    free(wp);
+    if (!e && (mci(0, 0, L"set salivo%d time format milliseconds", idx) || mci_int(idx, L"length") <= 0)) {
+        mci(0, 0, L"close salivo%d", idx);
+        e = 1;
+    }
+    if (e) { slot_release(&g_slots[idx]); return GFX_BAD_ASSET; }
+    g_volume[idx] = 1000; /* MCI's default */
+    return h;
+}
+
+/* Plays from the start (restarting it if playing); loop 1 repeats until stopped. */
+long long salivo_sys_sound_play(long long h, long long loop) {
+    long long err = 0;
+    if (!sound_get(h, &err)) return err;
+    if (loop != 0 && loop != 1) return SYS_INVALID_ARG;
+    int idx = (int)(h & 0xFFFF) - 1;
+    return mci(0, 0, loop ? L"play salivo%d from 0 repeat" : L"play salivo%d from 0", idx) ? SYS_OS : 0;
+}
+
+long long salivo_sys_sound_stop(long long h) {
+    long long err = 0;
+    if (!sound_get(h, &err)) return err;
+    int idx = (int)(h & 0xFFFF) - 1;
+    return mci(0, 0, L"stop salivo%d", idx) || mci(0, 0, L"seek salivo%d to start", idx) ? SYS_OS : 0;
+}
+
+/* volume 0..1000 */
+long long salivo_sys_sound_volume(long long h, long long volume) {
+    long long err = 0;
+    if (!sound_get(h, &err)) return err;
+    if (volume < 0 || volume > 1000) return SYS_INVALID_ARG;
+    int idx = (int)(h & 0xFFFF) - 1;
+    if (mci(0, 0, L"setaudio salivo%d volume to %d", idx, (int)volume)) return SYS_OS;
+    g_volume[idx] = (short)volume;
+    return 0;
+}
+
+/* which: 0 playing (1/0), 1 length ms, 2 position ms, 3 volume 0..1000 */
+long long salivo_sys_sound_int(long long h, long long which) {
+    long long err = 0;
+    if (!sound_get(h, &err)) return err;
+    int idx = (int)(h & 0xFFFF) - 1;
+    switch (which) {
+    case 0: {
+        wchar_t r[64];
+        if (mci(r, 64, L"status salivo%d mode", idx)) return SYS_OS;
+        return wcscmp(r, L"playing") == 0;
+    }
+    case 1: return mci_int(idx, L"length");
+    case 2: return mci_int(idx, L"position");
+    case 3: return g_volume[idx];
+    }
+    return SYS_INVALID_ARG;
+}
+
+long long salivo_sys_sound_destroy(long long h) {
+    long long err = 0;
+    GfxSlot* s = sound_get(h, &err);
+    if (!s) return err;
+    mci(0, 0, L"close salivo%d", (int)(h & 0xFFFF) - 1);
+    slot_release(s);
+    return 0;
+}
+
 
 #else /* !_WIN32: the desktop platform is Windows-only for now */
 
@@ -1185,5 +1651,17 @@ long long salivo_sys_cam3d(long long w, long long a, long long b, long long c, l
 long long salivo_sys_draw_mesh(long long w, long long m, long long s, long long x, long long y, long long z, long long a, long long b, long long c, long long k, long long r, long long t) { (void)w; (void)m; (void)s; (void)x; (void)y; (void)z; (void)a; (void)b; (void)c; (void)k; (void)r; (void)t; return SYS_UNSUPPORTED; }
 long long salivo_sys_gfx_stat(long long w) { (void)w; return SYS_UNSUPPORTED; }
 char* salivo_sys_gfx_info(long long w, long long k) { (void)w; (void)k; return out_cstr(""); }
+
+long long salivo_sys_cam_screen(long long w) { (void)w; return SYS_UNSUPPORTED; }
+long long salivo_sys_draw_region(long long w, long long x, long long y, long long a, long long b, long long r, long long c, long long t, long long sx, long long sy, long long sw, long long sh) { (void)w; (void)x; (void)y; (void)a; (void)b; (void)r; (void)c; (void)t; (void)sx; (void)sy; (void)sw; (void)sh; return SYS_UNSUPPORTED; }
+long long salivo_sys_font_load(long long w, const char* s, long long n) { (void)w; (void)s; (void)n; return SYS_UNSUPPORTED; }
+long long salivo_sys_draw_text(long long w, long long f, const char* s, long long x, long long y, long long c) { (void)w; (void)f; (void)s; (void)x; (void)y; (void)c; return SYS_UNSUPPORTED; }
+long long salivo_sys_text_size(long long f, const char* s, long long k) { (void)f; (void)s; (void)k; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_load(const char* p) { (void)p; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_play(long long h, long long l) { (void)h; (void)l; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_stop(long long h) { (void)h; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_volume(long long h, long long v) { (void)h; (void)v; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_int(long long h, long long k) { (void)h; (void)k; return SYS_UNSUPPORTED; }
+long long salivo_sys_sound_destroy(long long h) { (void)h; return SYS_UNSUPPORTED; }
 
 #endif

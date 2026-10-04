@@ -1796,6 +1796,98 @@ pub func sendError(ctx: WebCtx, status: int, message: string) -> int {
     return sendText(ctx, st, body);
 }
 
+/// Serves one file below root as the complete response, for a web app's frontend: route "GET /"
+/// with path "" and "GET /*path" with param(ctx, "path") (a wildcard never matches "/" itself). An
+/// empty path or one ending in "/" means index.html. A path with a "." or ".."
+/// segment, a backslash, a ":" or a leading "/" never leaves root: 404, like a missing file or a
+/// directory. Content-Type follows the extension. Binary-safe (wasm, images).
+/// ponytail: the file is read with blocking I/O on the handler's worker: right for an app's own
+/// assets; put a CDN or reverse proxy in front for heavy static traffic.
+pub func serveStatic(ctx: WebCtx, root: string, path: string) -> int {
+    let mut rel = path;
+    let n = len(rel);
+    if (n == 0 || byteAt(rel, n - 1) == 47) { rel = rel + "index.html"; }
+    if (!webSafeRelPath(rel)) { return sendError(ctx, 404, "not found"); }
+    let fd = rtcfileopen(root + "/" + rel, "rb");
+    if (rtcfileisopen(fd) == 0) { return sendError(ctx, 404, "not found"); }
+    if (rtcfilemetadataisdir(fd) != 0) {
+        rtcfileclose(fd);
+        return sendError(ctx, 404, "not found");
+    }
+    let size = rtcfilemetadatasize(fd);
+    let x = setHeader(ctx, "content-type", webMimeType(rel));
+    let h = sendHead(ctx, 200, size);
+    if (h < 0) {
+        rtcfileclose(fd);
+        return h;
+    }
+    let cap = 65536;
+    let buf = rtalloc(cap, 16);
+    let mut left = size;
+    let mut rc = 0;
+    while (left > 0 && rc == 0) {
+        let mut want = cap;
+        if (left < want) { want = left; }
+        let got = rtcfileread(fd, buf, want);
+        if (got <= 0) {
+            rc = 0 - 8; // the file shrank while it was sent: the response is cut short
+        } else {
+            let w = rtaiohttpwrite(ctx.sh, buf, got);
+            if (w < 0) { rc = w; }
+            left = left - got;
+        }
+    }
+    rtdeallocate(buf, cap, 16);
+    rtcfileclose(fd);
+    if (rc < 0) { return rc; }
+    let f = rtaiohttpfinish(ctx.sh);
+    if (f < 0) { return f; }
+    return 0;
+}
+
+/// A relative path that stays below its root: no "", ".", ".." segment, no "\", ":" or leading "/"
+func webSafeRelPath(p: string) -> bool {
+    let n = len(p);
+    if (n == 0) { return false; }
+    let mut start = 0;
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || byteAt(p, i) == 47) {
+            let seg = i - start;
+            if (seg == 0) { return false; }
+            if (seg == 1 && byteAt(p, start) == 46) { return false; }
+            if (seg == 2 && byteAt(p, start) == 46 && byteAt(p, start + 1) == 46) { return false; }
+            start = i + 1;
+        } else if (byteAt(p, i) == 92 || byteAt(p, i) == 58) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Content-Type of a file name by its extension
+func webMimeType(p: string) -> string {
+    let n = len(p);
+    let mut dot = -1;
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (byteAt(p, i) == 46) { dot = i; }
+        if (byteAt(p, i) == 47) { dot = -1; }
+    }
+    if (dot < 0) { return "application/octet-stream"; }
+    let e = rtlower(slice(p, dot + 1, n));
+    if (e == "html" || e == "htm") { return "text/html; charset=utf-8"; }
+    if (e == "js" || e == "mjs") { return "text/javascript; charset=utf-8"; }
+    if (e == "css") { return "text/css; charset=utf-8"; }
+    if (e == "json") { return "application/json"; }
+    if (e == "wasm") { return "application/wasm"; }
+    if (e == "svg") { return "image/svg+xml"; }
+    if (e == "png") { return "image/png"; }
+    if (e == "jpg" || e == "jpeg") { return "image/jpeg"; }
+    if (e == "gif") { return "image/gif"; }
+    if (e == "ico") { return "image/x-icon"; }
+    if (e == "txt") { return "text/plain; charset=utf-8"; }
+    return "application/octet-stream";
+}
+
 // ---------------------------------------------------------------------------------------------
 // Middleware chain
 // ---------------------------------------------------------------------------------------------

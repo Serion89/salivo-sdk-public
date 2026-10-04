@@ -94,5 +94,18 @@ rtsysshaderlog|salivo_sys_shader_log|string||never|platform thread|compile/link 
 rtsysshaderdestroy|salivo_sys_shader_destroy|int|int|GPU|platform thread|frees the program
 rtsyscam3d|salivo_sys_cam3d|int|int,int,int,int,int,int,int,int,int,int|never|platform thread|perspective camera: eye xyz, target xyz (milli-units, up +Y), fov degrees, near, far (milli-units); enables depth test
 rtsysdrawmesh|salivo_sys_draw_mesh|int|int,int,int,int,int,int,int,int,int,int,int,int|GPU|platform thread|mesh, shader or 0, position xyz (milli), rotation x,y,z degrees, scale x1000, tint rgba, texture or 0; -15 without camera3d
-rtsysgfxstat|salivo_sys_gfx_stat|int|int|never|any thread|0 windows 1 textures 2 meshes 3 shaders (live) 4 draw calls 5 dropped events 6 queued events
+rtsysgfxstat|salivo_sys_gfx_stat|int|int|never|platform thread|0 windows 1 textures (fonts included) 2 meshes 3 shaders (live) 4 draw calls 5 dropped events 6 queued events 7 sounds (live)
 rtsysgfxinfo|salivo_sys_gfx_info|string|int,int|never|platform thread|OpenGL vendor (0), renderer (1) or version (2) of the window's context; "" for an invalid handle; new string owned by the caller
+# Stage 38.3 engine layer (salivo_gfx_runtime.inc): sprite-sheet regions, GDI glyph-atlas fonts (a font is a window-owned texture),
+# MCI audio. textureLoad also decodes PNG, JPEG, GIF and TIFF through GDI+. Sounds are generation handles not owned by a window.
+rtsyscamscreen|salivo_sys_cam_screen|int|int|never|platform thread|screen pixels (origin top-left) for the rest of the frame, dropping a 2D or 3D camera; -15 outside a frame
+rtsysdrawregion|salivo_sys_draw_region|int|int,int,int,int,int,int,int,int,int,int,int,int|GPU|platform thread|quad centered on x,y with w,h (negative mirrors), rotation degrees, tint rgba, texture, showing its texel rectangle sx,sy,sw,sh; -7 rectangle outside the texture
+rtsysfontload|salivo_sys_font_load|int|int,string,int|disk + rasterize + GPU upload|platform thread|font from a .ttf/.otf/.ttc file or an installed family name, em height 4..256 px; a texture owned by the window; -16 missing file or unknown family, -17 unreadable font file
+rtsysdrawtext|salivo_sys_draw_text|int|int,int,string,int,int,int|GPU|platform thread|UTF-8 text with its top-left at x,y in rgba; newline starts a line; code points outside 32..255 draw as ?; returns the widest line in pixels; -7 a texture that is not a font
+rtsystextsize|salivo_sys_text_size|int|int,string,int|never|platform thread|0 widest line in pixels 1 height (lines x line height)
+rtsyssoundload|salivo_sys_sound_load|int|string|disk + decoder start|platform thread|caller owns the sound until rtsyssounddestroy; WAV, MP3 or any DirectShow format; -16 missing file, -17 not decodable
+rtsyssoundplay|salivo_sys_sound_play|int|int,int|never (plays asynchronously)|platform thread|plays from the start, 1 loops until stopped
+rtsyssoundstop|salivo_sys_sound_stop|int|int|never|platform thread|stops and rewinds
+rtsyssoundvolume|salivo_sys_sound_volume|int|int,int|never|platform thread|volume 0..1000
+rtsyssoundint|salivo_sys_sound_int|int|int,int|never|platform thread|0 playing 1 length ms 2 position ms 3 volume
+rtsyssounddestroy|salivo_sys_sound_destroy|int|int|brief|platform thread|closes the sound; -10 when already destroyed

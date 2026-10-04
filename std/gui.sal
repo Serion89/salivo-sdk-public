@@ -1,0 +1,105 @@
+module salivo.std.gui;
+
+// Stage 38.3 immediate-mode GUI (docs/STAGE_38_3_ENGINE.md): panels, labels, buttons and progress
+// bars drawn in screen pixels on top of a game frame. Pure Salivo over salivo.std.game.
+//
+// Every frame: guiBegin (switches to screen space and reads the mouse from the game's input),
+// then widget calls, then guiEnd. A button needs a stable non-zero id; it reports a click when
+// the left button is released over it after being pressed on it. guiInput feeds the mouse state
+// directly instead (tests, gamepads, remapped input).
+
+><salivo.std.game::{Game, gameWindow, cameraScreen, drawText, textWidth, textHeight, pointerX, pointerY, mouseHeld, mouseClicked};
+><salivo.std.desktop::{fillRect};
+
+pub struct Gui {
+    int font;
+    int panel;
+    int normal;
+    int hover;
+    int pressed;
+    int text;
+    int bar;
+    int mx;
+    int my;
+    bool held;
+    bool click;
+    int active;
+}
+
+/// GUI using a font from fontLoad (0 draws no text), with the default dark theme
+pub func guiNew(font: int) -> Gui {
+    return Gui {
+        font: font, panel: 0x202634E6, normal: 0x3A4256FF, hover: 0x4C5670FF, pressed: 0x2A3040FF, text: 0xF0F0F0FF,
+        bar: 0x4CAF50FF, mx: -1, my: -1, held: false, click: false, active: 0
+    };
+}
+/// Colors (0xRRGGBBAA) of panels, buttons (normal, hovered, pressed), text and progress fill
+pub func guiTheme(ui: Gui, panel: int, normal: int, hover: int, pressed: int, text: int, bar: int) {
+    ui.panel = panel;
+    ui.normal = normal;
+    ui.hover = hover;
+    ui.pressed = pressed;
+    ui.text = text;
+    ui.bar = bar;
+}
+/// Mouse state for this frame: pointer in screen pixels, left button held, pressed this frame
+pub func guiInput(ui: Gui, mx: int, my: int, held: bool, clicked: bool) {
+    ui.mx = mx;
+    ui.my = my;
+    ui.held = held;
+    ui.click = clicked;
+}
+/// Starts the GUI for this frame: screen space and the game's mouse. 0 or a frame error.
+pub func guiBegin(ui: Gui, g: Game) -> int {
+    guiInput(ui, pointerX(g), pointerY(g), mouseHeld(g, 1), mouseClicked(g, 1));
+    return cameraScreen(g);
+}
+/// Ends the frame: a press released anywhere is over
+pub func guiEnd(ui: Gui) {
+    if (!ui.held) { ui.active = 0; }
+}
+
+func guiInside(ui: Gui, x: int, y: int, w: int, h: int) -> bool {
+    return ui.mx >= x && ui.mx < x + w && ui.my >= y && ui.my < y + h;
+}
+
+/// Filled rectangle with its top-left at (x, y)
+pub func guiPanel(ui: Gui, g: Game, x: int, y: int, width: int, height: int) -> int {
+    return fillRect(gameWindow(g), x, y, width, height, ui.panel);
+}
+/// Text with its top-left at (x, y); returns its width in pixels
+pub func guiLabel(ui: Gui, g: Game, text: string, x: int, y: int) -> int {
+    if (ui.font == 0) { return 0; }
+    return drawText(g, ui.font, text, x, y, ui.text);
+}
+/// Button with a centered label. True on the frame a click on it completes.
+pub func guiButton(ui: Gui, g: Game, id: int, label: string, x: int, y: int, width: int, height: int) -> bool {
+    let over = guiInside(ui, x, y, width, height);
+    if (over && ui.click) { ui.active = id; }
+    let mut color = ui.normal;
+    if (over) { color = ui.hover; }
+    if (ui.active == id && ui.held) { color = ui.pressed; }
+    fillRect(gameWindow(g), x, y, width, height, color);
+    if (ui.font != 0 && len(label) > 0) {
+        let tw = textWidth(ui.font, label);
+        let th = textHeight(ui.font, label);
+        drawText(g, ui.font, label, x + (width - tw) / 2, y + (height - th) / 2, ui.text);
+    }
+    if (ui.active == id && !ui.held) {
+        ui.active = 0;
+        return over;
+    }
+    return false;
+}
+/// Bar filled to value / maximum (value clamped to 0..maximum). 0, or -7 when maximum <= 0.
+pub func guiProgress(ui: Gui, g: Game, x: int, y: int, width: int, height: int, value: int, maximum: int) -> int {
+    if (maximum <= 0) { return -7; }
+    let mut v = value;
+    if (v < 0) { v = 0; }
+    if (v > maximum) { v = maximum; }
+    let rc = fillRect(gameWindow(g), x, y, width, height, ui.normal);
+    if (rc < 0) { return rc; }
+    let fill = width * v / maximum;
+    if (fill <= 0) { return 0; }
+    return fillRect(gameWindow(g), x, y, fill, height, ui.bar);
+}
