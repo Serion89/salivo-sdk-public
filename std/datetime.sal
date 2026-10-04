@@ -4,7 +4,7 @@
 module salivo.std.datetime;
 
 ><salivo.std.core::{Result, ok, err};
-><salivo.std.text::{byteAt, isDigit};
+><salivo.std.text::{byteAt, byteAtUnchecked, isDigit};
 
 pub struct DateTime {
     int year;
@@ -161,9 +161,9 @@ pub func format(dt: DateTime, pattern: string) -> string {
     let n = len(pattern);
     let mut i = 0;
     while (i < n) {
-        let c = byteAt(pattern, i);
+        let c = byteAtUnchecked(pattern, i);
         if (c == 37 && i + 1 < n) {
-            let f = byteAt(pattern, i + 1);
+            let f = byteAtUnchecked(pattern, i + 1);
             if (f == 89) { out = out + pad(dt.year, 4); }
             else if (f == 109) { out = out + pad(dt.month, 2); }
             else if (f == 100) { out = out + pad(dt.day, 2); }
@@ -228,8 +228,8 @@ pub func parseIso(s: string) -> Result<DateTime, string> {
         if (i < n && byteAt(s, i) == 46) {
             i = i + 1;
             let mut scale = 100;
-            while (i < n && isDigit(byteAt(s, i))) {
-                ms = ms + (byteAt(s, i) - 48) * scale;
+            while (i < n && isDigit(byteAtUnchecked(s, i))) {
+                ms = ms + (byteAtUnchecked(s, i) - 48) * scale;
                 scale = scale / 10;
                 i = i + 1;
             }

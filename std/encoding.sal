@@ -6,7 +6,7 @@ module salivo.std.encoding;
 
 ><salivo.std.core::{Result, ok, err};
 ><salivo.std.collections::{Vec, vecNew, push, get, veclen};
-><salivo.std.text::{byteAt};
+><salivo.std.text::{byteAtUnchecked};
 
 func b64Alphabet(urlSafe: bool) -> string {
     if (urlSafe) { return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"; }
@@ -19,18 +19,18 @@ func b64Encode(s: string, urlSafe: bool, pad: bool) -> string {
     let mut out = "";
     let mut i = 0;
     while (i + 2 < n) {
-        let v = byteAt(s, i) * 65536 + byteAt(s, i + 1) * 256 + byteAt(s, i + 2);
+        let v = byteAtUnchecked(s, i) * 65536 + byteAtUnchecked(s, i + 1) * 256 + byteAtUnchecked(s, i + 2);
         out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1) +
             slice(a, (v / 64) % 64, (v / 64) % 64 + 1) + slice(a, v % 64, v % 64 + 1);
         i = i + 3;
     }
     let rest = n - i;
     if (rest == 1) {
-        let v = byteAt(s, i) * 65536;
+        let v = byteAtUnchecked(s, i) * 65536;
         out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1);
         if (pad) { out = out + "=="; }
     } else if (rest == 2) {
-        let v = byteAt(s, i) * 65536 + byteAt(s, i + 1) * 256;
+        let v = byteAtUnchecked(s, i) * 65536 + byteAtUnchecked(s, i + 1) * 256;
         out = out + slice(a, v / 262144, v / 262144 + 1) + slice(a, (v / 4096) % 64, (v / 4096) % 64 + 1) +
             slice(a, (v / 64) % 64, (v / 64) % 64 + 1);
         if (pad) { out = out + "="; }
@@ -75,14 +75,14 @@ pub func bytesToText(b: Vec<int>) -> Result<string, string> {
 
 func b64Decode(s: string, urlSafe: bool) -> Result<string, string> {
     let mut n = len(s);
-    while (n > 0 && byteAt(s, n - 1) == 61) { n = n - 1; }
+    while (n > 0 && byteAtUnchecked(s, n - 1) == 61) { n = n - 1; }
     if (n % 4 == 1) { return err<string, string>("invalid base64 length"); }
     let mut out = vecNew<int>();
     let mut acc = 0;
     let mut bits = 0;
     let mut i = 0;
     while (i < n) {
-        let v = b64Value(byteAt(s, i), urlSafe);
+        let v = b64Value(byteAtUnchecked(s, i), urlSafe);
         if (v < 0) { return err<string, string>("invalid base64 character at " + intstr(i)); }
         acc = (acc * 64 + v) % 16777216;
         bits = bits + 6;
@@ -117,7 +117,7 @@ pub func hexEncode(s: string) -> string {
     let n = len(s);
     let mut i = 0;
     while (i < n) {
-        let b = byteAt(s, i);
+        let b = byteAtUnchecked(s, i);
         out = out + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
         i = i + 1;
     }
@@ -138,8 +138,8 @@ pub func hexDecode(s: string) -> Result<string, string> {
     let mut out = vecNew<int>();
     let mut i = 0;
     while (i < n) {
-        let hi = hexValue(byteAt(s, i));
-        let lo = hexValue(byteAt(s, i + 1));
+        let hi = hexValue(byteAtUnchecked(s, i));
+        let lo = hexValue(byteAtUnchecked(s, i + 1));
         if (hi < 0 || lo < 0) { return err<string, string>("invalid hex digit at " + intstr(i)); }
         out = push<int>(out, hi * 16 + lo);
         i = i + 2;
@@ -159,7 +159,7 @@ pub func urlEncode(s: string) -> string {
     let mut start = 0;
     let mut i = 0;
     while (i < n) {
-        let b = byteAt(s, i);
+        let b = byteAtUnchecked(s, i);
         if (!urlUnreserved(b)) {
             out = out + slice(s, start, i) + "%" + slice(digits, b / 16, b / 16 + 1) + slice(digits, b % 16, b % 16 + 1);
             start = i + 1;
@@ -175,11 +175,11 @@ pub func urlDecode(s: string, plusSpace: bool) -> Result<string, string> {
     let n = len(s);
     let mut i = 0;
     while (i < n) {
-        let b = byteAt(s, i);
+        let b = byteAtUnchecked(s, i);
         if (b == 37) {
             if (i + 2 >= n) { return err<string, string>("truncated % escape at " + intstr(i)); }
-            let hi = hexValue(byteAt(s, i + 1));
-            let lo = hexValue(byteAt(s, i + 2));
+            let hi = hexValue(byteAtUnchecked(s, i + 1));
+            let lo = hexValue(byteAtUnchecked(s, i + 2));
             if (hi < 0 || lo < 0) { return err<string, string>("invalid % escape at " + intstr(i)); }
             out = push<int>(out, hi * 16 + lo);
             i = i + 3;

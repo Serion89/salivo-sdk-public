@@ -2,7 +2,7 @@
 // Random (version 4) UUIDs from the OS secure random source, plus validation.
 module salivo.std.uuid;
 
-><salivo.std.text::{byteAt};
+><salivo.std.text::{byteAtUnchecked};
 
 /// A random version 4 UUID, e.g. "3f2b8c1e-9d4a-4f6b-8e2c-1a7d5b9c0e3f"
 pub func uuid4() -> string {
@@ -34,7 +34,7 @@ pub func isUuid(s: string) -> bool {
     if (len(s) != 36) { return false; }
     let mut i = 0;
     while (i < 36) {
-        let c = byteAt(s, i);
+        let c = byteAtUnchecked(s, i);
         if (i == 8 || i == 13 || i == 18 || i == 23) {
             if (c != 45) { return false; }
         } else {

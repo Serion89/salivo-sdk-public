@@ -1,0 +1,426 @@
+module salivo.std.game;
+
+// Stage 38.2 2D/3D game layer (docs/STAGE_38_2_GAME.md) on top of the Stage 38.1 desktop platform
+// (salivo.std.desktop): one native window, its event queue and its OpenGL context. Windows only.
+//
+// Frame order, every frame:
+//   gameFrame   poll window events, update input state (held / pressed / released), advance time
+//   (your fixed updates: gameFixedSteps) and variable update using gameDelta
+//   gameBegin   start the frame and clear it
+//   draw calls  drawSprite / sceneDraw (2D), camera3d + drawMesh (3D)
+//   gameEnd     present (paced by vsync)
+// Focus policy: losing focus pauses the game (gameDelta is 0, keys are released); regaining it
+// resumes without a time jump. Closing the window ends gameFrame's loop; gameShutdown destroys
+// the window and every texture, mesh and shader created for it, in that order.
+//
+// Units: 2D positions and sizes in pixels, rotations in degrees (clockwise on screen), zoom x1000.
+// 3D positions and scales in milli-units (1000 = 1.0), rotations in degrees. Time in microseconds.
+// Colors are 0xRRGGBBAA. Errors are the negative codes of salivo.std.desktop (errorName).
+
+><salivo.std.desktop::{
+    windowCreate, windowDestroy, windowShow, eventPoll, eventKey, eventFocused, eventX, eventY,
+    eventButton, frameBegin, frameClear, present, timeMicros, EventClose, EventFocus, EventKeyDown,
+    EventKeyUp, EventMouseMove, EventMouseDown, EventMouseUp, EventResize, eventWidth, eventHeight
+};
+><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+
+pub struct Game {
+    int win;
+    bool running;
+    bool paused;
+    int frame;
+    int lastUs;
+    int dt;
+    int elapsed;
+    int acc;
+    int maxDt;
+    Vec<int> keys;
+    Vec<int> pressed;
+    Vec<int> released;
+    int buttons;
+    int clicked;
+    int mx;
+    int my;
+    int pmx;
+    int pmy;
+    int width;
+    int height;
+}
+
+/// Opens a shown window and a game around it. Check gameOk: on failure gameError is the code.
+pub func gameNew(title: string, width: int, height: int) -> Game {
+    let win = windowCreate(title, width, height);
+    let mut keys = vecNew<int>();
+    let mut pressed = vecNew<int>();
+    let mut released = vecNew<int>();
+    for (let mut i = 0; i < 256; i = i + 1) {
+        keys = push<int>(keys, 0);
+        pressed = push<int>(pressed, 0);
+        released = push<int>(released, 0);
+    }
+    if (win > 0) { windowShow(win); }
+    return Game {
+        win: win, running: win > 0, paused: false, frame: 0, lastUs: timeMicros(), dt: 0, elapsed: 0,
+        acc: 0, maxDt: 250000, keys: keys, pressed: pressed, released: released, buttons: 0, clicked: 0, mx: 0, my: 0, pmx: 0,
+        pmy: 0, width: width, height: height
+    };
+}
+
+pub func gameOk(g: Game) -> bool { return g.win > 0; }
+pub func gameError(g: Game) -> int {
+    if (g.win > 0) { return 0; }
+    return g.win;
+}
+pub func gameWindow(g: Game) -> int { return g.win; }
+
+func bit(n: int) -> int {
+    let mut r = 1;
+    for (let mut i = 0; i < n; i = i + 1) { r = r * 2; }
+    return r;
+}
+
+/// Polls events, updates input and time. Returns false once the window was closed or the game
+/// shut down: leave the loop and call gameShutdown.
+pub func gameFrame(g: Game) -> bool {
+    if (!g.running) { return false; }
+    for (let mut k = 0; k < 256; k = k + 1) {
+        set<int>(g.pressed, k, 0);
+        set<int>(g.released, k, 0);
+    }
+    g.clicked = 0;
+    g.pmx = g.mx;
+    g.pmy = g.my;
+    let mut ev = eventPoll();
+    while (ev > 0) {
+        if (ev == EventClose) {
+            g.running = false;
+        } else if (ev == EventKeyDown) {
+            // edges are recorded per event, so a press and release inside one frame still count
+            if (get<int>(g.keys, eventKey()) == 0) { set<int>(g.pressed, eventKey(), 1); }
+            set<int>(g.keys, eventKey(), 1);
+        } else if (ev == EventKeyUp) {
+            if (get<int>(g.keys, eventKey()) == 1) { set<int>(g.released, eventKey(), 1); }
+            set<int>(g.keys, eventKey(), 0);
+        } else if (ev == EventMouseMove) {
+            g.mx = eventX();
+            g.my = eventY();
+        } else if (ev == EventMouseDown) {
+            g.mx = eventX();
+            g.my = eventY();
+            if ((g.buttons / bit(eventButton())) % 2 == 0) { g.buttons = g.buttons + bit(eventButton()); }
+            if ((g.clicked / bit(eventButton())) % 2 == 0) { g.clicked = g.clicked + bit(eventButton()); }
+        } else if (ev == EventMouseUp) {
+            g.mx = eventX();
+            g.my = eventY();
+            if ((g.buttons / bit(eventButton())) % 2 == 1) { g.buttons = g.buttons - bit(eventButton()); }
+        } else if (ev == EventFocus) {
+            g.paused = !eventFocused();
+        } else if (ev == EventResize) {
+            if (eventWidth() > 0) {
+                g.width = eventWidth();
+                g.height = eventHeight();
+            }
+        }
+        ev = eventPoll();
+    }
+    if (ev < 0) {
+        g.running = false;
+        return false;
+    }
+    let now = timeMicros();
+    let mut dt = now - g.lastUs;
+    g.lastUs = now;
+    if (dt > g.maxDt) { dt = g.maxDt; }
+    if (dt < 0 || g.paused || g.frame == 0) { dt = 0; }
+    g.dt = dt;
+    g.elapsed = g.elapsed + dt;
+    g.frame = g.frame + 1;
+    return g.running;
+}
+
+/// Microseconds since the previous frame: 0 on the first frame and while paused, at most 250 ms
+pub func gameDelta(g: Game) -> int { return g.dt; }
+/// Game time in microseconds (sum of deltas: stops while paused)
+pub func gameTime(g: Game) -> int { return g.elapsed; }
+pub func gameFrameCount(g: Game) -> int { return g.frame; }
+pub func gamePaused(g: Game) -> bool { return g.paused; }
+pub func gameRunning(g: Game) -> bool { return g.running; }
+pub func gameWidth(g: Game) -> int { return g.width; }
+pub func gameHeight(g: Game) -> int { return g.height; }
+/// Largest delta a frame reports (default 250 ms); longer stalls are dropped, not simulated
+pub func gameSetMaxDelta(g: Game, micros: int) {
+    if (micros > 0) { g.maxDt = micros; }
+}
+/// Ends the loop at the next gameFrame (a game's own quit action)
+pub func gameQuit(g: Game) { g.running = false; }
+
+/// Fixed-timestep simulation: adds this frame's delta to the accumulator and returns how many
+/// steps of stepMicros to run now, at most 5 (extra time is dropped, so a slow frame cannot cause
+/// an ever-growing backlog).
+pub func gameFixedSteps(g: Game, stepMicros: int) -> int {
+    if (stepMicros <= 0) { return 0; }
+    g.acc = g.acc + g.dt;
+    let mut n = g.acc / stepMicros;
+    if (n > 5) {
+        n = 5;
+        g.acc = 0;
+    } else {
+        g.acc = g.acc - n * stepMicros;
+    }
+    return n;
+}
+
+// ---- Input (state as of the latest gameFrame) ----
+
+pub func keyHeld(g: Game, key: int) -> bool {
+    if (key < 0 || key > 255) { return false; }
+    return get<int>(g.keys, key) == 1;
+}
+/// Went down since the previous gameFrame (auto-repeat does not count)
+pub func keyPressed(g: Game, key: int) -> bool {
+    if (key < 0 || key > 255) { return false; }
+    return get<int>(g.pressed, key) == 1;
+}
+/// Went up since the previous gameFrame
+pub func keyReleased(g: Game, key: int) -> bool {
+    if (key < 0 || key > 255) { return false; }
+    return get<int>(g.released, key) == 1;
+}
+pub func mouseHeld(g: Game, button: int) -> bool { return (g.buttons / bit(button)) % 2 == 1; }
+/// Went down since the previous gameFrame
+pub func mouseClicked(g: Game, button: int) -> bool { return (g.clicked / bit(button)) % 2 == 1; }
+pub func pointerX(g: Game) -> int { return g.mx; }
+pub func pointerY(g: Game) -> int { return g.my; }
+pub func pointerDeltaX(g: Game) -> int { return g.mx - g.pmx; }
+pub func pointerDeltaY(g: Game) -> int { return g.my - g.pmy; }
+
+// ---- Frames ----
+
+/// Starts the frame and clears it to color
+pub func gameBegin(g: Game, color: int) -> int {
+    let rc = frameBegin(g.win);
+    if (rc < 0) { return rc; }
+    return frameClear(g.win, color);
+}
+pub func gameEnd(g: Game) -> int { return present(g.win); }
+
+/// Destroys the window with every texture, mesh and shader created for it. Idempotent for the
+/// game: later frames return false and draw calls return -10.
+pub func gameShutdown(g: Game) -> int {
+    g.running = false;
+    if (g.win <= 0) { return 0; }
+    let rc = windowDestroy(g.win);
+    g.win = -10;
+    return rc;
+}
+
+// ---- 2D ----
+
+/// 2D camera for the rest of the frame: world point (x, y) at the window center, zoom x1000, rotation degrees
+pub func camera2d(g: Game, x: int, y: int, zoom: int, rotation: int) -> int { return rtsyscam2d(g.win, x, y, zoom, rotation); }
+/// Quad centered on (x, y), width x height, rotated, tinted by color (texture 0 = solid color)
+pub func drawSprite(g: Game, x: int, y: int, width: int, height: int, rotation: int, color: int, texture: int) -> int {
+    return rtsysdrawquad(g.win, x, y, width, height, rotation, color, texture);
+}
+
+// ---- Textures (owned by the game's window) ----
+
+/// Transparent texture of width x height; set texels with texturePixel
+pub func textureCreate(g: Game, width: int, height: int) -> int { return rtsystexcreate(g.win, width, height); }
+/// Loads an uncompressed 24/32-bit BMP: -16 missing, -17 not a supported image
+pub func textureLoad(g: Game, path: string) -> int { return rtsystexload(g.win, path); }
+pub func texturePixel(texture: int, x: int, y: int, color: int) -> int { return rtsystexpixel(texture, x, y, color); }
+pub func textureWidth(texture: int) -> int { return rtsystexsize(texture, 0); }
+pub func textureHeight(texture: int) -> int { return rtsystexsize(texture, 1); }
+pub func textureDestroy(texture: int) -> int { return rtsystexdestroy(texture); }
+
+// ---- 3D ----
+
+/// Empty triangle-list mesh
+pub func meshCreate(g: Game) -> int { return rtsysmeshcreate(g.win); }
+/// Appends a vertex: position (milli-units), color, texture coordinates (x1000); returns the vertex count
+pub func meshVertex(mesh: int, x: int, y: int, z: int, color: int, u: int, v: int) -> int {
+    return rtsysmeshvertex(mesh, x, y, z, color, u, v);
+}
+pub func meshVertexCount(mesh: int) -> int { return rtsysmeshcount(mesh); }
+pub func meshDestroy(mesh: int) -> int { return rtsysmeshdestroy(mesh); }
+
+func face(m: int, ax: int, ay: int, az: int, bx: int, by: int, bz: int, cx: int, cy: int, cz: int, dx: int, dy: int, dz: int, color: int) {
+    meshVertex(m, ax, ay, az, color, 0, 0);
+    meshVertex(m, bx, by, bz, color, 1000, 0);
+    meshVertex(m, cx, cy, cz, color, 1000, 1000);
+    meshVertex(m, ax, ay, az, color, 0, 0);
+    meshVertex(m, cx, cy, cz, color, 1000, 1000);
+    meshVertex(m, dx, dy, dz, color, 0, 1000);
+}
+
+/// Cube centered on the origin with edge length size (milli-units), one color per face
+/// (front, back, left, right, top, bottom)
+pub func meshCube(g: Game, size: int, colorFront: int, colorBack: int, colorLeft: int, colorRight: int, colorTop: int, colorBottom: int) -> int {
+    let m = meshCreate(g);
+    if (m < 0) { return m; }
+    let h = size / 2;
+    face(m, 0 - h, 0 - h, h, h, 0 - h, h, h, h, h, 0 - h, h, h, colorFront);
+    face(m, h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, colorBack);
+    face(m, 0 - h, 0 - h, 0 - h, 0 - h, 0 - h, h, 0 - h, h, h, 0 - h, h, 0 - h, colorLeft);
+    face(m, h, 0 - h, h, h, 0 - h, 0 - h, h, h, 0 - h, h, h, h, colorRight);
+    face(m, 0 - h, h, h, h, h, h, h, h, 0 - h, 0 - h, h, 0 - h, colorTop);
+    face(m, 0 - h, 0 - h, 0 - h, h, 0 - h, 0 - h, h, 0 - h, h, 0 - h, 0 - h, h, colorBottom);
+    return m;
+}
+
+/// GLSL program (vertex + fragment source). -18 on a compile or link error: shaderLog has the
+/// driver's message. Optional uniforms: vec4 tint, sampler2D tex, int useTex.
+pub func shaderCreate(g: Game, vertexSource: string, fragmentSource: string) -> int {
+    return rtsysshadercreate(g.win, vertexSource, fragmentSource);
+}
+pub func shaderLog() -> string { return rtsysshaderlog(); }
+pub func shaderDestroy(shader: int) -> int { return rtsysshaderdestroy(shader); }
+
+/// Perspective camera for the rest of the frame: eye and target (milli-units, up = +Y), vertical
+/// field of view (degrees), near and far planes (milli-units). Enables depth testing.
+pub func camera3d(g: Game, ex: int, ey: int, ez: int, tx: int, ty: int, tz: int, fov: int, near: int, far: int) -> int {
+    return rtsyscam3d(g.win, ex, ey, ez, tx, ty, tz, fov, near, far);
+}
+/// Draws a mesh under the 3D camera. Model = translate * rotateY * rotateX * rotateZ * scale.
+/// shader 0 uses vertex colors (times the texture); a shader also gets tint = color.
+pub func drawMesh(g: Game, mesh: int, shader: int, x: int, y: int, z: int, rx: int, ry: int, rz: int, scale: int, color: int, texture: int) -> int {
+    return rtsysdrawmesh(g.win, mesh, shader, x, y, z, rx, ry, rz, scale, color, texture);
+}
+
+// ---- Scene: entities with a transform and a sprite ----
+//
+// Entity ids carry a generation: (generation * 65536) + slot + 1. Destroying an entity frees its
+// slot for reuse with the next generation, so an old id never names the new entity (-10).
+// Destroying during iteration is safe: the slot is only marked free.
+
+pub struct Scene {
+    Vec<int> gen;
+    Vec<int> alive;
+    Vec<int> x;
+    Vec<int> y;
+    Vec<int> w;
+    Vec<int> h;
+    Vec<int> rot;
+    Vec<int> color;
+    Vec<int> tex;
+    int live;
+}
+
+pub func sceneNew() -> Scene {
+    return Scene {
+        gen: vecNew<int>(), alive: vecNew<int>(), x: vecNew<int>(), y: vecNew<int>(), w: vecNew<int>(),
+        h: vecNew<int>(), rot: vecNew<int>(), color: vecNew<int>(), tex: vecNew<int>(), live: 0
+    };
+}
+
+/// Slot of a live entity id, or -1
+func slotOf(s: Scene, id: int) -> int {
+    if (id <= 0) { return -1; }
+    let slot = id % 65536 - 1;
+    if (slot < 0 || slot >= veclen<int>(s.gen)) { return -1; }
+    if (get<int>(s.alive, slot) == 0 || get<int>(s.gen, slot) != id / 65536) { return -1; }
+    return slot;
+}
+
+/// New entity at the origin, 0 x 0, white, untextured. Returns its id.
+pub func entityCreate(s: Scene) -> int {
+    let n = veclen<int>(s.gen);
+    let mut slot = -1;
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (slot < 0 && get<int>(s.alive, i) == 0) { slot = i; }
+    }
+    if (slot < 0) {
+        if (n >= 65535) { return -11; }
+        s.gen = push<int>(s.gen, 0);
+        s.alive = push<int>(s.alive, 0);
+        s.x = push<int>(s.x, 0);
+        s.y = push<int>(s.y, 0);
+        s.w = push<int>(s.w, 0);
+        s.h = push<int>(s.h, 0);
+        s.rot = push<int>(s.rot, 0);
+        s.color = push<int>(s.color, 0);
+        s.tex = push<int>(s.tex, 0);
+        slot = n;
+    }
+    let g = get<int>(s.gen, slot) + 1;
+    set<int>(s.gen, slot, g);
+    set<int>(s.alive, slot, 1);
+    set<int>(s.x, slot, 0);
+    set<int>(s.y, slot, 0);
+    set<int>(s.w, slot, 0);
+    set<int>(s.h, slot, 0);
+    set<int>(s.rot, slot, 0);
+    set<int>(s.color, slot, 0xFFFFFFFF);
+    set<int>(s.tex, slot, 0);
+    s.live = s.live + 1;
+    return g * 65536 + slot + 1;
+}
+
+/// 0, or -10 when the id is not a live entity (already destroyed, stale or foreign)
+pub func entityDestroy(s: Scene, id: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return -10; }
+    set<int>(s.alive, slot, 0);
+    s.live = s.live - 1;
+    return 0;
+}
+
+pub func entityAlive(s: Scene, id: int) -> bool { return slotOf(s, id) >= 0; }
+pub func sceneCount(s: Scene) -> int { return s.live; }
+
+pub func entityPlace(s: Scene, id: int, x: int, y: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return -10; }
+    set<int>(s.x, slot, x);
+    set<int>(s.y, slot, y);
+    return 0;
+}
+pub func entityMove(s: Scene, id: int, dx: int, dy: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return -10; }
+    set<int>(s.x, slot, get<int>(s.x, slot) + dx);
+    set<int>(s.y, slot, get<int>(s.y, slot) + dy);
+    return 0;
+}
+pub func entitySprite(s: Scene, id: int, width: int, height: int, color: int, texture: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return -10; }
+    set<int>(s.w, slot, width);
+    set<int>(s.h, slot, height);
+    set<int>(s.color, slot, color);
+    set<int>(s.tex, slot, texture);
+    return 0;
+}
+pub func entityRotate(s: Scene, id: int, degrees: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return -10; }
+    set<int>(s.rot, slot, degrees);
+    return 0;
+}
+/// x of a live entity (0 for a dead id: check entityAlive)
+pub func entityX(s: Scene, id: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return 0; }
+    return get<int>(s.x, slot);
+}
+pub func entityY(s: Scene, id: int) -> int {
+    let slot = slotOf(s, id);
+    if (slot < 0) { return 0; }
+    return get<int>(s.y, slot);
+}
+
+/// Draws every live entity in creation-slot order. Returns the number drawn or the first error.
+pub func sceneDraw(g: Game, s: Scene) -> int {
+    let mut drawn = 0;
+    let n = veclen<int>(s.gen);
+    for (let mut i = 0; i < n; i = i + 1) {
+        if (get<int>(s.alive, i) == 1) {
+            let rc = rtsysdrawquad(g.win, get<int>(s.x, i), get<int>(s.y, i), get<int>(s.w, i), get<int>(s.h, i),
+                                   get<int>(s.rot, i), get<int>(s.color, i), get<int>(s.tex, i));
+            if (rc < 0) { return rc; }
+            drawn = drawn + 1;
+        }
+    }
+    return drawn;
+}

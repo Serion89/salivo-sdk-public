@@ -11,6 +11,7 @@ module salivo.std.web;
 
 ><salivo.std.core::{Result, ok, err};
 ><salivo.std.collections::{Vec, vecNew, push, get, set, veclen};
+><salivo.std.text::{joinParts};
 ><salivo.std.runtime::{TcpListener, TcpStream, tcpListen, listenerPort, tcpAccept, listenerClose, tcpClose, tcpShutdown, sleep, nowMicros};
 ><salivo.std.http::{
     HttpStream, HttpConn, httpServer, nextRequest, setLimit, goaway, httpClose, freeStream, resetStream,
@@ -259,13 +260,7 @@ func splitList(s: string) -> Vec<string> {
 }
 
 func joinList(v: Vec<string>, sep: string) -> string {
-    let mut out = "";
-    let n = veclen<string>(v);
-    for (let mut i = 0; i < n; i = i + 1) {
-        if (i > 0) { out = out + sep; }
-        out = out + get<string>(v, i);
-    }
-    return out;
+    return joinParts(v, sep);
 }
 
 func isTchar(ch: int) -> bool {
@@ -326,13 +321,13 @@ func textBytes(s: string) -> Vec<int> {
 }
 
 func bytesHex(b: Vec<int>) -> string {
-    let mut out = "";
+    let mut out = vecNew<string>();
     let n = veclen<int>(b);
     for (let mut i = 0; i < n; i = i + 1) {
         let v = get<int>(b, i);
-        out = out + hexDigit(v / 16) + hexDigit(v % 16);
+        out = push<string>(out, hexDigit(v / 16) + hexDigit(v % 16));
     }
-    return out;
+    return joinParts(out, "");
 }
 
 func hexBytes(h: string) -> Vec<int> {
@@ -372,22 +367,23 @@ pub func percentDecode(s: string, plusSpace: bool) -> Result<string, WebError> {
 /// JSON string body (without quotes) for s.
 pub func jsonEscape(s: string) -> string {
     let n = len(s);
-    let mut out = "";
+    let mut out = vecNew<string>();
     let mut start = 0;
     for (let mut i = 0; i < n; i = i + 1) {
         let ch = byteAt(s, i);
         if (ch == 34 || ch == 92 || ch < 32) {
-            out = out + slice(s, start, i);
-            if (ch == 34) { out = out + "\\\""; }
-            if (ch == 92) { out = out + "\\\\"; }
-            if (ch == 10) { out = out + "\\n"; }
-            if (ch == 13) { out = out + "\\r"; }
-            if (ch == 9) { out = out + "\\t"; }
-            if (ch < 32 && ch != 10 && ch != 13 && ch != 9) { out = out + "\\u00" + hexDigit(ch / 16) + hexDigit(ch % 16); }
+            out = push<string>(out, slice(s, start, i));
+            if (ch == 34) { out = push<string>(out, "\\\""); }
+            if (ch == 92) { out = push<string>(out, "\\\\"); }
+            if (ch == 10) { out = push<string>(out, "\\n"); }
+            if (ch == 13) { out = push<string>(out, "\\r"); }
+            if (ch == 9) { out = push<string>(out, "\\t"); }
+            if (ch < 32 && ch != 10 && ch != 13 && ch != 9) { out = push<string>(out, "\\u00" + hexDigit(ch / 16) + hexDigit(ch % 16)); }
             start = i + 1;
         }
     }
-    return out + slice(s, start, n);
+    out = push<string>(out, slice(s, start, n));
+    return joinParts(out, "");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -440,22 +436,22 @@ pub func base64UrlDecode(s: string) -> Bytes {
 
 pub func base64UrlEncodeBytes(b: Vec<int>) -> string {
     let n = veclen<int>(b);
-    let mut out = "";
+    let mut out = vecNew<string>();
     let mut i = 0;
     while (i + 2 < n) {
         let v = get<int>(b, i) * 65536 + get<int>(b, i + 1) * 256 + get<int>(b, i + 2);
-        out = out + b64Char(v / 262144) + b64Char((v / 4096) % 64) + b64Char((v / 64) % 64) + b64Char(v % 64);
+        out = push<string>(out, b64Char(v / 262144) + b64Char((v / 4096) % 64) + b64Char((v / 64) % 64) + b64Char(v % 64));
         i = i + 3;
     }
     if (n - i == 1) {
         let v = get<int>(b, i);
-        out = out + b64Char(v / 4) + b64Char((v % 4) * 16);
+        out = push<string>(out, b64Char(v / 4) + b64Char((v % 4) * 16));
     }
     if (n - i == 2) {
         let v = get<int>(b, i) * 256 + get<int>(b, i + 1);
-        out = out + b64Char(v / 1024) + b64Char((v / 16) % 64) + b64Char((v % 16) * 4);
+        out = push<string>(out, b64Char(v / 1024) + b64Char((v / 16) % 64) + b64Char((v % 16) * 4));
     }
-    return out;
+    return joinParts(out, "");
 }
 
 pub func base64UrlEncode(text: string) -> string { return base64UrlEncodeBytes(textBytes(text)); }
@@ -1108,7 +1104,8 @@ func validOrigin(o: string) -> bool {
     else if (startswith(o, "http://")) { rest = slice(o, 7, n); }
     else { return false; }
     if (rest == "") { return false; }
-    for (let mut i = 0; i < len(rest); i = i + 1) {
+    let rn = len(rest);
+    for (let mut i = 0; i < rn; i = i + 1) {
         let ch = byteAt(rest, i);
         let okc = (ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57) || ch == 45 || ch == 46 || ch == 58 || ch == 91 || ch == 93;
         if (!okc) { return false; }
@@ -2267,6 +2264,9 @@ func serveConn(cs: ConnState) -> int {
     let r = serveConnIn(cs, heap);
     // Locals of serveConnIn are gone by now; nothing here refers to the connection heap
     if (heap > 0) { let e = rtaioheap(3, heap); }
+    // acceptLoop built cs for this connection alone and every request task has finished with it:
+    // free its block (only the block: srv is shared)
+    let fr = rtaioheap(4, cs);
     return r;
 }
 
@@ -2337,7 +2337,12 @@ func acceptLoop(srv: WebServer) -> int {
         } else {
             let cs = ConnState { srv: srv, sock: s, conn: 0, slot: 0 - 1, inflight: 0, pending: 0 };
             let t = rtaiospawn(serveConn, cs);
-            if (t < 0) { let y = rtaioclose(s); } else { let r = rtaiorelease(t); }
+            if (t < 0) {
+                let y = rtaioclose(s);
+                let fr = rtaioheap(4, cs);
+            } else {
+                let r = rtaiorelease(t);
+            }
         }
     }
     return 0;

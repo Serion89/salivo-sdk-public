@@ -6,7 +6,7 @@
 module salivo.std.ini;
 
 ><salivo.std.collections::{Vec, vecNew, push, get, veclen, HashMap, mapNew, put, lookupOr, has};
-><salivo.std.text::{lines, byteAt, findFrom};
+><salivo.std.text::{lines, byteAt, byteAtUnchecked, findFrom};
 ><salivo.std.io::{readStr};
 
 /// Parse result: values when ok, otherwise error names the bad line
@@ -68,9 +68,9 @@ func unescapeDouble(s: string) -> string {
     let mut start = 0;
     let mut i = 0;
     while (i < n) {
-        if (byteAt(s, i) == 92 && i + 1 < n) {
+        if (byteAtUnchecked(s, i) == 92 && i + 1 < n) {
             out = out + slice(s, start, i);
-            let e = byteAt(s, i + 1);
+            let e = byteAtUnchecked(s, i + 1);
             if (e == 110) { out = out + "\n"; }
             else if (e == 116) { out = out + "\t"; }
             else if (e == 114) { out = out + "\r"; }
@@ -143,9 +143,10 @@ pub func getInt(vars: HashMap<string, string>, key: string, fallback: int) -> in
     let v = trim(lookupOr<string, string>(vars, key, ""));
     if (v == "") { return fallback; }
     let mut i = 0;
+    let vn = len(v);
     if (byteAt(v, 0) == 45) { i = 1; }
-    while (i < len(v)) {
-        let c = byteAt(v, i);
+    while (i < vn) {
+        let c = byteAtUnchecked(v, i);
         if (c < 48 || c > 57) { return fallback; }
         i = i + 1;
     }

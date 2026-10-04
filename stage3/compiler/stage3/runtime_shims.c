@@ -178,3 +178,61 @@ long long salivo_scratch_put(const char* key, const char* value) {
     s->value = strdup(value);
     return 0;
 }
+
+/* ---- activeAllocations: every thread's thread-local counter, summed on read ----
+   Threads register their counter's address when they start (main, and the runtime's thread procs via
+   salivo_thread_hooks) and unregister when they end, folding the final count into ac_retired. */
+typedef struct ShimAcNode { long long* count; struct ShimAcNode* next; } ShimAcNode;
+static ShimAcNode* ac_head;
+static long long ac_retired;
+static int ac_lock;
+static void ac_acquire(void) { while (__atomic_exchange_n(&ac_lock, 1, __ATOMIC_ACQUIRE)) {} }
+static void ac_release(void) { __atomic_store_n(&ac_lock, 0, __ATOMIC_RELEASE); }
+
+void salivo_ac_register(long long* count) {
+    ShimAcNode* n = (ShimAcNode*)malloc(sizeof(ShimAcNode));
+    if (!n) return;
+    n->count = count;
+    ac_acquire();
+    n->next = ac_head;
+    ac_head = n;
+    ac_release();
+}
+
+void salivo_ac_unregister(long long* count) {
+    ac_acquire();
+    for (ShimAcNode** p = &ac_head; *p; p = &(*p)->next) {
+        if ((*p)->count == count) {
+            ShimAcNode* n = *p;
+            *p = n->next;
+            ac_retired += __atomic_load_n(count, __ATOMIC_RELAXED);
+            free(n);
+            break;
+        }
+    }
+    ac_release();
+}
+
+long long salivo_ac_sum(void) {
+    ac_acquire();
+    long long sum = ac_retired;
+    for (ShimAcNode* n = ac_head; n; n = n->next) sum += __atomic_load_n(n->count, __ATOMIC_RELAXED);
+    ac_release();
+    return sum;
+}
+
+#ifdef __wasm__
+/* No threads on wasm32 (natively salivo_task_runtime.c defines the hooks) */
+void salivo_thread_hooks(void* enter, void* exit_fn) { (void)enter; (void)exit_fn; }
+#endif
+
+/* ---- outln/out output: flush stdout alone (fflush(NULL) walks every open stream on each line) ---- */
+#ifdef __wasm__
+int printf(const char* f, ...);
+void salivo_flush_stdout(void) {}
+void salivo_out_str(const char* s) { printf("%s", s); }
+#else
+#include <stdio.h>
+void salivo_flush_stdout(void) { fflush(stdout); }
+void salivo_out_str(const char* s) { fputs(s, stdout); fflush(stdout); }
+#endif

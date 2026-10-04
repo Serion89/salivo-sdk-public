@@ -320,7 +320,11 @@ pub func resetStream(s: HttpStream, code: int) -> Result<int, HttpError> {
 }
 
 pub func freeStream(s: HttpStream) -> Result<int, HttpError> {
-    return hres(rtaiohttpfree(s.handle));
+    let r = rtaiohttpfree(s.handle);
+    // The exchange is gone, so is the stream value nextRequest/request built for it: free its block
+    // (once: only when the exchange was freed here; inside a request heap the heap reclaims it)
+    if (r >= 0) { let fr = rtaioheap(4, s); }
+    return hres(r);
 }
 
 /// Process-wide counters (copies, buffer pool, live objects); keys in docs/STAGE_36_2_HTTP.md.

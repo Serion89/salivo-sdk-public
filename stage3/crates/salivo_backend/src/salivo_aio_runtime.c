@@ -35,6 +35,9 @@
  * Defined in salivo_task_runtime.c, which is always linked. */
 extern void (*salivo_aio_blocking_hook)(const char* what);
 extern int (*salivo_aio_offload_hook)(long long (*fn)(long long), long long arg, long long* out);
+/* Thread start/end hooks (salivo_task_runtime.c): register the thread's allocation counter */
+extern void (*salivo_thread_enter_hook)(void);
+extern void (*salivo_thread_exit_hook)(void);
 
 #if defined(_WIN32)
 #include "salivo_aio_sys_win32.inc"
@@ -241,8 +244,39 @@ typedef struct SaJob {
 static void (*g_heap_swap)(void* save, void* load);
 static void (*g_heap_release)(void* state);
 static void* (*g_str_alloc)(int64_t n);
+static void (*g_block_free)(int64_t block);
 
-void salivo_heap_hooks(void* swap, void* release, void* str_alloc) {
+/* Spare request-heap chunks (256 KB, linked through their first word, as in the heap state's chunk and
+ * spare lists): an ended request heap parks up to SA_HEAP_POOL_MAX of its chunks here and each new
+ * request heap starts with one as its spare, instead of a malloc/free pair per request. */
+#define SA_HEAP_POOL_MAX 16
+static sa_mutex g_heap_pool_lock = SA_MUTEX_INIT;
+static void* g_heap_pool;
+static int g_heap_pool_n;
+
+/* Moves chunks from list word w of heap state st into the pool while it has room (lock held) */
+static void sa_heap_park(int64_t* st, int w) {
+    while (st[w] && g_heap_pool_n < SA_HEAP_POOL_MAX) {
+        void* c = (void*)(intptr_t)st[w];
+        st[w] = *(int64_t*)c;
+        *(void**)c = g_heap_pool;
+        g_heap_pool = c;
+        g_heap_pool_n++;
+    }
+}
+
+/* Ends request heap st: parks chunks for reuse, releases the rest and frees the state */
+static void sa_heap_end(void* st) {
+    sa_mutex_lock(&g_heap_pool_lock);
+    sa_heap_park((int64_t*)st, 2);
+    sa_heap_park((int64_t*)st, 3);
+    sa_mutex_unlock(&g_heap_pool_lock);
+    g_heap_release(st);
+    free(st);
+}
+
+void salivo_heap_hooks(void* swap, void* release, void* str_alloc, void* block_free) {
+    g_block_free = (void (*)(int64_t))block_free;
     g_heap_swap = (void (*)(void*, void*))swap;
     g_heap_release = (void (*)(void*))release;
     g_str_alloc = (void* (*)(int64_t))str_alloc;
@@ -1022,6 +1056,7 @@ static int64_t sa_timers_run(SaRuntime* rt) {
 SA_THREAD_FN(sa_pool_main) {
     SaRuntime* rt = (SaRuntime*)arg;
     A_INC(&rt->st_os_threads);
+    if (salivo_thread_enter_hook) salivo_thread_enter_hook();
     *sa_tls_default_rt() = rt->handle; /* runtime calls made by blocking jobs target this runtime */
     sa_mutex_lock(&rt->pool_lock);
     for (;;) {
@@ -1043,6 +1078,7 @@ SA_THREAD_FN(sa_pool_main) {
     }
     sa_mutex_unlock(&rt->pool_lock);
     *sa_tls_default_rt() = 0;
+    if (salivo_thread_exit_hook) salivo_thread_exit_hook();
     A_DEC(&rt->st_os_threads);
     return 0;
 }
@@ -1130,8 +1166,7 @@ static void sa_task_destroy(SaObj* o) {
 
 static void sa_task_finalize(SaRuntime* rt, SaTask* t, int final_state) {
     if (t->heap_own) { /* a request heap its creator never ended */
-        g_heap_release(t->heap_own);
-        free(t->heap_own);
+        sa_heap_end(t->heap_own);
         t->heap_own = NULL;
     }
     t->heap = NULL;
@@ -1222,7 +1257,8 @@ int64_t salivo_aio_call(int64_t fn, int64_t arg) {
 }
 
 /* Stage 36.3 request heap of the calling task. op 0: create and attach a new heap (returns it);
- * 1: detach the attached heap; 2: attach heap h; 3: end heap h (detach, free its memory). */
+ * 1: detach the attached heap; 2: attach heap h; 3: end heap h (detach, free its memory);
+ * 4: free block h of the shared heap (a value built for this task alone; no heap attached). */
 int64_t salivo_aio_heap(int64_t op, int64_t h) {
     SaWorker* w = sa_tls_worker();
     SaTask* t = w ? w->current : NULL;
@@ -1234,6 +1270,15 @@ int64_t salivo_aio_heap(int64_t op, int64_t h) {
         if (t->heap || t->heap_own) return SA_EINVAL;
         st = calloc(SA_HEAP_WORDS, sizeof(int64_t));
         if (!st) return SA_EOS;
+        sa_mutex_lock(&g_heap_pool_lock);
+        if (g_heap_pool) { /* start with a pooled chunk as the spare */
+            void* c = g_heap_pool;
+            g_heap_pool = *(void**)c;
+            g_heap_pool_n--;
+            *(void**)c = NULL;
+            ((int64_t*)st)[3] = (int64_t)(intptr_t)c;
+        }
+        sa_mutex_unlock(&g_heap_pool_lock);
         g_heap_swap(w->heap_save, st);
         t->heap = t->heap_own = st;
         return (int64_t)(intptr_t)st;
@@ -1254,9 +1299,12 @@ int64_t salivo_aio_heap(int64_t op, int64_t h) {
             g_heap_swap(st, w->heap_save);
             t->heap = NULL;
         }
-        g_heap_release(st);
-        free(st);
+        sa_heap_end(st);
         t->heap_own = NULL;
+        return SA_OK;
+    case 4:
+        if (!h || t->heap || !g_block_free) return SA_EINVAL;
+        g_block_free(h);
         return SA_OK;
     }
     return SA_EINVAL;
@@ -1824,6 +1872,7 @@ static void sa_mon_kick(SaRuntime* rt) {
 SA_THREAD_FN(sa_mon_main) {
     SaRuntime* rt = (SaRuntime*)arg;
     A_INC(&rt->st_os_threads);
+    if (salivo_thread_enter_hook) salivo_thread_enter_hook();
     int64_t tick = rt->slice_ms > 0 ? rt->slice_ms / 2 : rt->detect_ms / 2;
     if (tick < 1) tick = 1;
     sa_mutex_lock(&rt->mon_lock);
@@ -1855,6 +1904,7 @@ SA_THREAD_FN(sa_mon_main) {
         }
     }
     sa_mutex_unlock(&rt->mon_lock);
+    if (salivo_thread_exit_hook) salivo_thread_exit_hook();
     A_DEC(&rt->st_os_threads);
     return 0;
 }
@@ -1866,6 +1916,7 @@ SA_THREAD_FN(sa_worker_main) {
     SaWorker* w = (SaWorker*)arg;
     SaRuntime* rt = w->rt;
     A_INC(&rt->st_os_threads);
+    if (salivo_thread_enter_hook) salivo_thread_enter_hook();
     sa_tls_set_worker(w);
     w->sched_fiber = sa_fiber_thread_enter();
     for (;;) {
@@ -1897,6 +1948,7 @@ SA_THREAD_FN(sa_worker_main) {
     sa_fiber_thread_leave(w->sched_fiber);
     w->sched_fiber = NULL;
     sa_tls_set_worker(NULL);
+    if (salivo_thread_exit_hook) salivo_thread_exit_hook();
     A_DEC(&rt->st_os_threads);
     return 0;
 }
@@ -1904,6 +1956,7 @@ SA_THREAD_FN(sa_worker_main) {
 SA_THREAD_FN(sa_reactor_main) {
     SaRuntime* rt = (SaRuntime*)arg;
     A_INC(&rt->st_os_threads);
+    if (salivo_thread_enter_hook) salivo_thread_enter_hook();
     for (;;) {
         int64_t next = sa_timers_run(rt);
         int64_t timeout = -1;
@@ -1913,6 +1966,7 @@ SA_THREAD_FN(sa_reactor_main) {
         }
         if (!sa_reactor_poll(rt, timeout)) break;
     }
+    if (salivo_thread_exit_hook) salivo_thread_exit_hook();
     A_DEC(&rt->st_os_threads);
     return 0;
 }
@@ -2538,5 +2592,5 @@ static int sa_sockaddr_port(const struct sockaddr_storage* ss) {
 
 #else /* no async backend for this platform */
 #include "salivo_aio_unsupported.inc"
-void salivo_heap_hooks(void* swap, void* release, void* str_alloc) { (void)swap; (void)release; (void)str_alloc; }
+void salivo_heap_hooks(void* swap, void* release, void* str_alloc, void* block_free) { (void)swap; (void)release; (void)str_alloc; (void)block_free; }
 #endif

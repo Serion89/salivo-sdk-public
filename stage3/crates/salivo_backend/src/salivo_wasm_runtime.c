@@ -153,7 +153,7 @@ long long salivo_crt_salivo_reallocate(long long p, long long old, long long n, 
 }
 
 /* Single linear heap: the per-request heap hooks of the native runtime are not used on wasm32. */
-void salivo_heap_hooks(void* swap, void* release, void* str_alloc) { (void)swap; (void)release; (void)str_alloc; }
+void salivo_heap_hooks(void* swap, void* release, void* str_alloc, void* block_free) { (void)swap; (void)release; (void)str_alloc; (void)block_free; }
 void salivo_set_str_alloc(void* f) { (void)f; }
 
 /* ---- strings ----------------------------------------------------------------------------- */

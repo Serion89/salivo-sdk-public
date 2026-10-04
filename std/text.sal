@@ -8,6 +8,11 @@ module salivo.std.text;
 /// Byte value 0..255 at index i (-1 past the end)
 pub func byteAt(s: string, i: int) -> int {
     if (i < 0 || i >= len(s)) { return 0 - 1; }
+    return byteAtUnchecked(s, i);
+}
+
+/// Like byteAt without the range check: the caller guarantees 0 <= i < len(s)
+pub func byteAtUnchecked(s: string, i: int) -> int {
     let b = rtcharat(s, i);
     if (b < 0) { return b + 256; }
     return b;
@@ -87,9 +92,9 @@ pub func words(s: string) -> Vec<string> {
     let n = len(s);
     let mut i = 0;
     while (i < n) {
-        while (i < n && isSpace(byteAt(s, i))) { i = i + 1; }
+        while (i < n && isSpace(byteAtUnchecked(s, i))) { i = i + 1; }
         let start = i;
-        while (i < n && !isSpace(byteAt(s, i))) { i = i + 1; }
+        while (i < n && !isSpace(byteAtUnchecked(s, i))) { i = i + 1; }
         if (i > start) { out = push<string>(out, slice(s, start, i)); }
     }
     return out;
@@ -102,9 +107,9 @@ pub func lines(s: string) -> Vec<string> {
     let mut start = 0;
     let mut i = 0;
     while (i < n) {
-        if (byteAt(s, i) == 10) {
+        if (byteAtUnchecked(s, i) == 10) {
             let mut end = i;
-            if (end > start && byteAt(s, end - 1) == 13) { end = end - 1; }
+            if (end > start && byteAtUnchecked(s, end - 1) == 13) { end = end - 1; }
             out = push<string>(out, slice(s, start, end));
             start = i + 1;
         }
@@ -112,14 +117,40 @@ pub func lines(s: string) -> Vec<string> {
     }
     if (start < n) {
         let mut end = n;
-        if (byteAt(s, end - 1) == 13) { end = end - 1; }
+        if (byteAtUnchecked(s, end - 1) == 13) { end = end - 1; }
         out = push<string>(out, slice(s, start, end));
     }
     return out;
 }
 
 /// parts joined with sep between them
-pub func join(parts: Vec<string>, sep: string) -> string {
+pub func join(parts: Vec<string>, sep: string) -> string { return joinParts(parts, sep); }
+
+/// Same as join under a name no other module uses (flat Stage 3 builds cannot tell text.join from runtime.join)
+pub func joinParts(parts: Vec<string>, sep: string) -> string {
+    let n = veclen<string>(parts);
+    let mut total = 0;
+    let mut i = 0;
+    while (i < n) { total = total + len(get<string>(parts, i)); i = i + 1; }
+    if (n > 1) { total = total + len(sep) * (n - 1); }
+    let buf = rtaiobufnew(total);
+    if (total == 0 || buf <= 0) { return joinSlow(parts, sep); }
+    let sl = len(sep);
+    let mut pos = 0;
+    i = 0;
+    while (i < n) {
+        if (i > 0 && sl > 0) { rtmemcopy(rtstrtoptr(sep), buf + pos, sl); pos = pos + sl; }
+        let p = get<string>(parts, i);
+        let pl = len(p);
+        if (pl > 0) { rtmemcopy(rtstrtoptr(p), buf + pos, pl); pos = pos + pl; }
+        i = i + 1;
+    }
+    let out = rtaiobufstr(buf, total);
+    let f = rtaiobuffree(buf);
+    return out;
+}
+
+func joinSlow(parts: Vec<string>, sep: string) -> string {
     let n = veclen<string>(parts);
     let mut out = "";
     let mut i = 0;
@@ -177,28 +208,28 @@ pub func removeSuffix(s: string, suffix: string) -> string {
 
 /// Bytes of s in reverse order
 pub func reverse(s: string) -> string {
-    let mut out = "";
+    let mut out = vecNew<string>();
     let mut i = len(s) - 1;
     while (i >= 0) {
-        out = out + slice(s, i, i + 1);
+        out = push<string>(out, slice(s, i, i + 1));
         i = i - 1;
     }
-    return out;
+    return joinParts(out, "");
 }
 
 /// First letter of every word upper case, the rest lower case
 pub func title(s: string) -> string {
-    let mut out = "";
+    let mut out = vecNew<string>();
     let mut start = true;
     let n = len(s);
     let mut i = 0;
     while (i < n) {
         let ch = slice(s, i, i + 1);
-        if (start) { out = out + upper(ch); } else { out = out + lower(ch); }
-        start = isSpace(byteAt(s, i));
+        if (start) { out = push<string>(out, upper(ch)); } else { out = push<string>(out, lower(ch)); }
+        start = isSpace(byteAtUnchecked(s, i));
         i = i + 1;
     }
-    return out;
+    return joinParts(out, "");
 }
 
 /// s centered in width columns, padded with fill
@@ -213,10 +244,10 @@ pub func center(s: string, width: int, fill: string) -> string {
 pub func isInt(s: string) -> bool {
     let n = len(s);
     let mut i = 0;
-    if (n > 0 && (byteAt(s, 0) == 45 || byteAt(s, 0) == 43)) { i = 1; }
+    if (n > 0 && (byteAtUnchecked(s, 0) == 45 || byteAtUnchecked(s, 0) == 43)) { i = 1; }
     if (i >= n) { return false; }
     while (i < n) {
-        if (!isDigit(byteAt(s, i))) { return false; }
+        if (!isDigit(byteAtUnchecked(s, i))) { return false; }
         i = i + 1;
     }
     return true;
@@ -226,19 +257,19 @@ pub func isInt(s: string) -> bool {
 pub func isNumber(s: string) -> bool {
     let n = len(s);
     let mut i = 0;
-    if (n > 0 && (byteAt(s, 0) == 45 || byteAt(s, 0) == 43)) { i = 1; }
+    if (n > 0 && (byteAtUnchecked(s, 0) == 45 || byteAtUnchecked(s, 0) == 43)) { i = 1; }
     let mut digits = 0;
-    while (i < n && isDigit(byteAt(s, i))) { i = i + 1; digits = digits + 1; }
-    if (i < n && byteAt(s, i) == 46) {
+    while (i < n && isDigit(byteAtUnchecked(s, i))) { i = i + 1; digits = digits + 1; }
+    if (i < n && byteAtUnchecked(s, i) == 46) {
         i = i + 1;
-        while (i < n && isDigit(byteAt(s, i))) { i = i + 1; digits = digits + 1; }
+        while (i < n && isDigit(byteAtUnchecked(s, i))) { i = i + 1; digits = digits + 1; }
     }
     if (digits == 0) { return false; }
-    if (i < n && (byteAt(s, i) == 101 || byteAt(s, i) == 69)) {
+    if (i < n && (byteAtUnchecked(s, i) == 101 || byteAtUnchecked(s, i) == 69)) {
         i = i + 1;
-        if (i < n && (byteAt(s, i) == 45 || byteAt(s, i) == 43)) { i = i + 1; }
+        if (i < n && (byteAtUnchecked(s, i) == 45 || byteAtUnchecked(s, i) == 43)) { i = i + 1; }
         let mut ed = 0;
-        while (i < n && isDigit(byteAt(s, i))) { i = i + 1; ed = ed + 1; }
+        while (i < n && isDigit(byteAtUnchecked(s, i))) { i = i + 1; ed = ed + 1; }
         if (ed == 0) { return false; }
     }
     return i == n;

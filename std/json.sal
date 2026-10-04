@@ -10,7 +10,7 @@ module salivo.std.json;
 
 ><salivo.std.core::{Result, ok, err};
 ><salivo.std.collections::{Vec, vecNew, push, get, veclen};
-><salivo.std.text::{byteAt, isDigit};
+><salivo.std.text::{byteAt, byteAtUnchecked, isDigit, joinParts};
 ><salivo.std.encoding::{bytesToText};
 
 pub const JSON_MISSING = 0;
@@ -29,11 +29,10 @@ pub struct Json {
     int kind;
 }
 
-func skipWs(t: string, i0: int) -> int {
-    let n = len(t);
+func skipWs(t: string, n: int, i0: int) -> int {
     let mut i = i0;
     while (i < n) {
-        let c = byteAt(t, i);
+        let c = byteAtUnchecked(t, i);
         if (c != 32 && c != 9 && c != 10 && c != 13) { return i; }
         i = i + 1;
     }
@@ -48,21 +47,20 @@ func hexVal(c: int) -> int {
 }
 
 /// End of the string starting at the quote at i (index after the closing quote), -1 if malformed
-func scanString(t: string, i0: int) -> int {
-    let n = len(t);
+func scanString(t: string, n: int, i0: int) -> int {
     let mut i = i0 + 1;
     while (i < n) {
-        let c = byteAt(t, i);
+        let c = byteAtUnchecked(t, i);
         if (c == 34) { return i + 1; }
         if (c < 32) { return 0 - 1; }
         if (c == 92) {
             if (i + 1 >= n) { return 0 - 1; }
-            let e = byteAt(t, i + 1);
+            let e = byteAtUnchecked(t, i + 1);
             if (e == 117) {
                 if (i + 5 >= n) { return 0 - 1; }
                 let mut k = 2;
                 while (k < 6) {
-                    if (hexVal(byteAt(t, i + k)) < 0) { return 0 - 1; }
+                    if (hexVal(byteAtUnchecked(t, i + k)) < 0) { return 0 - 1; }
                     k = k + 1;
                 }
                 i = i + 6;
@@ -78,26 +76,25 @@ func scanString(t: string, i0: int) -> int {
     return 0 - 1;
 }
 
-func scanNumber(t: string, i0: int) -> int {
-    let n = len(t);
+func scanNumber(t: string, n: int, i0: int) -> int {
     let mut i = i0;
-    if (i < n && byteAt(t, i) == 45) { i = i + 1; }
-    if (i >= n || !isDigit(byteAt(t, i))) { return 0 - 1; }
-    if (byteAt(t, i) == 48) {
+    if (i < n && byteAtUnchecked(t, i) == 45) { i = i + 1; }
+    if (i >= n || !isDigit(byteAtUnchecked(t, i))) { return 0 - 1; }
+    if (byteAtUnchecked(t, i) == 48) {
         i = i + 1;
     } else {
-        while (i < n && isDigit(byteAt(t, i))) { i = i + 1; }
+        while (i < n && isDigit(byteAtUnchecked(t, i))) { i = i + 1; }
     }
-    if (i < n && byteAt(t, i) == 46) {
+    if (i < n && byteAtUnchecked(t, i) == 46) {
         i = i + 1;
-        if (i >= n || !isDigit(byteAt(t, i))) { return 0 - 1; }
-        while (i < n && isDigit(byteAt(t, i))) { i = i + 1; }
+        if (i >= n || !isDigit(byteAtUnchecked(t, i))) { return 0 - 1; }
+        while (i < n && isDigit(byteAtUnchecked(t, i))) { i = i + 1; }
     }
-    if (i < n && (byteAt(t, i) == 101 || byteAt(t, i) == 69)) {
+    if (i < n && (byteAtUnchecked(t, i) == 101 || byteAtUnchecked(t, i) == 69)) {
         i = i + 1;
-        if (i < n && (byteAt(t, i) == 43 || byteAt(t, i) == 45)) { i = i + 1; }
-        if (i >= n || !isDigit(byteAt(t, i))) { return 0 - 1; }
-        while (i < n && isDigit(byteAt(t, i))) { i = i + 1; }
+        if (i < n && (byteAtUnchecked(t, i) == 43 || byteAtUnchecked(t, i) == 45)) { i = i + 1; }
+        if (i >= n || !isDigit(byteAtUnchecked(t, i))) { return 0 - 1; }
+        while (i < n && isDigit(byteAtUnchecked(t, i))) { i = i + 1; }
     }
     return i;
 }
@@ -108,44 +105,44 @@ func scanWord(t: string, i: int, w: string) -> int {
 }
 
 /// End index of the value starting at i (after whitespace), or -1; depth guards deep nesting
-func scanValue(t: string, i0: int, depth: int) -> int {
+func scanValue(t: string, n: int, i0: int, depth: int) -> int {
     if (depth > 512) { return 0 - 1; }
-    let n = len(t);
-    let i = skipWs(t, i0);
+    let i = skipWs(t, n, i0);
     if (i >= n) { return 0 - 1; }
-    let c = byteAt(t, i);
-    if (c == 34) { return scanString(t, i); }
+    let c = byteAtUnchecked(t, i);
+    if (c == 34) { return scanString(t, n, i); }
     if (c == 123 || c == 91) {
         let close = c + 2;
-        let mut j = skipWs(t, i + 1);
-        if (j < n && byteAt(t, j) == close) { return j + 1; }
+        let mut j = skipWs(t, n, i + 1);
+        if (j < n && byteAtUnchecked(t, j) == close) { return j + 1; }
         while (true) {
             if (c == 123) {
-                j = skipWs(t, j);
-                if (j >= n || byteAt(t, j) != 34) { return 0 - 1; }
-                j = scanString(t, j);
+                j = skipWs(t, n, j);
+                if (j >= n || byteAtUnchecked(t, j) != 34) { return 0 - 1; }
+                j = scanString(t, n, j);
                 if (j < 0) { return 0 - 1; }
-                j = skipWs(t, j);
-                if (j >= n || byteAt(t, j) != 58) { return 0 - 1; }
+                j = skipWs(t, n, j);
+                if (j >= n || byteAtUnchecked(t, j) != 58) { return 0 - 1; }
                 j = j + 1;
             }
-            j = scanValue(t, j, depth + 1);
+            j = scanValue(t, n, j, depth + 1);
             if (j < 0) { return 0 - 1; }
-            j = skipWs(t, j);
+            j = skipWs(t, n, j);
             if (j >= n) { return 0 - 1; }
-            if (byteAt(t, j) == close) { return j + 1; }
-            if (byteAt(t, j) != 44) { return 0 - 1; }
+            if (byteAtUnchecked(t, j) == close) { return j + 1; }
+            if (byteAtUnchecked(t, j) != 44) { return 0 - 1; }
             j = j + 1;
         }
     }
     if (c == 116) { return scanWord(t, i, "true"); }
     if (c == 102) { return scanWord(t, i, "false"); }
     if (c == 110) { return scanWord(t, i, "null"); }
-    return scanNumber(t, i);
+    return scanNumber(t, n, i);
 }
 
-func kindAt(t: string, i: int) -> int {
-    let c = byteAt(t, i);
+func kindAt(t: string, i: int, end: int) -> int {
+    let mut c = 0 - 1;
+    if (i >= 0 && end > i) { c = byteAtUnchecked(t, i); } else { c = byteAt(t, i); }
     if (c == 123) { return JSON_OBJECT; }
     if (c == 91) { return JSON_ARRAY; }
     if (c == 34) { return JSON_STRING; }
@@ -155,7 +152,7 @@ func kindAt(t: string, i: int) -> int {
 }
 
 func view(t: string, start: int, end: int) -> Json {
-    return Json { text: t, start: start, end: end, kind: kindAt(t, start) };
+    return Json { text: t, start: start, end: end, kind: kindAt(t, start, end) };
 }
 
 func missing(t: string) -> Json {
@@ -164,10 +161,11 @@ func missing(t: string) -> Json {
 
 /// Validates text (RFC 8259) and returns a view of its top-level value
 pub func jsonParse(text: string) -> Result<Json, string> {
-    let start = skipWs(text, 0);
-    let end = scanValue(text, 0, 0);
+    let n = len(text);
+    let start = skipWs(text, n, 0);
+    let end = scanValue(text, n, 0, 0);
     if (end < 0) { return err<Json, string>("invalid JSON"); }
-    if (skipWs(text, end) != len(text)) { return err<Json, string>("unexpected text after the JSON value at " + intstr(skipWs(text, end))); }
+    if (skipWs(text, n, end) != n) { return err<Json, string>("unexpected text after the JSON value at " + intstr(skipWs(text, n, end))); }
     return ok<Json, string>(view(text, start, end));
 }
 
@@ -188,17 +186,18 @@ pub func jsonRaw(j: Json) -> string {
 pub func jsonGet(j: Json, key: string) -> Json {
     if (j.kind != JSON_OBJECT) { return missing(j.text); }
     let t = j.text;
-    let mut i = skipWs(t, j.start + 1);
+    let n = len(t);
+    let mut i = skipWs(t, n, j.start + 1);
     if (byteAt(t, i) == 125) { return missing(t); }
     while (i < j.end) {
-        let kend = scanString(t, i);
+        let kend = scanString(t, n, i);
         let k = decodeString(t, i, kend);
-        let vstart = skipWs(t, skipWs(t, kend) + 1);
-        let vend = scanValue(t, vstart, 0);
+        let vstart = skipWs(t, n, skipWs(t, n, kend) + 1);
+        let vend = scanValue(t, n, vstart, 0);
         if (k == key) { return view(t, vstart, vend); }
-        i = skipWs(t, vend);
+        i = skipWs(t, n, vend);
         if (byteAt(t, i) != 44) { return missing(t); }
-        i = skipWs(t, i + 1);
+        i = skipWs(t, n, i + 1);
     }
     return missing(t);
 }
@@ -210,15 +209,16 @@ pub func jsonHas(j: Json, key: string) -> bool { return jsonGet(j, key).kind != 
 pub func jsonAt(j: Json, index: int) -> Json {
     if (j.kind != JSON_ARRAY || index < 0) { return missing(j.text); }
     let t = j.text;
-    let mut i = skipWs(t, j.start + 1);
+    let n = len(t);
+    let mut i = skipWs(t, n, j.start + 1);
     if (byteAt(t, i) == 93) { return missing(t); }
     let mut k = 0;
     while (i < j.end) {
-        let vend = scanValue(t, i, 0);
+        let vend = scanValue(t, n, i, 0);
         if (k == index) { return view(t, i, vend); }
-        i = skipWs(t, vend);
+        i = skipWs(t, n, vend);
         if (byteAt(t, i) != 44) { return missing(t); }
-        i = skipWs(t, i + 1);
+        i = skipWs(t, n, i + 1);
         k = k + 1;
     }
     return missing(t);
@@ -228,15 +228,16 @@ pub func jsonAt(j: Json, index: int) -> Json {
 pub func jsonLen(j: Json) -> int {
     if (j.kind != JSON_ARRAY && j.kind != JSON_OBJECT) { return 0; }
     let t = j.text;
-    let mut i = skipWs(t, j.start + 1);
+    let n = len(t);
+    let mut i = skipWs(t, n, j.start + 1);
     if (i < j.end && (byteAt(t, i) == 93 || byteAt(t, i) == 125)) { return 0; }
     let mut count = 0;
     while (i < j.end) {
-        if (j.kind == JSON_OBJECT) { i = skipWs(t, skipWs(t, scanString(t, i)) + 1); }
-        i = skipWs(t, scanValue(t, i, 0));
+        if (j.kind == JSON_OBJECT) { i = skipWs(t, n, skipWs(t, n, scanString(t, n, i)) + 1); }
+        i = skipWs(t, n, scanValue(t, n, i, 0));
         count = count + 1;
         if (byteAt(t, i) != 44) { return count; }
-        i = skipWs(t, i + 1);
+        i = skipWs(t, n, i + 1);
     }
     return count;
 }
@@ -246,14 +247,15 @@ pub func jsonKeys(j: Json) -> Vec<string> {
     let mut out = vecNew<string>();
     if (j.kind != JSON_OBJECT) { return out; }
     let t = j.text;
-    let mut i = skipWs(t, j.start + 1);
+    let n = len(t);
+    let mut i = skipWs(t, n, j.start + 1);
     if (byteAt(t, i) == 125) { return out; }
     while (i < j.end) {
-        let kend = scanString(t, i);
+        let kend = scanString(t, n, i);
         out = push<string>(out, decodeString(t, i, kend));
-        i = skipWs(t, scanValue(t, skipWs(t, kend) + 1, 0));
+        i = skipWs(t, n, scanValue(t, n, skipWs(t, n, kend) + 1, 0));
         if (byteAt(t, i) != 44) { return out; }
-        i = skipWs(t, i + 1);
+        i = skipWs(t, n, i + 1);
     }
     return out;
 }
@@ -264,22 +266,22 @@ pub func jsonPath(j: Json, path: string) -> Json {
     let n = len(path);
     let mut i = 0;
     while (i < n) {
-        let c = byteAt(path, i);
+        let c = byteAtUnchecked(path, i);
         if (c == 46) {
             i = i + 1;
         } else if (c == 91) {
             let mut k = i + 1;
             let mut idx = 0;
-            while (k < n && isDigit(byteAt(path, k))) {
-                idx = idx * 10 + byteAt(path, k) - 48;
+            while (k < n && isDigit(byteAtUnchecked(path, k))) {
+                idx = idx * 10 + byteAtUnchecked(path, k) - 48;
                 k = k + 1;
             }
-            if (k >= n || byteAt(path, k) != 93) { return missing(j.text); }
+            if (k >= n || byteAtUnchecked(path, k) != 93) { return missing(j.text); }
             cur = jsonAt(cur, idx);
             i = k + 1;
         } else {
             let mut k = i;
-            while (k < n && byteAt(path, k) != 46 && byteAt(path, k) != 91) { k = k + 1; }
+            while (k < n && byteAtUnchecked(path, k) != 46 && byteAtUnchecked(path, k) != 91) { k = k + 1; }
             cur = jsonGet(cur, slice(path, i, k));
             i = k;
         }
@@ -317,24 +319,24 @@ func decodeString(t: string, start: int, end: int) -> string {
     let mut has_escape = false;
     let mut i = start + 1;
     while (i < end - 1) {
-        if (byteAt(t, i) == 92) { has_escape = true; }
+        if (byteAtUnchecked(t, i) == 92) { has_escape = true; }
         i = i + 1;
     }
     if (!has_escape) { return slice(t, start + 1, end - 1); }
     let mut out = vecNew<int>();
     i = start + 1;
     while (i < end - 1) {
-        let c = byteAt(t, i);
+        let c = byteAtUnchecked(t, i);
         if (c != 92) {
             out = push<int>(out, c);
             i = i + 1;
         } else {
-            let e = byteAt(t, i + 1);
+            let e = byteAtUnchecked(t, i + 1);
             if (e == 117) {
                 let mut cp = hex4(t, i + 2);
                 i = i + 6;
                 // a surrogate pair encodes one code point above U+FFFF
-                if (cp >= 55296 && cp <= 56319 && i + 5 < end && byteAt(t, i) == 92 && byteAt(t, i + 1) == 117) {
+                if (cp >= 55296 && cp <= 56319 && i + 5 < end && byteAtUnchecked(t, i) == 92 && byteAt(t, i + 1) == 117) {
                     let lo = hex4(t, i + 2);
                     if (lo >= 56320 && lo <= 57343) {
                         cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
@@ -369,9 +371,10 @@ pub func jsonStr(j: Json) -> string {
 pub func jsonIntOr(j: Json, fallback: int) -> int {
     if (j.kind != JSON_NUMBER) { return fallback; }
     let raw = jsonRaw(j);
+    let rn = len(raw);
     let mut k = 0;
-    while (k < len(raw) && byteAt(raw, k) != 46 && byteAt(raw, k) != 101 && byteAt(raw, k) != 69) { k = k + 1; }
-    if (k == len(raw)) { return strint(raw); }
+    while (k < rn && byteAtUnchecked(raw, k) != 46 && byteAtUnchecked(raw, k) != 101 && byteAtUnchecked(raw, k) != 69) { k = k + 1; }
+    if (k == rn) { return strint(raw); }
     return rtfloattoint(strfloat(raw));
 }
 
@@ -394,14 +397,15 @@ pub func jsonItems(j: Json) -> Vec<Json> {
     let mut out = vecNew<Json>();
     if (j.kind != JSON_ARRAY) { return out; }
     let t = j.text;
-    let mut i = skipWs(t, j.start + 1);
+    let n = len(t);
+    let mut i = skipWs(t, n, j.start + 1);
     if (byteAt(t, i) == 93) { return out; }
     while (i < j.end) {
-        let vend = scanValue(t, i, 0);
+        let vend = scanValue(t, n, i, 0);
         out = push<Json>(out, view(t, i, vend));
-        i = skipWs(t, vend);
+        i = skipWs(t, n, vend);
         if (byteAt(t, i) != 44) { return out; }
-        i = skipWs(t, i + 1);
+        i = skipWs(t, n, i + 1);
     }
     return out;
 }
@@ -414,24 +418,27 @@ pub func jsonItems(j: Json) -> Vec<Json> {
 pub func jsonString(s: string) -> string {
     let digits = "0123456789abcdef";
     let n = len(s);
-    let mut out = "\"";
+    let mut out = vecNew<string>();
+    out = push<string>(out, "\"");
     let mut start = 0;
     let mut i = 0;
     while (i < n) {
-        let c = byteAt(s, i);
+        let c = byteAtUnchecked(s, i);
         if (c == 34 || c == 92 || c < 32) {
-            out = out + slice(s, start, i);
-            if (c == 34) { out = out + "\\\""; }
-            else if (c == 92) { out = out + "\\\\"; }
-            else if (c == 10) { out = out + "\\n"; }
-            else if (c == 13) { out = out + "\\r"; }
-            else if (c == 9) { out = out + "\\t"; }
-            else { out = out + "\\u00" + slice(digits, c / 16, c / 16 + 1) + slice(digits, c % 16, c % 16 + 1); }
+            out = push<string>(out, slice(s, start, i));
+            if (c == 34) { out = push<string>(out, "\\\""); }
+            else if (c == 92) { out = push<string>(out, "\\\\"); }
+            else if (c == 10) { out = push<string>(out, "\\n"); }
+            else if (c == 13) { out = push<string>(out, "\\r"); }
+            else if (c == 9) { out = push<string>(out, "\\t"); }
+            else { out = push<string>(out, "\\u00" + slice(digits, c / 16, c / 16 + 1) + slice(digits, c % 16, c % 16 + 1)); }
             start = i + 1;
         }
         i = i + 1;
     }
-    return out + slice(s, start, n) + "\"";
+    out = push<string>(out, slice(s, start, n));
+    out = push<string>(out, "\"");
+    return joinParts(out, "");
 }
 
 pub func jsonIntText(v: int) -> string { return intstr(v); }
@@ -444,28 +451,19 @@ pub func jsonBoolText(b: bool) -> string {
 
 /// ["a","b"] from strings
 pub func jsonStringArray(items: Vec<string>) -> string {
-    let mut out = "[";
+    let mut out = vecNew<string>();
     let n = veclen<string>(items);
     let mut i = 0;
     while (i < n) {
-        if (i > 0) { out = out + ","; }
-        out = out + jsonString(get<string>(items, i));
+        out = push<string>(out, jsonString(get<string>(items, i)));
         i = i + 1;
     }
-    return out + "]";
+    return "[" + joinParts(out, ",") + "]";
 }
 
 /// Array from values that are already JSON text
 pub func jsonArray(rawItems: Vec<string>) -> string {
-    let mut out = "[";
-    let n = veclen<string>(rawItems);
-    let mut i = 0;
-    while (i < n) {
-        if (i > 0) { out = out + ","; }
-        out = out + get<string>(rawItems, i);
-        i = i + 1;
-    }
-    return out + "]";
+    return "[" + joinParts(rawItems, ",") + "]";
 }
 
 /// obj (JSON object text) with member key set to rawValue (JSON text); replaces an existing member.
@@ -502,47 +500,47 @@ pub func jsonMinify(text: string) -> string { return jsonPretty(text, 0 - 1); }
 /// Re-indented with `indent` spaces per level (indent < 0: compact on one line)
 pub func jsonPretty(text: string, indent: int) -> string {
     let n = len(text);
-    let mut out = "";
+    let mut out = vecNew<string>();
     let mut level = 0;
     let mut i = 0;
     while (i < n) {
-        let c = byteAt(text, i);
+        let c = byteAtUnchecked(text, i);
         if (c == 34) {
-            let e = scanString(text, i);
+            let e = scanString(text, n, i);
             if (e < 0) { return text; }
-            out = out + slice(text, i, e);
+            out = push<string>(out, slice(text, i, e));
             i = e;
         } else if (c == 32 || c == 9 || c == 10 || c == 13) {
             i = i + 1;
         } else if (c == 123 || c == 91) {
-            let after = skipWs(text, i + 1);
-            if (after < n && byteAt(text, after) == c + 2) {
-                out = out + slice(text, i, i + 1) + slice(text, after, after + 1);
+            let after = skipWs(text, n, i + 1);
+            if (after < n && byteAtUnchecked(text, after) == c + 2) {
+                out = push<string>(out, slice(text, i, i + 1) + slice(text, after, after + 1));
                 i = after + 1;
             } else {
                 level = level + 1;
-                out = out + slice(text, i, i + 1);
-                if (indent >= 0) { out = out + "\n" + repeat(" ", level * indent); }
+                out = push<string>(out, slice(text, i, i + 1));
+                if (indent >= 0) { out = push<string>(out, "\n" + repeat(" ", level * indent)); }
                 i = i + 1;
             }
         } else if (c == 125 || c == 93) {
             level = level - 1;
-            if (indent >= 0) { out = out + "\n" + repeat(" ", level * indent); }
-            out = out + slice(text, i, i + 1);
+            if (indent >= 0) { out = push<string>(out, "\n" + repeat(" ", level * indent)); }
+            out = push<string>(out, slice(text, i, i + 1));
             i = i + 1;
         } else if (c == 44) {
-            out = out + ",";
-            if (indent >= 0) { out = out + "\n" + repeat(" ", level * indent); }
+            out = push<string>(out, ",");
+            if (indent >= 0) { out = push<string>(out, "\n" + repeat(" ", level * indent)); }
             i = i + 1;
         } else if (c == 58) {
-            out = out + ":";
-            if (indent >= 0) { out = out + " "; }
+            out = push<string>(out, ":");
+            if (indent >= 0) { out = push<string>(out, " "); }
             i = i + 1;
         } else {
             let start = i;
-            while (i < n && byteAt(text, i) != 44 && byteAt(text, i) != 125 && byteAt(text, i) != 93 && byteAt(text, i) != 32 && byteAt(text, i) != 10 && byteAt(text, i) != 13 && byteAt(text, i) != 9) { i = i + 1; }
-            out = out + slice(text, start, i);
+            while (i < n && byteAtUnchecked(text, i) != 44 && byteAtUnchecked(text, i) != 125 && byteAtUnchecked(text, i) != 93 && byteAtUnchecked(text, i) != 32 && byteAtUnchecked(text, i) != 10 && byteAtUnchecked(text, i) != 13 && byteAtUnchecked(text, i) != 9) { i = i + 1; }
+            out = push<string>(out, slice(text, start, i));
         }
     }
-    return out;
+    return joinParts(out, "");
 }

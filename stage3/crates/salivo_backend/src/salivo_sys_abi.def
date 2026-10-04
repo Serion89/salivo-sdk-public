@@ -11,7 +11,7 @@
 # Not thread-safe.
 #
 # Columns: intrinsic|c symbol|return|params|blocking|thread safety|ownership & lifetime
-@abi_version 38000
+@abi_version 38100
 rtsysprocsnap|salivo_sys_proc_snap|int||brief (kernel query, window enumeration)|one thread|caller owns the snapshot until rtsysprocfree (16 live at most)
 rtsysproccount|salivo_sys_proc_count|int|int|never|one thread|borrows the snapshot
 rtsysprocint|salivo_sys_proc_int|int|int,int,int|never|one thread|field 0 pid 1 ppid 2 threads 3 handles 4 session 5 working set 6 private bytes 7 cpu time (100 ns) 8 create time 9 state (0 running 1 suspended 2 not responding) 10 has window 11 io read 12 io write 13 io other (bytes)
@@ -54,3 +54,45 @@ rtsysruncode|salivo_sys_run_code|int|int|never|any thread|the child's exit code
 rtsysrunout|salivo_sys_run_out|string|int|never|any thread|captured stdout; new string owned by the caller
 rtsysrunerr|salivo_sys_run_err|string|int|never|any thread|captured stderr; new string owned by the caller
 rtsysrunfree|salivo_sys_run_free|int|int|never|any thread|frees the result
+# Stage 38.1 desktop windowing / canvas and 38.2 game rendering (salivo_gfx_runtime.inc, Win32 + OpenGL).
+# Window, texture, mesh and shader values are generation handles; a destroyed handle reports -10 forever.
+# The first thread that creates a window owns all of these calls (-13 elsewhere). More codes: -14 resource
+# of another window, -15 invalid state, -16 asset not found, -17 invalid asset, -18 shader failure, -19 graphics failure.
+rtsyswincreate|salivo_sys_win_create|int|string,int,int|brief (creates the OS window and OpenGL context)|platform thread|caller owns the hidden window until rtsyswindestroy; client size in physical pixels (1..16384)
+rtsyswindestroy|salivo_sys_win_destroy|int|int|brief|platform thread|destroys the window's textures, meshes and shaders, its queued events, its context and the OS window; -10 when already destroyed
+rtsyswinshow|salivo_sys_win_show|int|int,int|brief|platform thread|mode 0 hide 1 show 2 minimize 3 maximize 4 restore 5 focus (-15 when hidden)
+rtsyswintitle|salivo_sys_win_title|int|int,string|never|platform thread|UTF-8 title, 4096 bytes at most
+rtsyswinresize|salivo_sys_win_resize|int|int,int,int|brief|platform thread|client size in physical pixels; -15 while fullscreen
+rtsyswinmove|salivo_sys_win_move|int|int,int,int|brief|platform thread|outer top-left in screen pixels; -15 while fullscreen
+rtsyswinint|salivo_sys_win_int|int|int,int|never|platform thread|0 client width 1 client height 2 x 3 y 4 shown 5 fullscreen 6 minimized 7 focused 8 DPI scale x1000 9 in frame
+rtsyswinfullscreen|salivo_sys_win_fullscreen|int|int,int|brief|platform thread|1 borderless fullscreen on the window's monitor, 0 restores the previous placement
+rtsyswinvsync|salivo_sys_win_vsync|int|int,int|never|platform thread|1 waits for vertical blank in present (default), 0 does not; -12 without WGL_EXT_swap_control
+rtsysevpoll|salivo_sys_ev_poll|int||never|platform thread|pumps OS messages; next event type or 0: 1 close 2 resize(a w, b h, c state 0 normal 1 minimized 2 maximized) 3 move(x,y) 4 focus(a 1/0) 5 key down(a vk, b scancode, c repeat) 6 key up(a vk, b scancode) 7 text(a code point) 8 mouse move(x,y) 9 button down(a button, x,y) 10 button up 11 wheel(a delta, x,y)
+rtsysevwait|salivo_sys_ev_wait|int|int|until an OS message, an event or the timeout (ms)|platform thread|as rtsysevpoll after waiting without spinning
+rtsysevfield|salivo_sys_ev_field|int|int|never|platform thread|field of the current event: 0 window 1 a 2 b 3 c 4 x 5 y
+rtsyskeydown|salivo_sys_key_down|int|int|never|platform thread|1 while the virtual key is held; focus loss releases every key
+rtsysmouse|salivo_sys_mouse|int|int|never|platform thread|0 x 1 y (client pixels) 2 buttons (bit 1 left 2 right 3 middle) 3 window
+rtsysframebegin|salivo_sys_frame_begin|int|int|never|platform thread|starts a frame: viewport = client size, pixel projection (origin top-left); -15 inside a frame
+rtsysframeclear|salivo_sys_frame_clear|int|int,int|GPU|platform thread|clears color (0xRRGGBBAA) and depth; -15 outside a frame
+rtsysframerect|salivo_sys_frame_rect|int|int,int,int,int,int,int|GPU|platform thread|filled rectangle x,y,w,h,rgba in pixels (under the 2D camera when one is set)
+rtsysframepixel|salivo_sys_frame_pixel|int|int,int,int|waits for the GPU|platform thread|pixel of the frame being drawn as 0xRRGGBBFF
+rtsysframepresent|salivo_sys_frame_present|int|int|until vertical blank when vsync is on|platform thread|ends the frame and swaps buffers
+rtsystimeus|salivo_sys_time_us|int||never|any thread|monotonic microseconds
+rtsyscam2d|salivo_sys_cam2d|int|int,int,int,int,int|never|platform thread|2D camera for the rest of the frame: center x, y, zoom x1000, rotation degrees
+rtsystexcreate|salivo_sys_tex_create|int|int,int,int|GPU upload|platform thread|transparent texture owned by the window; -7 for sizes outside 1..GL_MAX_TEXTURE_SIZE
+rtsystexload|salivo_sys_tex_load|int|int,string|disk + GPU upload|platform thread|uncompressed 24/32-bit BMP; -16 missing file, -17 invalid image
+rtsystexpixel|salivo_sys_tex_pixel|int|int,int,int,int|never|platform thread|sets one texel (uploaded on next use)
+rtsystexsize|salivo_sys_tex_size|int|int,int|never|platform thread|0 width 1 height
+rtsystexdestroy|salivo_sys_tex_destroy|int|int|GPU|platform thread|frees the texture; -10 when already destroyed
+rtsysdrawquad|salivo_sys_draw_quad|int|int,int,int,int,int,int,int,int|GPU|platform thread|quad centered on x,y with w,h, rotation degrees, tint rgba, texture or 0; -15 under a 3D camera
+rtsysmeshcreate|salivo_sys_mesh_create|int|int|never|platform thread|empty triangle-list mesh owned by the window; -12 without OpenGL 1.5 buffers
+rtsysmeshvertex|salivo_sys_mesh_vertex|int|int,int,int,int,int,int,int|never|platform thread|appends x,y,z (milli-units), rgba, u,v (x1000); returns the vertex count
+rtsysmeshcount|salivo_sys_mesh_count|int|int|never|platform thread|vertex count
+rtsysmeshdestroy|salivo_sys_mesh_destroy|int|int|GPU|platform thread|frees the mesh and its GPU buffer
+rtsysshadercreate|salivo_sys_shader_create|int|int,string,string|driver compile|platform thread|GLSL vertex + fragment program owned by the window; -18 with the log in rtsysshaderlog
+rtsysshaderlog|salivo_sys_shader_log|string||never|platform thread|compile/link log of the last failed rtsysshadercreate; new string owned by the caller
+rtsysshaderdestroy|salivo_sys_shader_destroy|int|int|GPU|platform thread|frees the program
+rtsyscam3d|salivo_sys_cam3d|int|int,int,int,int,int,int,int,int,int,int|never|platform thread|perspective camera: eye xyz, target xyz (milli-units, up +Y), fov degrees, near, far (milli-units); enables depth test
+rtsysdrawmesh|salivo_sys_draw_mesh|int|int,int,int,int,int,int,int,int,int,int,int,int|GPU|platform thread|mesh, shader or 0, position xyz (milli), rotation x,y,z degrees, scale x1000, tint rgba, texture or 0; -15 without camera3d
+rtsysgfxstat|salivo_sys_gfx_stat|int|int|never|any thread|0 windows 1 textures 2 meshes 3 shaders (live) 4 draw calls 5 dropped events 6 queued events
+rtsysgfxinfo|salivo_sys_gfx_info|string|int,int|never|platform thread|OpenGL vendor (0), renderer (1) or version (2) of the window's context; "" for an invalid handle; new string owned by the caller

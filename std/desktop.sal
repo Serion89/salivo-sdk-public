@@ -1,0 +1,179 @@
+module salivo.std.desktop;
+
+// Stage 38.1 native desktop windowing and canvas (docs/STAGE_38_1_DESKTOP.md). Native Win32 windows
+// with an OpenGL context each; no browser, DOM or JavaScript is involved. Windows only: other
+// platforms report -12.
+//
+// Windows are int handles. Negative results are error codes (errorName turns one into text):
+// -7 invalid argument, -8 OS failure, -10 invalid or destroyed handle, -11 table full,
+// -12 unsupported, -13 wrong thread, -14 resource of another window, -15 invalid state,
+// -16 asset not found, -17 invalid asset, -18 shader failure, -19 graphics failure.
+//
+// Threading: the first thread that creates a window owns every window, the event queue and all
+// drawing for the life of the program; calls from other threads return -13.
+// Coordinates and sizes are physical client pixels, origin top-left, y down. Colors are 0xRRGGBBAA.
+
+// ---- Event types (eventPoll / eventWait) ----
+
+pub const EventNone: int = 0;
+/// The user asked to close the window (close button, Alt+F4). Nothing is destroyed until windowDestroy.
+pub const EventClose: int = 1;
+/// eventWidth / eventHeight; eventState 0 normal, 1 minimized, 2 maximized
+pub const EventResize: int = 2;
+/// eventX / eventY: outer top-left in screen pixels
+pub const EventMove: int = 3;
+/// eventFocused
+pub const EventFocus: int = 4;
+/// eventKey (virtual key, the logical key), eventScancode (physical key), eventRepeat
+pub const EventKeyDown: int = 5;
+pub const EventKeyUp: int = 6;
+/// eventChar: one Unicode code point of typed text (separate from key events)
+pub const EventText: int = 7;
+/// eventX / eventY in client pixels
+pub const EventMouseMove: int = 8;
+/// eventButton (1 left, 2 right, 3 middle), eventX, eventY
+pub const EventMouseDown: int = 9;
+pub const EventMouseUp: int = 10;
+/// eventDelta (120 per wheel notch, positive away from the user), eventX, eventY
+pub const EventWheel: int = 11;
+
+// ---- Virtual keys (letters and digits are their ASCII upper-case code: 'A' = 65, '0' = 48) ----
+
+pub const KeyBackspace: int = 8;
+pub const KeyTab: int = 9;
+pub const KeyEnter: int = 13;
+pub const KeyShift: int = 16;
+pub const KeyControl: int = 17;
+pub const KeyAlt: int = 18;
+pub const KeyEscape: int = 27;
+pub const KeySpace: int = 32;
+pub const KeyLeft: int = 37;
+pub const KeyUp: int = 38;
+pub const KeyRight: int = 39;
+pub const KeyDown: int = 40;
+pub const KeyF1: int = 112;
+
+// ---- Windows ----
+
+/// Creates a hidden window with a client area of width x height pixels (1..16384) and its
+/// OpenGL context. Show it with windowShow. Returns the handle or an error code.
+pub func windowCreate(title: string, width: int, height: int) -> int { return rtsyswincreate(title, width, height); }
+/// Destroys the window, every texture, mesh and shader created for it and its queued events.
+/// The handle stays invalid afterwards: a second destroy returns -10.
+pub func windowDestroy(win: int) -> int { return rtsyswindestroy(win); }
+pub func windowShow(win: int) -> int { return rtsyswinshow(win, 1); }
+pub func windowHide(win: int) -> int { return rtsyswinshow(win, 0); }
+pub func windowMinimize(win: int) -> int { return rtsyswinshow(win, 2); }
+pub func windowMaximize(win: int) -> int { return rtsyswinshow(win, 3); }
+pub func windowRestore(win: int) -> int { return rtsyswinshow(win, 4); }
+/// Brings a shown window to the foreground with keyboard focus (-15 when hidden)
+pub func windowFocus(win: int) -> int { return rtsyswinshow(win, 5); }
+pub func windowTitle(win: int, title: string) -> int { return rtsyswintitle(win, title); }
+/// Sets the client size in pixels (-15 while fullscreen)
+pub func windowResize(win: int, width: int, height: int) -> int { return rtsyswinresize(win, width, height); }
+/// Moves the outer top-left corner to screen pixel (x, y) (-15 while fullscreen)
+pub func windowMove(win: int, x: int, y: int) -> int { return rtsyswinmove(win, x, y); }
+/// Borderless fullscreen on the window's monitor; false restores the previous size and position
+pub func windowFullscreen(win: int, on: bool) -> int {
+    if (on) { return rtsyswinfullscreen(win, 1); }
+    return rtsyswinfullscreen(win, 0);
+}
+/// Vertical sync in present (on by default); -12 when the driver cannot change it
+pub func windowVsync(win: int, on: bool) -> int {
+    if (on) { return rtsyswinvsync(win, 1); }
+    return rtsyswinvsync(win, 0);
+}
+
+pub func windowWidth(win: int) -> int { return rtsyswinint(win, 0); }
+pub func windowHeight(win: int) -> int { return rtsyswinint(win, 1); }
+pub func windowX(win: int) -> int { return rtsyswinint(win, 2); }
+pub func windowY(win: int) -> int { return rtsyswinint(win, 3); }
+pub func windowShown(win: int) -> bool { return rtsyswinint(win, 4) == 1; }
+pub func windowIsFullscreen(win: int) -> bool { return rtsyswinint(win, 5) == 1; }
+pub func windowMinimized(win: int) -> bool { return rtsyswinint(win, 6) == 1; }
+pub func windowFocused(win: int) -> bool { return rtsyswinint(win, 7) == 1; }
+/// DPI scale x1000 (1000 at 96 DPI, 1500 at 144 DPI)
+pub func windowScale(win: int) -> int { return rtsyswinint(win, 8); }
+/// True while the handle names a live window
+pub func windowAlive(win: int) -> bool { return rtsyswinint(win, 0) >= 0; }
+
+// ---- Events and input ----
+
+/// Next event type, EventNone when there is none. Processes OS messages first; never blocks.
+pub func eventPoll() -> int { return rtsysevpoll(); }
+/// Like eventPoll, but sleeps (no CPU use) up to timeoutMs for the next event
+pub func eventWait(timeoutMs: int) -> int { return rtsysevwait(timeoutMs); }
+/// Window of the current event
+pub func eventWindow() -> int { return rtsysevfield(0); }
+pub func eventKey() -> int { return rtsysevfield(1); }
+pub func eventScancode() -> int { return rtsysevfield(2); }
+pub func eventRepeat() -> bool { return rtsysevfield(3) == 1; }
+pub func eventChar() -> int { return rtsysevfield(1); }
+pub func eventButton() -> int { return rtsysevfield(1); }
+pub func eventDelta() -> int { return rtsysevfield(1); }
+pub func eventFocused() -> bool { return rtsysevfield(1) == 1; }
+pub func eventWidth() -> int { return rtsysevfield(1); }
+pub func eventHeight() -> int { return rtsysevfield(2); }
+pub func eventState() -> int { return rtsysevfield(3); }
+/// x / y of a move, mouse or wheel event
+pub func eventX() -> int { return rtsysevfield(4); }
+pub func eventY() -> int { return rtsysevfield(5); }
+
+/// True while the virtual key is held. Focus loss releases every key (a key-up event each).
+pub func keyDown(key: int) -> bool { return rtsyskeydown(key) == 1; }
+/// Last mouse position in client pixels of the window under the mouse
+pub func mouseX() -> int { return rtsysmouse(0); }
+pub func mouseY() -> int { return rtsysmouse(1); }
+/// True while the button (1 left, 2 right, 3 middle) is held
+pub func mouseDown(button: int) -> bool { return (rtsysmouse(2) / pow2(button)) % 2 == 1; }
+
+func pow2(n: int) -> int {
+    let mut r = 1;
+    for (let mut i = 0; i < n; i = i + 1) { r = r * 2; }
+    return r;
+}
+
+// ---- Canvas ----
+//
+// Frame lifecycle: frameBegin, drawing, present. Drawing outside a frame returns -15.
+// frameBegin sets the viewport to the current client size and a pixel projection.
+
+pub func frameBegin(win: int) -> int { return rtsysframebegin(win); }
+/// Clears the frame to one color (and the depth buffer)
+pub func frameClear(win: int, color: int) -> int { return rtsysframeclear(win, color); }
+pub func fillRect(win: int, x: int, y: int, width: int, height: int, color: int) -> int {
+    return rtsysframerect(win, x, y, width, height, color);
+}
+/// Reads back one pixel of the frame being drawn as 0xRRGGBBFF (rendering verification)
+pub func framePixel(win: int, x: int, y: int) -> int { return rtsysframepixel(win, x, y); }
+/// Ends the frame and shows it (waits for vertical blank while vsync is on)
+pub func present(win: int) -> int { return rtsysframepresent(win); }
+
+/// 0xRRGGBBAA from 0..255 channels
+pub func rgba(r: int, g: int, b: int, a: int) -> int { return r * 16777216 + g * 65536 + b * 256 + a; }
+/// Monotonic clock in microseconds
+pub func timeMicros() -> int { return rtsystimeus(); }
+
+/// Live native objects: 0 windows, 1 textures, 2 meshes, 3 shaders; 4 draw calls so far,
+/// 5 events dropped because the queue (1024) was full, 6 queued events
+pub func desktopStat(which: int) -> int { return rtsysgfxstat(which); }
+
+/// OpenGL driver string of the window's context: 0 vendor, 1 renderer, 2 version ("" when invalid)
+pub func graphicsInfo(win: int, which: int) -> string { return rtsysgfxinfo(win, which); }
+
+pub func errorName(code: int) -> string {
+    if (code >= 0) { return "ok"; }
+    if (code == -7) { return "invalid argument"; }
+    if (code == -8) { return "OS failure"; }
+    if (code == -10) { return "invalid or destroyed handle"; }
+    if (code == -11) { return "handle table full"; }
+    if (code == -12) { return "unsupported platform or driver"; }
+    if (code == -13) { return "wrong thread"; }
+    if (code == -14) { return "resource belongs to another window"; }
+    if (code == -15) { return "invalid state"; }
+    if (code == -16) { return "asset not found"; }
+    if (code == -17) { return "invalid asset"; }
+    if (code == -18) { return "shader compile or link failure"; }
+    if (code == -19) { return "graphics failure"; }
+    return "error";
+}

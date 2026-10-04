@@ -1520,3 +1520,6 @@ long long salivo_sys_run_free(long long h) {
     run_unlock();
     return r ? 0 : SYS_INVALID_HANDLE;
 }
+
+/* Stage 38.1 desktop windowing / canvas and Stage 38.2 game rendering */
+#include "salivo_gfx_runtime.inc"

@@ -63,6 +63,16 @@ long long salivo_channel_recv_i64(long long channel_handle);
 /* Set by the Stage 36.1 async runtime while it runs: legacy blocking primitives report themselves
  * so a blocking call made from an async worker is detected (see salivo_aio_runtime.c). */
 void (*salivo_aio_blocking_hook)(const char* what) = 0;
+/* Set by Stage 3 programs: every runtime thread that can run Salivo code calls these at start and end
+ * (they register the thread's allocation counter). Null in the Rust pipeline. */
+void (*salivo_thread_enter_hook)(void) = 0;
+void (*salivo_thread_exit_hook)(void) = 0;
+void salivo_thread_hooks(void* enter, void* exit_fn) {
+    salivo_thread_enter_hook = (void (*)(void))enter;
+    salivo_thread_exit_hook = (void (*)(void))exit_fn;
+}
+#define SALIVO_THREAD_ENTER() do { if (salivo_thread_enter_hook) salivo_thread_enter_hook(); } while (0)
+#define SALIVO_THREAD_EXIT() do { if (salivo_thread_exit_hook) salivo_thread_exit_hook(); } while (0)
 /* Stage 36.4: set by a started async runtime. Runs fn(arg) on the runtime's blocking pool when called
  * from an async task (the task suspends) and returns 1 with the result in *out; returns 0 elsewhere. */
 int (*salivo_aio_offload_hook)(long long (*fn)(long long), long long arg, long long* out) = 0;
@@ -4660,6 +4670,7 @@ static DWORD WINAPI salivo_os_thread_proc(LPVOID param) {
 
     long long fn_addr = g_os_threads[slot_idx].fn_ptr;
     long long arg = g_os_threads[slot_idx].arg_ptr;
+    SALIVO_THREAD_ENTER();
     
     long long res = 0;
     if (arg != 0) {
@@ -4670,6 +4681,7 @@ static DWORD WINAPI salivo_os_thread_proc(LPVOID param) {
         res = f();
     }
     
+    SALIVO_THREAD_EXIT();
     g_os_threads[slot_idx].result = res;
     g_os_threads[slot_idx].is_finished = 1;
     return (DWORD)res;
@@ -4684,6 +4696,7 @@ static void* salivo_os_thread_proc(void* param) {
 
     long long fn_addr = g_os_threads[slot_idx].fn_ptr;
     long long arg = g_os_threads[slot_idx].arg_ptr;
+    SALIVO_THREAD_ENTER();
     
     long long res = 0;
     if (arg != 0) {
@@ -4694,6 +4707,7 @@ static void* salivo_os_thread_proc(void* param) {
         res = f();
     }
     
+    SALIVO_THREAD_EXIT();
     g_os_threads[slot_idx].result = res;
     g_os_threads[slot_idx].is_finished = 1;
     return (void*)(intptr_t)res;
