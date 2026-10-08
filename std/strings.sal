@@ -78,7 +78,12 @@ pub func nextchar(CharIterator it) -> Option<int> {
 
 pub func stepchar(CharIterator it) -> CharIterator {
     if (it.index >= it.len) {
-        return it;
+        // A new iterator, not `it` itself: the result never aliases the argument
+        return CharIterator {
+            ptr: it.ptr,
+            len: it.len,
+            index: it.index,
+        };
     }
     let b0 = readbyte(it.ptr, it.index);
     let step = 1;

@@ -155,6 +155,9 @@ pub struct WebServer {
     Vec<int> connSocks;
     Vec<int> connHandles;
     Vec<int> connBusy;
+    // stack of the slots closed connections left (connFreeN entries in use)
+    Vec<int> connFree;
+    int connFreeN;
     Vec<int> tasks;
     int taskCursor;
     string idPrefix;
@@ -1022,7 +1025,7 @@ pub func webServer() -> WebServer {
         secNosniff: true, secFrame: "DENY", secReferrer: "no-referrer", secCsp: "", hstsMaxAge: 0,
         hstsSubdomains: false, hstsPreload: false,
         listener: 0, port: 0, lock: rtmutexcreate(), draining: rtatomicintcreate(0), connSocks: vecNew<int>(),
-        connHandles: vecNew<int>(), connBusy: vecNew<int>(), tasks: vecNew<int>(), taskCursor: 0,
+        connHandles: vecNew<int>(), connBusy: vecNew<int>(), connFree: vecNew<int>(), connFreeN: 0, tasks: vecNew<int>(), taskCursor: 0,
         idPrefix: slice(rtcryptosha256str(str(nowMicros()) + ":" + str(rtrandomint())), 0, 12),
         idCounter: rtatomicintcreate(0),
         mRequests: rtatomicintcreate(0), mActive: rtatomicintcreate(0), m2xx: rtatomicintcreate(0),
@@ -2284,24 +2287,28 @@ pub struct ConnState {
     int slot;
     int inflight;
     int pending;
+    // HTTP/2 only: channel a request task signals when it has taken `pending` or was the last one
+    // of a closing connection
+    int wake;
 }
+
+/// Added to cs.inflight while a connection waits for its last requests (requestTask)
+func connClosingBias() -> int { return 4294967296; }
 
 func registerConn(srv: WebServer, sock: int, conn: int) -> int {
     rtmutexlock(srv.lock);
-    let n = veclen<int>(srv.connHandles);
     let mut slot = 0 - 1;
-    for (let mut i = 0; i < n && slot < 0; i = i + 1) {
-        if (get<int>(srv.connHandles, i) == 0) { slot = i; }
-    }
-    if (slot < 0) {
-        slot = n;
-        srv.connHandles = push<int>(srv.connHandles, conn);
-        srv.connSocks = push<int>(srv.connSocks, sock);
-        srv.connBusy = push<int>(srv.connBusy, 0);
-    } else {
+    if (srv.connFreeN > 0) {
+        srv.connFreeN = srv.connFreeN - 1;
+        slot = get<int>(srv.connFree, srv.connFreeN);
         set<int>(srv.connHandles, slot, conn);
         set<int>(srv.connSocks, slot, sock);
         set<int>(srv.connBusy, slot, 0);
+    } else {
+        slot = veclen<int>(srv.connHandles);
+        srv.connHandles = push<int>(srv.connHandles, conn);
+        srv.connSocks = push<int>(srv.connSocks, sock);
+        srv.connBusy = push<int>(srv.connBusy, 0);
     }
     rtmutexunlock(srv.lock);
     let a = rtatomicintfetchadd(srv.mConnections, 1);
@@ -2322,13 +2329,17 @@ func requestTask(cs: ConnState) -> int {
     let r = serveTaken(cs, heap);
     // Locals of serveTaken are gone by now; nothing here refers to the request heap
     if (heap > 0) { let e = rtaioheap(3, heap); }
+    // cs may be freed as soon as the count drops, so read the channel first
+    let w = cs.wake;
     let d = rtatomicintfetchadd(cs.inflight, 0 - 1);
+    if (d == connClosingBias() + 1) { let s = rtaiochantrysend(w, 1); }
     return 0;
 }
 
 func serveTaken(cs: ConnState, heap: int) -> int {
     let h = cs.pending;
     cs.pending = 0;
+    if (cs.wake != 0) { let s = rtaiochantrysend(cs.wake, 1); }
     let ctx = newCtx(cs.srv, h, cs.inflight);
     if (heap > 0) { ctx.heap = heap; }
     return serveRequest(ctx);
@@ -2386,7 +2397,7 @@ func serveConnIn(cs: ConnState, heap: int) -> int {
         } else {
             let i = rtatomicintfetchadd(cs.inflight, 1);
             let h2 = rtaiohttpinfo(conn, 0) == 2;
-            if (!h2) { setBusy(srv, cs.slot, 1); }
+            if (!h2) { setBusy(srv, cs.slot, 1); } else if (cs.wake == 0) { cs.wake = rtaiochannew(1); }
             cs.pending = r;
             let t = rtaiospawn(requestTask, cs);
             if (t < 0) {
@@ -2395,7 +2406,8 @@ func serveConnIn(cs: ConnState, heap: int) -> int {
                 let rs = rtaiohttpreset(r, 7);
                 let f = rtaiohttpfree(r);
             } else if (h2) {
-                while (cs.pending != 0) { let y = rtaioyield(); }
+                // A token in cs.wake means "look again"; one may be left over from an earlier stream
+                while (cs.pending != 0) { let y = rtaiochanrecv(cs.wake); }
                 let rel = rtaiorelease(t);
             } else {
                 let w = rtaioawait(t);
@@ -2407,11 +2419,29 @@ func serveConnIn(cs: ConnState, heap: int) -> int {
             }
         }
     }
-    // HTTP/2: streams still running own the connection until they finish
-    while (rtatomicintload(cs.inflight) > 0) { let z = sleep(1); }
+    // HTTP/2: streams still running own the connection until they finish. With the bias added,
+    // the last one signals cs.wake. (HTTP/1.1 requests were awaited; one still running after a
+    // cancelled await has no channel to signal and is polled.)
+    if (rtatomicintload(cs.inflight) > 0) {
+        if (cs.wake == 0) {
+            while (rtatomicintload(cs.inflight) > 0) { let z = sleep(1); }
+        } else {
+            let b = rtatomicintfetchadd(cs.inflight, connClosingBias());
+            while (rtatomicintload(cs.inflight) > connClosingBias()) { let y = rtaiochanrecv(cs.wake); }
+        }
+    }
+    if (cs.wake != 0) { let cw = rtaioclose(cs.wake); }
+    if (heap > 0) { let dh = rtaioheap(1, 0); }
     rtmutexlock(srv.lock);
     set<int>(srv.connHandles, cs.slot, 0);
+    if (srv.connFreeN < veclen<int>(srv.connFree)) {
+        set<int>(srv.connFree, srv.connFreeN, cs.slot);
+    } else {
+        srv.connFree = push<int>(srv.connFree, cs.slot);
+    }
+    srv.connFreeN = srv.connFreeN + 1;
     rtmutexunlock(srv.lock);
+    if (heap > 0) { let ah = rtaioheap(2, heap); }
     let q = rtaiohttpclose(conn);
     let a = rtatomicintfetchadd(srv.mConnections, 0 - 1);
     let dd = rtatomicdestroy(cs.inflight);
@@ -2427,7 +2457,7 @@ func acceptLoop(srv: WebServer) -> int {
         } else if (atomicLoad(srv.draining) == 1) {
             let x = rtaioclose(s);
         } else {
-            let cs = ConnState { srv: srv, sock: s, conn: 0, slot: 0 - 1, inflight: 0, pending: 0 };
+            let cs = ConnState { srv: srv, sock: s, conn: 0, slot: 0 - 1, inflight: 0, pending: 0, wake: 0 };
             let t = rtaiospawn(serveConn, cs);
             if (t < 0) {
                 let y = rtaioclose(s);
