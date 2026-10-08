@@ -7,7 +7,7 @@
 **A compiled systems language with a self-hosted compiler, deterministic cleanup, game engine and tiny native binaries**
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
-[![Version](https://img.shields.io/badge/version-v1.0.18-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.19-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux%20x64-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
@@ -20,7 +20,7 @@
 
 - [What Salivo is](#what-salivo-is)
 - [Why use Salivo](#why-use-salivo)
-- [What's new in 1.0.18](#whats-new-in-1018)
+- [What's new in 1.0.19](#whats-new-in-1019)
 - [Performance](#performance)
 - [Install](#install)
 - [Your first program](#your-first-program)
@@ -65,6 +65,13 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 **The tooling is complete from day one.** One install gives you a build tool (`sf`), a package manager with workspaces (`spm`), a formatter (`salivofmt`), a linter (`salivolint`), a documentation generator (`salivodoc`), a language server (`salivo-lsp`) and a VS Code extension with live diagnostics and one-key run (`Ctrl+F5`).
 
 ---
+
+## What's new in 1.0.19
+
+- **Stage 3 String/StrSlice fields**: `String` and `StrSlice` fields compile natively, so std.strings `chars`/`stepchar` no longer fall back to the Rust compiler.
+- **Faster toolchain**: JSON 1.1 MB parse 49 s to 7 ms, pretty/minify about 25 ms, linear text `join`/`title`, HashMap churn 3.3x faster, integer-to-string 1.7x, `outln` about 20% faster; compiler self-build 2.9 s to 2.3 s, peak RAM 592 to 465 MB.
+- **Leak fixes**: flat memory per `std.web` connection, spawn/join leak-free, struct temporaries freed.
+- **VS Code Extension 1.0.19**: execution cache detects runtime source edits; debounced language server diagnostics.
 
 ## What's new in 1.0.18
 
@@ -121,7 +128,7 @@ Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; me
 
 ### Windows (x64)
 
-1. Download **`salivo-sdk-1.0.18-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
+1. Download **`salivo-sdk-1.0.19-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
 2. Double-click **`Salivo Setup.exe`**. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
 3. Open a new terminal (or restart VS Code).
 
