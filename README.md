@@ -7,7 +7,7 @@
 **A compiled systems language with a self-hosted compiler, deterministic cleanup, game engine and tiny native binaries**
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
-[![Version](https://img.shields.io/badge/version-v1.0.19-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.20-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux%20x64-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
@@ -20,6 +20,7 @@
 
 - [What Salivo is](#what-salivo-is)
 - [Why use Salivo](#why-use-salivo)
+- [What's new in 1.0.20](#whats-new-in-1020)
 - [What's new in 1.0.19](#whats-new-in-1019)
 - [Performance](#performance)
 - [Install](#install)
@@ -65,6 +66,13 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 **The tooling is complete from day one.** One install gives you a build tool (`sf`), a package manager with workspaces (`spm`), a formatter (`salivofmt`), a linter (`salivolint`), a documentation generator (`salivodoc`), a language server (`salivo-lsp`) and a VS Code extension with live diagnostics and one-key run (`Ctrl+F5`).
 
 ---
+
+## What's new in 1.0.20
+
+- **More programs on Stage 3**: `sizeof`/`alignof`/`strideof` of structs, enums and generic structs (`Wrapper<bool>`), and `drop<T>(x)`, so std.mem `Slice` programs no longer fall back to the Rust compiler.
+- **Raw memory fixes**: `Slice<bool>`/`Slice<byte>` store one byte per element (8-byte writes used to overwrite neighbours on both compilers); `Slice` of structs and `readval`/`writeval`/`cloneval`/`moveval` work on Stage 3, including `string` and `Vec<T>` fields, plus `Slice<string>` and `Slice<Vec<T>>`.
+- **Same struct layout on both compilers**: the Rust compiler lays out fields in declaration order (it used alphabetical order), so sizes and memory bytes match Stage 3.
+- **VS Code Extension 1.0.20**: bundled with this SDK.
 
 ## What's new in 1.0.19
 
@@ -128,7 +136,7 @@ Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; me
 
 ### Windows (x64)
 
-1. Download **`salivo-sdk-1.0.19-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
+1. Download **`salivo-sdk-1.0.20-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
 2. Double-click **`Salivo Setup.exe`**. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
 3. Open a new terminal (or restart VS Code).
 
