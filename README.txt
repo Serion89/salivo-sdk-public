@@ -87,11 +87,10 @@ PACKAGE CONTENTS
 ====================================================================
 - `bin/`: Compiled Salivo compiler (`sf.exe`), package manager (`spm.exe`), and tools.
 - `std/`: Official Salivo Standard Library source files.
-- `vscode-extension/`: Official VS Code extension (syntax highlighting + run button).
+- `vscode/`: Official VS Code extension (syntax highlighting + run button).
 - `docs/`: Complete language documentation (`SALIVO_GUIDE.pdf`, `SALIVO_GUIDE.html`,
            and `salivo_quick_reference.md`).
 - `assets/`: Official Salivo brand logos (salivo_logo.png and vector logo.svg).
-- `salivo_logo.png`: High-resolution official brand emblem.
 - `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.windsurfrules`, `.github/`:
   Pre-configured AI rulebooks for every AI assistant.
 - `install.bat`: 1-click automated compiler, environment, extension, and AI installer.

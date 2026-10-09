@@ -113,7 +113,8 @@ export PATH
 
 # 6. VS Code extension ------------------------------------------------------------------------
 step 6 'Installing the Salivo VS Code extension (syntax highlighting, snippets, run and build commands)'
-VSIX=$(ls "$SRC"/vscode/salivo-*.vsix 2>/dev/null | head -n 1)
+# The newest extension by version: names sort 1.0.10 before 1.0.9, so order with sort -V
+VSIX=$(ls "$SRC"/vscode/salivo-*.vsix 2>/dev/null | sort -V | tail -n 1)
 if [ "$NO_SYSTEM" = "1" ]; then
     ok 'skipped (SALIVO_NO_SYSTEM_CHANGES=1)'
 else

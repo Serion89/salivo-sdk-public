@@ -224,8 +224,8 @@ impl Drop for User {
 
 ## 8. Compiler & Tooling Commands
 
-- **Compiler Binary:** `C:\Users\sahil\.salivo\bin\sf.exe`
-- **Package Manager:** `C:\Users\sahil\.salivo\bin\spm.exe`
+- **Compiler Binary:** `~/.salivo/bin/sf` (Windows: `%USERPROFILE%\.salivo\bin\sf.exe`)
+- **Package Manager:** `~/.salivo/bin/spm` (Windows: `%USERPROFILE%\.salivo\bin\spm.exe`)
 - **Run File:** `sf run myfile.sal`
 - **Check Syntax & Types:** `sf check myfile.sal`
 - **Build Native Binary:** `sf build myfile.sal`

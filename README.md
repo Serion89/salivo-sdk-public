@@ -1,6 +1,6 @@
 ﻿<div align="center">
 
-<img src="salivo_logo.png" alt="Salivo Logo" width="160" />
+<img src="assets/salivo_logo.png" alt="Salivo Logo" width="160" />
 
 # Salivo SDK
 

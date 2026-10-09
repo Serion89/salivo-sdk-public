@@ -55,18 +55,14 @@ The Salivo compiler, standard library, type system, and developer tooling were u
 
 ---
 
-## 3. Environment & Binary Location Law
+## 3. Environment & Binary Location
 
-- **Active Shell Execution Path:** The user's system and VS Code execute `sf` and related tools directly from:
-  ```
-  C:\Users\sahil\.salivo\bin\sf.exe
-  ```
-- **Mandatory Synchronization Protocol:**
-  Whenever you build or update the compiler or CLI (`cargo build --release` or `cargo build`):
-  1. ALWAYS copy `sf.exe`, `spm.exe`, `salivofmt.exe`, `salivolint.exe`, `salivodoc.exe`, and `salivo-lsp.exe` from `target/release/` to `C:\Users\sahil\.salivo\bin\`.
-  2. ALWAYS copy updated standard library files from `c:\salivo\std\` to `C:\Users\sahil\.salivo\lib\salivo\std\` and `C:\Users\sahil\.salivo\std\`.
+- **Install Location:** The SDK installer places `sf` and related tools in the user's Salivo home:
+  - Windows: `%USERPROFILE%\.salivo\bin\sf.exe`
+  - Linux: `~/.salivo/bin/sf`
+- **Standard Library:** Installed under `~/.salivo/std/` (and `~/.salivo/lib/salivo/std/`).
 - **Debugging Protocol:**
-  If `sf run` reports missing built-ins or runtime discrepancies, verify and refresh the active binaries in `C:\Users\sahil\.salivo\bin\` before modifying compiler source files.
+  If `sf run` reports missing built-ins or runtime discrepancies, check that the `sf` on `PATH` is the one in `~/.salivo/bin` (`sf version`) and re-run the SDK installer to refresh the binaries and standard library.
 
 ---
 
@@ -176,8 +172,6 @@ impl Drop for Point {
 - **Compiler Pipeline:**
   `Source (.sal)` $\rightarrow$ `Lexer` $\rightarrow$ `Pratt Parser (AST)` $\rightarrow$ `Semantic Analyzer (Types & Scopes)` $\rightarrow$ `HIR Lowering` $\rightarrow$ `Optimization Passes (ARC, DCE, Bounds)` $\rightarrow$ `MIR` $\rightarrow$ `LLVM Native / JIT`.
 - **Testing Verification:**
-  - Full workspace test command: `cargo test --workspace`
-  - Integration suite command: `cargo test -p salivo_cli`
-  - All modifications must maintain **100% test pass rate with 0 failures**.
-- **Documentation Build:**
-  - Run `python c:\salivo\scratch\build_docs.py` to regenerate `SALIVO_BOOK.html`, `index.html`, and `SALIVO_BOOK.pdf`.
+  - Package tests: `spm test`
+  - Type check a file without building: `sf check file.sal`
+  - All modifications must keep the test suite passing with 0 failures.
