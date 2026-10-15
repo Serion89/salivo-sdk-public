@@ -32,16 +32,16 @@ if [ ! -x "$SRC/bin/sf" ]; then
 fi
 
 # 1. Prerequisites ----------------------------------------------------------------------------
-# Salivo emits LLVM 16 IR, which clang 15 or newer reads. Distributions whose default clang is older
-# (Debian 12, Ubuntu 22.04) ship newer ones as clang-15, clang-16, ...; the newest one found is used.
-step 1 'Checking prerequisites (clang; 15 or newer recommended)'
+# Salivo emits LLVM 16 IR with opaque pointers. clang 15 or newer reads it natively;
+# clang 14 (Ubuntu 22.04 / Debian 12 default) is automatically handled by Stage 3.
+step 1 'Checking prerequisites (clang; 14 or newer recommended)'
 clang_major() { "$1" --version 2>/dev/null | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -n 1; }
 CLANG=''
-for candidate in clang-20 clang-19 clang-18 clang-17 clang-16 clang-15 clang; do
+for candidate in clang-20 clang-19 clang-18 clang-17 clang-16 clang-15 clang-14 clang; do
     path=$(command -v "$candidate" || true)
     if [ -n "$path" ]; then
         major=$(clang_major "$path")
-        if [ -n "$major" ] && [ "$major" -ge 15 ]; then
+        if [ -n "$major" ] && [ "$major" -ge 14 ]; then
             CLANG=$path
             break
         fi
@@ -51,14 +51,13 @@ if [ -n "$CLANG" ]; then
     ok "clang: $CLANG (version $(clang_major "$CLANG"))"
 else
     OLD=$(command -v clang || true)
-    if [ -n "$OLD" ]; then warn "clang $(clang_major "$OLD") is older than the tested clang 15+; it usually works, but a newer one is recommended:"; else warn 'clang was not found. Salivo needs clang (15 or newer recommended):'; fi
+    if [ -n "$OLD" ]; then warn "clang $(clang_major "$OLD") is older than clang 14+; it usually works, but clang 14 or newer is recommended:"; else warn 'clang was not found. Salivo needs clang (14 or newer recommended):'; fi
     if [ "$OS" = "Darwin" ]; then
         warn '  xcode-select --install'
     else
-        warn '  Debian 12 / Ubuntu 22.04: sudo apt install clang-16'
-        warn '  Ubuntu 24.04 and newer:   sudo apt install clang'
-        warn '  Fedora:                   sudo dnf install clang'
-        warn '  Arch:                     sudo pacman -S clang'
+        warn '  Debian 12 / Ubuntu 22.04+: sudo apt install clang'
+        warn '  Fedora:                    sudo dnf install clang'
+        warn '  Arch:                      sudo pacman -S clang'
     fi
 fi
 
