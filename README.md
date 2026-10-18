@@ -77,7 +77,7 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 - **RS256 JWTs** in `std.web` from PEM or JWK keys (`jwtAddRsaKey`, `jwtAddJwk`).
 - **Helpers**: sorting and searching (`sortInts`, `sortStrings`, `sortBy`, `indexOfStr`), `mapInts`/`filterVec`/`reduceVec`, checked and saturating arithmetic; `SALIVO_OVERFLOW_CHECKS=1` panics on unproven integer overflow; `Vec` bounds errors name the index and length.
 - **VS Code Extension 1.0.22**: bundled with this SDK.
-- This release ships the Windows x64 SDK; the Linux x64 SDK stays at [1.0.21](https://github.com/Serion89/salivo-sdk-public/releases/tag/v1.0.21).
+- Windows x64 and Linux x64 SDKs; the Stage 3 compiler bootstraps bit-identically (C2 == C3) on both.
 
 ## What's new in 1.0.21
 
@@ -170,12 +170,12 @@ Prerequisites (setup detects them and offers to install whatever is missing thro
 
 ### Linux (x64)
 
-1. Download **`salivo-sdk-1.0.21-linux-x64.tar.gz`** from the [1.0.21 release](https://github.com/Serion89/salivo-sdk-public/releases/tag/v1.0.21).
+1. Download **`salivo-sdk-1.0.22-linux-x64.tar.gz`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
 2. Install clang (14 or newer): `sudo apt install clang` (Ubuntu/Debian) or `sudo dnf install clang` (Fedora).
 3. Extract and run the installer:
    ```bash
-   tar xzf salivo-sdk-1.0.21-linux-x64.tar.gz
-   sh salivo-sdk-1.0.21-linux-x64/install.sh
+   tar xzf salivo-sdk-1.0.22-linux-x64.tar.gz
+   sh salivo-sdk-1.0.22-linux-x64/install.sh
    ```
 4. Open a new terminal.
 
