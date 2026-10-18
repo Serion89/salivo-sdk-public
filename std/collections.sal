@@ -236,7 +236,7 @@ pub func push<T>(Vec<T> v, T val) -> Vec<T> {
 pub func get<T>(Vec<T> v, int index) -> T {
     let curlen = veclen<T>(v);
     if (index < 0 || index >= curlen) {
-        panic("Vec::get index out of bounds");
+        panic($"Vec::get index {index} out of bounds (length {curlen})");
     }
     let elemsize = strideof<T>();
     let elemoffset = 32 + (index * elemsize);
@@ -247,7 +247,7 @@ pub func get<T>(Vec<T> v, int index) -> T {
 pub func getRef<T>(Vec<T> v, int index) -> int {
     let curlen = veclen<T>(v);
     if (index < 0 || index >= curlen) {
-        panic("Vec::getRef index out of bounds");
+        panic($"Vec::getRef index {index} out of bounds (length {curlen})");
     }
     let elemsize = strideof<T>();
     return v.buffer_address + 32 + (index * elemsize);
@@ -280,7 +280,7 @@ pub func take<T>(Vec<T> v, int index) -> Option<T> {
 pub func set<T>(Vec<T> v, int index, T val) {
     let curlen = veclen<T>(v);
     if (index < 0 || index >= curlen) {
-        panic("Vec::set index out of bounds");
+        panic($"Vec::set index {index} out of bounds (length {curlen})");
     }
     let elemsize = strideof<T>();
     let elemoffset = 32 + (index * elemsize);
@@ -309,7 +309,7 @@ pub func pop<T>(Vec<T> v) -> Option<T> {
 pub func insert<T>(Vec<T> v, int index, T val) -> Vec<T> {
     let curlen = veclen<T>(v);
     if (index < 0 || index > curlen) {
-        panic("Vec::insert index out of bounds");
+        panic($"Vec::insert index {index} out of bounds (length {curlen})");
     }
     let mut cap = capacity<T>(v);
     let mut addr = v.buffer_address;
@@ -350,7 +350,7 @@ pub func insert<T>(Vec<T> v, int index, T val) -> Vec<T> {
 pub func remove<T>(Vec<T> v, int index) -> Vec<T> {
     let curlen = veclen<T>(v);
     if (index < 0 || index >= curlen) {
-        panic("Vec::remove index out of bounds");
+        panic($"Vec::remove index {index} out of bounds (length {curlen})");
     }
     let mut elemsize = readi64(v.buffer_address, 16);
     if (elemsize <= 0) {
@@ -380,7 +380,7 @@ pub func remove<T>(Vec<T> v, int index) -> Vec<T> {
 pub func swapRemove<T>(Vec<T> v, int index) -> Vec<T> {
     let curlen = veclen<T>(v);
     if (index < 0 || index >= curlen) {
-        panic("Vec::swapRemove index out of bounds");
+        panic($"Vec::swapRemove index {index} out of bounds (length {curlen})");
     }
     let mut elemsize = readi64(v.buffer_address, 16);
     if (elemsize <= 0) {
@@ -468,14 +468,14 @@ pub func toSlice<T>(Vec<T> v) -> Slice<T> {
 pub func subslice<T>(Vec<T> v, int start, int end) -> Slice<T> {
     let curlen = veclen<T>(v);
     if (start < 0 || start > curlen) {
-        panic("Vec subslice start index out of bounds");
+        panic($"Vec subslice start index {start} out of bounds (length {curlen})");
     }
     let mut actualend = end;
     if (actualend == -1) {
         actualend = curlen;
     }
     if (actualend < start || actualend > curlen) {
-        panic("Vec subslice end index out of bounds");
+        panic($"Vec subslice end index {actualend} out of bounds (length {curlen})");
     }
     let elemsize = strideof<T>();
     return Slice<T> {
@@ -2215,6 +2215,278 @@ pub func testcollections() -> bool {
 
 pub func testCollections() -> bool {
     return testcollections();
+}
+
+// -----------------------------------------------------------------------------
+// Vector Sorting, Searching, and Aggregations
+// -----------------------------------------------------------------------------
+
+/// Sorts vector of integers in ascending order stably in place
+pub func sortInts(v: Vec<int>) -> Vec<int> {
+    let n = veclen<int>(v);
+    if (n <= 1) {
+        return v;
+    }
+    let mut aux = vecNew<int>();
+    let mut k = 0;
+    while (k < n) {
+        aux = push<int>(aux, 0);
+        k = k + 1;
+    }
+    let mut width = 1;
+    while (width < n) {
+        let mut i = 0;
+        while (i < n) {
+            let left = i;
+            let mut mid = i + width;
+            if (mid > n) {
+                mid = n;
+            }
+            let mut right = i + (2 * width);
+            if (right > n) {
+                right = n;
+            }
+            let mut l = left;
+            let mut r = mid;
+            let mut p = left;
+            while (l < mid && r < right) {
+                if (get<int>(v, r) < get<int>(v, l)) {
+                    set<int>(aux, p, get<int>(v, r));
+                    r = r + 1;
+                } else {
+                    set<int>(aux, p, get<int>(v, l));
+                    l = l + 1;
+                }
+                p = p + 1;
+            }
+            while (l < mid) {
+                set<int>(aux, p, get<int>(v, l));
+                l = l + 1;
+                p = p + 1;
+            }
+            while (r < right) {
+                set<int>(aux, p, get<int>(v, r));
+                r = r + 1;
+                p = p + 1;
+            }
+            let mut cp = left;
+            while (cp < right) {
+                set<int>(v, cp, get<int>(aux, cp));
+                cp = cp + 1;
+            }
+            i = i + (2 * width);
+        }
+        width = width * 2;
+    }
+    return v;
+}
+
+/// Sorts vector of floats in ascending order stably in place
+pub func sortFloats(v: Vec<float>) -> Vec<float> {
+    let n = veclen<float>(v);
+    if (n <= 1) {
+        return v;
+    }
+    let mut aux = vecNew<float>();
+    let mut k = 0;
+    while (k < n) {
+        aux = push<float>(aux, 0.0);
+        k = k + 1;
+    }
+    let mut width = 1;
+    while (width < n) {
+        let mut i = 0;
+        while (i < n) {
+            let left = i;
+            let mut mid = i + width;
+            if (mid > n) {
+                mid = n;
+            }
+            let mut right = i + (2 * width);
+            if (right > n) {
+                right = n;
+            }
+            let mut l = left;
+            let mut r = mid;
+            let mut p = left;
+            while (l < mid && r < right) {
+                if (get<float>(v, r) < get<float>(v, l)) {
+                    set<float>(aux, p, get<float>(v, r));
+                    r = r + 1;
+                } else {
+                    set<float>(aux, p, get<float>(v, l));
+                    l = l + 1;
+                }
+                p = p + 1;
+            }
+            while (l < mid) {
+                set<float>(aux, p, get<float>(v, l));
+                l = l + 1;
+                p = p + 1;
+            }
+            while (r < right) {
+                set<float>(aux, p, get<float>(v, r));
+                r = r + 1;
+                p = p + 1;
+            }
+            let mut cp = left;
+            while (cp < right) {
+                set<float>(v, cp, get<float>(aux, cp));
+                cp = cp + 1;
+            }
+            i = i + (2 * width);
+        }
+        width = width * 2;
+    }
+    return v;
+}
+
+/// Sorts vector of strings in ascending order stably in place
+pub func sortStrings(v: Vec<string>) -> Vec<string> {
+    let n = veclen<string>(v);
+    if (n <= 1) {
+        return v;
+    }
+    let mut aux = vecNew<string>();
+    let mut k = 0;
+    while (k < n) {
+        aux = push<string>(aux, "");
+        k = k + 1;
+    }
+    let mut width = 1;
+    while (width < n) {
+        let mut i = 0;
+        while (i < n) {
+            let left = i;
+            let mut mid = i + width;
+            if (mid > n) {
+                mid = n;
+            }
+            let mut right = i + (2 * width);
+            if (right > n) {
+                right = n;
+            }
+            let mut l = left;
+            let mut r = mid;
+            let mut p = left;
+            while (l < mid && r < right) {
+                if (get<string>(v, r) < get<string>(v, l)) {
+                    set<string>(aux, p, get<string>(v, r));
+                    r = r + 1;
+                } else {
+                    set<string>(aux, p, get<string>(v, l));
+                    l = l + 1;
+                }
+                p = p + 1;
+            }
+            while (l < mid) {
+                set<string>(aux, p, get<string>(v, l));
+                l = l + 1;
+                p = p + 1;
+            }
+            while (r < right) {
+                set<string>(aux, p, get<string>(v, r));
+                r = r + 1;
+                p = p + 1;
+            }
+            let mut cp = left;
+            while (cp < right) {
+                set<string>(v, cp, get<string>(aux, cp));
+                cp = cp + 1;
+            }
+            i = i + (2 * width);
+        }
+        width = width * 2;
+    }
+    return v;
+}
+
+/// Reverses elements of vector in place
+pub func reverseVec<T>(v: Vec<T>) -> Vec<T> {
+    let mut left = 0;
+    let mut right = veclen<T>(v) - 1;
+    while (left < right) {
+        let temp = get<T>(v, left);
+        set<T>(v, left, get<T>(v, right));
+        set<T>(v, right, temp);
+        left = left + 1;
+        right = right - 1;
+    }
+    return v;
+}
+
+/// Returns the first index of integer x in vector, or -1 if not found
+pub func indexOfInt(v: Vec<int>, x: int) -> int {
+    let n = veclen<int>(v);
+    let mut i = 0;
+    while (i < n) {
+        if (get<int>(v, i) == x) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Returns the first index of string s in vector, or -1 if not found
+pub func indexOfStr(v: Vec<string>, s: string) -> int {
+    let n = veclen<string>(v);
+    let mut i = 0;
+    while (i < n) {
+        if (get<string>(v, i) == s) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Computes the sum of all integers in vector
+pub func sumInts(v: Vec<int>) -> int {
+    let n = veclen<int>(v);
+    let mut sum = 0;
+    let mut i = 0;
+    while (i < n) {
+        sum = sum + get<int>(v, i);
+        i = i + 1;
+    }
+    return sum;
+}
+
+/// Returns the minimum integer in vector, or None if empty
+pub func minInt(v: Vec<int>) -> Option<int> {
+    let n = veclen<int>(v);
+    if (n == 0) {
+        return none<int>();
+    }
+    let mut m = get<int>(v, 0);
+    let mut i = 1;
+    while (i < n) {
+        let val = get<int>(v, i);
+        if (val < m) {
+            m = val;
+        }
+        i = i + 1;
+    }
+    return some<int>(m);
+}
+
+/// Returns the maximum integer in vector, or None if empty
+pub func maxInt(v: Vec<int>) -> Option<int> {
+    let n = veclen<int>(v);
+    if (n == 0) {
+        return none<int>();
+    }
+    let mut m = get<int>(v, 0);
+    let mut i = 1;
+    while (i < n) {
+        let val = get<int>(v, i);
+        if (val > m) {
+            m = val;
+        }
+        i = i + 1;
+    }
+    return some<int>(m);
 }
 
 

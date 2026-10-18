@@ -13,6 +13,9 @@
  */
 
 #define _CRT_SECURE_NO_WARNINGS
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* posix_openpt, ptsname, sethostname */
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
@@ -192,7 +195,7 @@ static BOOL CALLBACK collect_windows(HWND hwnd, LPARAM lp) {
     return TRUE;
 }
 
-long long salivo_sys_proc_snap(void) {
+static long long sys_unlocked_proc_snap(void) {
     static NtQsiFn qsi = 0;
     if (!qsi) qsi = (NtQsiFn)(void*)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
     if (!qsi) return SYS_UNSUPPORTED;
@@ -287,12 +290,12 @@ static SysProcSnap* snap_at(long long h) {
     return &g_snaps[h - 1];
 }
 
-long long salivo_sys_proc_count(long long h) {
+static long long sys_unlocked_proc_count(long long h) {
     SysProcSnap* s = snap_at(h);
     return s ? s->count : SYS_INVALID_HANDLE;
 }
 
-long long salivo_sys_proc_int(long long h, long long i, long long field) {
+static long long sys_unlocked_proc_int(long long h, long long i, long long field) {
     SysProcSnap* s = snap_at(h);
     if (!s) return SYS_INVALID_HANDLE;
     if (i < 0 || i >= s->count) return SYS_INVALID_ARG;
@@ -316,13 +319,13 @@ long long salivo_sys_proc_int(long long h, long long i, long long field) {
     }
 }
 
-char* salivo_sys_proc_text(long long h, long long i, long long field) {
+static char* sys_unlocked_proc_text(long long h, long long i, long long field) {
     SysProcSnap* s = snap_at(h);
     if (!s || i < 0 || i >= s->count) return out_cstr("");
     return out_cstr(field == 1 ? s->items[i].title : s->items[i].name);
 }
 
-long long salivo_sys_proc_free(long long h) {
+static long long sys_unlocked_proc_free(long long h) {
     SysProcSnap* s = snap_at(h);
     if (!s) return SYS_INVALID_HANDLE;
     for (long long i = 0; i < s->count; i++) { free(s->items[i].name); free(s->items[i].title); }
@@ -368,7 +371,7 @@ typedef struct {
 static PDH_HQUERY g_queries[SYS_MAX_QUERIES];
 static SysCounter g_counters[SYS_MAX_COUNTERS];
 
-long long salivo_sys_pdh_open(void) {
+static long long sys_unlocked_pdh_open(void) {
     for (int i = 0; i < SYS_MAX_QUERIES; i++) {
         if (!g_queries[i]) {
             if (PdhOpenQueryW(0, 0, &g_queries[i]) != ERROR_SUCCESS) { g_queries[i] = 0; return SYS_OS; }
@@ -378,7 +381,7 @@ long long salivo_sys_pdh_open(void) {
     return -11;
 }
 
-long long salivo_sys_pdh_add(long long q, const char* path) {
+static long long sys_unlocked_pdh_add(long long q, const char* path) {
     if (q < 1 || q > SYS_MAX_QUERIES || !g_queries[q - 1]) return SYS_INVALID_HANDLE;
     int slot = -1;
     for (int i = 0; i < SYS_MAX_COUNTERS; i++) if (!g_counters[i].live) { slot = i; break; }
@@ -399,7 +402,7 @@ long long salivo_sys_pdh_add(long long q, const char* path) {
 
 /* Samples every counter of the query and caches their formatted values. Rate counters need two
  * collects; the first one reads as zero. */
-long long salivo_sys_pdh_collect(long long q) {
+static long long sys_unlocked_pdh_collect(long long q) {
     if (q < 1 || q > SYS_MAX_QUERIES || !g_queries[q - 1]) return SYS_INVALID_HANDLE;
     PDH_STATUS st = PdhCollectQueryData(g_queries[q - 1]);
     for (int i = 0; i < SYS_MAX_COUNTERS; i++) {
@@ -428,19 +431,19 @@ static SysCounter* counter_at(long long c) {
     return &g_counters[c - 1];
 }
 
-long long salivo_sys_pdh_count(long long c) {
+static long long sys_unlocked_pdh_count(long long c) {
     SysCounter* k = counter_at(c);
     return k ? (long long)k->count : SYS_INVALID_HANDLE;
 }
 
-char* salivo_sys_pdh_name(long long c, long long i) {
+static char* sys_unlocked_pdh_name(long long c, long long i) {
     SysCounter* k = counter_at(c);
     if (!k || i < 0 || i >= (long long)k->count) return out_cstr("");
     return out_wide(k->items[i].szName, -1);
 }
 
 /* Value in thousandths (12.5 % reads 12500) so fractions survive the integer ABI. */
-long long salivo_sys_pdh_value(long long c, long long i) {
+static long long sys_unlocked_pdh_value(long long c, long long i) {
     SysCounter* k = counter_at(c);
     if (!k || i < 0 || i >= (long long)k->count) return 0;
     PDH_FMT_COUNTERVALUE* v = &k->items[i].FmtValue;
@@ -451,7 +454,7 @@ long long salivo_sys_pdh_value(long long c, long long i) {
     return (long long)(d < 0 ? d - 0.5 : d + 0.5);
 }
 
-long long salivo_sys_pdh_close(long long q) {
+static long long sys_unlocked_pdh_close(long long q) {
     if (q < 1 || q > SYS_MAX_QUERIES || !g_queries[q - 1]) return SYS_INVALID_HANDLE;
     for (int i = 0; i < SYS_MAX_COUNTERS; i++) {
         if (g_counters[i].live && g_counters[i].query == (int)q) {
@@ -495,6 +498,19 @@ long long salivo_sys_mem(long long field) {
 }
 
 long long salivo_sys_uptime_ms(void) { return (long long)GetTickCount64(); }
+
+/* All CPUs since boot in 1/100 s: 0 busy, 1 idle; 2 logical CPUs */
+long long salivo_sys_cpu(long long which) {
+    if (which == 2) { SYSTEM_INFO si; GetSystemInfo(&si); return (long long)si.dwNumberOfProcessors; }
+    FILETIME idle, kernel, user;
+    if (!GetSystemTimes(&idle, &kernel, &user)) return SYS_OS;
+    unsigned long long i = ((unsigned long long)idle.dwHighDateTime << 32) | idle.dwLowDateTime;
+    unsigned long long k = ((unsigned long long)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+    unsigned long long u = ((unsigned long long)user.dwHighDateTime << 32) | user.dwLowDateTime;
+    if (which == 0) return (long long)((k + u - i) / 100000);
+    if (which == 1) return (long long)(i / 100000);
+    return SYS_INVALID_ARG;
+}
 
 /* ---------- Registry ---------- */
 
@@ -801,7 +817,7 @@ static int render_icon(HICON icon, BYTE* out, int size, UINT flags) {
 }
 
 /* Writes the 32x32 icon of an executable (or any file) as a PNG. 0 on success. */
-long long salivo_sys_icon_png(const char* exe, const char* out_path) {
+static long long sys_unlocked_icon_png(const char* exe, const char* out_path) {
     wchar_t* we = widen(exe);
     wchar_t* wo = widen(out_path);
     if (!we || !wo) { free(we); free(wo); return SYS_OS; }
@@ -851,7 +867,7 @@ typedef struct {
 #define SYS_MAX_SVC_SNAPS 4
 static SysSvcSnap g_svcs[SYS_MAX_SVC_SNAPS];
 
-long long salivo_sys_svc_snap(void) {
+static long long sys_unlocked_svc_snap(void) {
     int slot = -1;
     for (int i = 0; i < SYS_MAX_SVC_SNAPS; i++) if (!g_svcs[i].live) { slot = i; break; }
     if (slot < 0) return -11;
@@ -902,13 +918,13 @@ static SysSvcSnap* svc_at(long long h) {
     return &g_svcs[h - 1];
 }
 
-long long salivo_sys_svc_count(long long h) {
+static long long sys_unlocked_svc_count(long long h) {
     SysSvcSnap* s = svc_at(h);
     return s ? s->count : SYS_INVALID_HANDLE;
 }
 
 /* field 0 state (1 stopped .. 4 running), 1 pid, 2 start type (2 auto, 3 manual, 4 disabled), 3 delayed */
-long long salivo_sys_svc_int(long long h, long long i, long long field) {
+static long long sys_unlocked_svc_int(long long h, long long i, long long field) {
     SysSvcSnap* s = svc_at(h);
     if (!s) return SYS_INVALID_HANDLE;
     if (i < 0 || i >= s->count) return SYS_INVALID_ARG;
@@ -916,13 +932,13 @@ long long salivo_sys_svc_int(long long h, long long i, long long field) {
     return field == 0 ? v->state : field == 1 ? v->pid : field == 2 ? v->start : field == 3 ? v->delayed : SYS_INVALID_ARG;
 }
 
-char* salivo_sys_svc_text(long long h, long long i, long long field) {
+static char* sys_unlocked_svc_text(long long h, long long i, long long field) {
     SysSvcSnap* s = svc_at(h);
     if (!s || i < 0 || i >= s->count) return out_cstr("");
     return out_cstr(field == 1 ? s->items[i].display : s->items[i].name);
 }
 
-long long salivo_sys_svc_free(long long h) {
+static long long sys_unlocked_svc_free(long long h) {
     SysSvcSnap* s = svc_at(h);
     if (!s) return SYS_INVALID_HANDLE;
     for (long long i = 0; i < s->count; i++) { free(s->items[i].name); free(s->items[i].display); }
@@ -1153,7 +1169,7 @@ static void read_net(void) {
 
 /* Text facts: cpu_name computer user gpu_names gpu_drivers disk_model net_name net_desc
  * net_ipv4 net_ipv6 (lists are one item per line). Unknown keys read as "". */
-char* salivo_sys_info(const char* key) {
+static char* sys_unlocked_info(const char* key) {
     if (!key) return out_cstr("");
     if (!strcmp(key, "cpu_name")) { read_cpu(); return out_cstr(g_cpu_name); }
     if (!strcmp(key, "computer")) {
@@ -1180,7 +1196,7 @@ char* salivo_sys_info(const char* key) {
  * mem_speed_mts mem_slots mem_slots_used mem_form (SMBIOS: 9 DIMM, 13 SODIMM) gpu_total_mb
  * disk_size_gb disk_ssd (1, 0, -1 unknown) disk_count net_link_bps session pid.
  * Unknown keys read as -7. */
-long long salivo_sys_info_int(const char* key) {
+static long long sys_unlocked_info_int(const char* key) {
     if (!key) return SYS_INVALID_ARG;
     if (!strncmp(key, "cpu_", 4)) {
         read_cpu();
@@ -1267,39 +1283,467 @@ long long salivo_sys_reveal(const char* path) {
 
 #else /* !_WIN32 */
 
-long long salivo_sys_proc_snap(void) { return SYS_UNSUPPORTED; }
-long long salivo_sys_proc_count(long long h) { (void)h; return SYS_UNSUPPORTED; }
-long long salivo_sys_proc_int(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return SYS_UNSUPPORTED; }
-char* salivo_sys_proc_text(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return out_cstr(""); }
-long long salivo_sys_proc_free(long long h) { (void)h; return SYS_UNSUPPORTED; }
+#include <errno.h>
+
+#if defined(__linux__)
+/* ---------- Linux: processes, memory, CPU time from /proc (no strings for the caller to keep) ---------- */
+#include <dirent.h>
+#include <time.h>
+#include <unistd.h>
+
+typedef struct {
+    int used;
+    long long n;
+    long long* ints;   /* SYS_PROC_INTS per process */
+    char (*names)[64];
+} SysLxSnap;
+#define SYS_PROC_INTS 15
+#define SYS_MAX_SNAPS 16
+static SysLxSnap g_lx_snaps[SYS_MAX_SNAPS + 1];
+
+static long long lx_ticks_per_sec(void) { long t = sysconf(_SC_CLK_TCK); return t > 0 ? t : 100; }
+
+/* Reads a small text file into buf; returns the length (0 when unreadable) */
+static size_t lx_slurp(const char* path, char* buf, size_t cap) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { buf[0] = 0; return 0; }
+    size_t n = fread(buf, 1, cap - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return n;
+}
+
+static long long sys_unlocked_proc_snap(void) {
+    long long h = 0;
+    for (int i = 1; i <= SYS_MAX_SNAPS; i++) if (!g_lx_snaps[i].used) { h = i; break; }
+    if (!h) return -11;
+    DIR* d = opendir("/proc");
+    if (!d) return SYS_OS;
+    size_t cap = 256, n = 0;
+    long long* ints = (long long*)calloc(cap * SYS_PROC_INTS, sizeof(long long));
+    char (*names)[64] = calloc(cap, 64);
+    if (!ints || !names) { free(ints); free(names); closedir(d); return SYS_OS; }
+    long long hz = lx_ticks_per_sec();
+    long long page = sysconf(_SC_PAGESIZE);
+    struct dirent* de;
+    char path[64], buf[1024];
+    while ((de = readdir(d))) {
+        if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+        snprintf(path, sizeof path, "/proc/%s/stat", de->d_name);
+        if (!lx_slurp(path, buf, sizeof buf)) continue;
+        char* open = strchr(buf, '(');
+        char* close = strrchr(buf, ')');
+        if (!open || !close || close < open) continue;
+        if (n == cap) {
+            size_t nc = cap * 2;
+            long long* ni = (long long*)realloc(ints, nc * SYS_PROC_INTS * sizeof(long long));
+            if (!ni) break;
+            ints = ni;
+            char (*nn)[64] = realloc(names, nc * 64);
+            if (!nn) break;
+            names = nn;
+            cap = nc;
+        }
+        long long* v = ints + n * SYS_PROC_INTS;
+        memset(v, 0, SYS_PROC_INTS * sizeof(long long));
+        size_t len = (size_t)(close - open - 1);
+        if (len > 63) len = 63;
+        memcpy(names[n], open + 1, len);
+        names[n][len] = 0;
+        /* fields after ") ": state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt
+           utime stime cutime cstime priority nice threads itreal starttime vsize rss */
+        char state = 0;
+        long long ppid = 0, pgrp = 0, session = 0, utime = 0, stime = 0, threads = 0, start = 0, rss = 0;
+        long long skip;
+        sscanf(close + 2, "%c %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
+               &state, &ppid, &pgrp, &session, &skip, &skip, &skip, &skip, &skip, &skip, &skip, &utime, &stime,
+               &skip, &skip, &skip, &skip, &threads, &skip, &start, &skip, &rss);
+        v[0] = atoll(de->d_name);
+        v[1] = ppid;
+        v[2] = threads;
+        v[4] = session;
+        v[5] = rss * page;
+        v[6] = rss * page;
+        v[7] = (utime + stime) * (10000000 / hz);   /* 100 ns units, like Windows */
+        v[8] = start * (10000000 / hz);
+        v[9] = state == 'T' || state == 't' ? 1 : 0;
+        v[14] = (unsigned char)state;
+        /* storage traffic (needs task I/O accounting; stays 0 without it) */
+        snprintf(path, sizeof path, "/proc/%s/io", de->d_name);
+        if (lx_slurp(path, buf, sizeof buf)) {
+            char* r = strstr(buf, "\nread_bytes:");
+            char* w = strstr(buf, "\nwrite_bytes:");
+            if (r) v[11] = atoll(r + 12);
+            if (w) v[12] = atoll(w + 13);
+        }
+        n++;
+    }
+    closedir(d);
+    g_lx_snaps[h].used = 1;
+    g_lx_snaps[h].n = (long long)n;
+    g_lx_snaps[h].ints = ints;
+    g_lx_snaps[h].names = names;
+    return h;
+}
+
+static SysLxSnap* lx_snap(long long h) { return h >= 1 && h <= SYS_MAX_SNAPS && g_lx_snaps[h].used ? &g_lx_snaps[h] : NULL; }
+
+static long long sys_unlocked_proc_count(long long h) { SysLxSnap* s = lx_snap(h); return s ? s->n : SYS_INVALID_HANDLE; }
+
+static long long sys_unlocked_proc_int(long long h, long long i, long long f) {
+    SysLxSnap* s = lx_snap(h);
+    if (!s) return SYS_INVALID_HANDLE;
+    if (i < 0 || i >= s->n || f < 0 || f >= SYS_PROC_INTS) return SYS_INVALID_ARG;
+    return s->ints[i * SYS_PROC_INTS + f];
+}
+
+static char* sys_unlocked_proc_text(long long h, long long i, long long f) {
+    SysLxSnap* s = lx_snap(h);
+    if (!s || i < 0 || i >= s->n || f != 0) return out_cstr("");
+    return out_cstr(s->names[i]);
+}
+
+static long long sys_unlocked_proc_free(long long h) {
+    SysLxSnap* s = lx_snap(h);
+    if (!s) return SYS_INVALID_HANDLE;
+    free(s->ints);
+    free(s->names);
+    memset(s, 0, sizeof *s);
+    return 0;
+}
+
+char* salivo_sys_proc_path(long long pid) {
+    char link[64], target[1024];
+    snprintf(link, sizeof link, "/proc/%lld/exe", pid);
+    ssize_t n = readlink(link, target, sizeof target - 1);
+    if (n < 0) n = 0;
+    target[n] = 0;
+    return out_cstr(target);
+}
+
+static long long lx_meminfo(const char* key) {
+    char buf[8192];
+    if (!lx_slurp("/proc/meminfo", buf, sizeof buf)) return 0;
+    char* p = strstr(buf, key);
+    if (!p) return 0;
+    return atoll(p + strlen(key)) * 1024;
+}
+
+/* 0 physical 1 available 2 installed 3 committed 4 commit limit 5 page cache (bytes) 9 processes 10 threads */
+long long salivo_sys_mem(long long f) {
+    switch (f) {
+    case 0: case 2: return lx_meminfo("MemTotal:");
+    case 1: return lx_meminfo("MemAvailable:");
+    case 3: return lx_meminfo("Committed_AS:");
+    case 4: return lx_meminfo("CommitLimit:");
+    case 5: return lx_meminfo("Cached:");
+    case 6: case 7: case 8: return 0;
+    case 9: case 10: {
+        char buf[128];
+        if (!lx_slurp("/proc/loadavg", buf, sizeof buf)) return 0;
+        char* slash = strchr(buf, '/');
+        return slash ? atoll(slash + 1) : 0;
+    }
+    default: return SYS_INVALID_ARG;
+    }
+}
+
+long long salivo_sys_uptime_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* All CPUs since boot in 1/100 s: 0 busy, 1 idle; 2 logical CPUs */
+long long salivo_sys_cpu(long long which) {
+    if (which == 2) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? n : 1; }
+    char buf[512];
+    if (!lx_slurp("/proc/stat", buf, sizeof buf)) return SYS_OS;
+    long long v[8] = { 0 };
+    sscanf(buf, "cpu %lld %lld %lld %lld %lld %lld %lld %lld", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+    long long hz = lx_ticks_per_sec();
+    long long idle = v[3] + v[4];
+    long long busy = v[0] + v[1] + v[2] + v[5] + v[6] + v[7];
+    if (which == 0) return busy * 100 / hz;
+    if (which == 1) return idle * 100 / hz;
+    return SYS_INVALID_ARG;
+}
+
+#else
+static long long sys_unlocked_proc_snap(void) { return SYS_UNSUPPORTED; }
+static long long sys_unlocked_proc_count(long long h) { (void)h; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_proc_int(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return SYS_UNSUPPORTED; }
+static char* sys_unlocked_proc_text(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return out_cstr(""); }
+static long long sys_unlocked_proc_free(long long h) { (void)h; return SYS_UNSUPPORTED; }
 char* salivo_sys_proc_path(long long pid) { (void)pid; return out_cstr(""); }
-long long salivo_sys_terminate(long long pid) { (void)pid; return SYS_UNSUPPORTED; }
-long long salivo_sys_pdh_open(void) { return SYS_UNSUPPORTED; }
-long long salivo_sys_pdh_add(long long q, const char* p) { (void)q; (void)p; return SYS_UNSUPPORTED; }
-long long salivo_sys_pdh_collect(long long q) { (void)q; return SYS_UNSUPPORTED; }
-long long salivo_sys_pdh_count(long long c) { (void)c; return SYS_UNSUPPORTED; }
-char* salivo_sys_pdh_name(long long c, long long i) { (void)c; (void)i; return out_cstr(""); }
-long long salivo_sys_pdh_value(long long c, long long i) { (void)c; (void)i; return 0; }
-long long salivo_sys_pdh_close(long long q) { (void)q; return SYS_UNSUPPORTED; }
 long long salivo_sys_mem(long long f) { (void)f; return SYS_UNSUPPORTED; }
 long long salivo_sys_uptime_ms(void) { return SYS_UNSUPPORTED; }
+long long salivo_sys_cpu(long long which) { (void)which; return SYS_UNSUPPORTED; }
+#endif
+#if defined(__linux__)
+#include <signal.h>
+/* 1 while the process exists and has not exited (a zombie waiting for its parent counts as ended) */
+static int lx_running(long long pid) {
+    char path[64], buf[256];
+    snprintf(path, sizeof path, "/proc/%lld/stat", pid);
+    if (!lx_slurp(path, buf, sizeof buf)) return 0;
+    char* close = strrchr(buf, ')');
+    return close && close[1] && close[2] != 'Z' && close[2] != 'X';
+}
+
+/* Like TerminateProcess: SIGTERM first; a program that ignores it (an interactive shell) gets SIGKILL
+   after 300 ms */
+long long salivo_sys_terminate(long long pid) {
+    if (pid <= 1) return SYS_INVALID_ARG;
+    if (kill((pid_t)pid, SIGTERM) != 0) return -errno;
+    for (int i = 0; i < 30; i++) {
+        struct timespec ts = { 0, 10000000 };
+        nanosleep(&ts, 0);
+        if (!lx_running(pid)) return 0;
+    }
+    return kill((pid_t)pid, SIGKILL) == 0 || errno == ESRCH ? 0 : -errno;
+}
+long long salivo_sys_alive(long long pid) { return pid > 0 && (kill((pid_t)pid, 0) == 0 || errno == EPERM) ? 1 : 0; }
+#else
+long long salivo_sys_terminate(long long pid) { (void)pid; return SYS_UNSUPPORTED; }
+long long salivo_sys_alive(long long pid) { (void)pid; return SYS_UNSUPPORTED; }
+#endif
+static long long sys_unlocked_pdh_open(void) { return SYS_UNSUPPORTED; }
+static long long sys_unlocked_pdh_add(long long q, const char* p) { (void)q; (void)p; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_pdh_collect(long long q) { (void)q; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_pdh_count(long long c) { (void)c; return SYS_UNSUPPORTED; }
+static char* sys_unlocked_pdh_name(long long c, long long i) { (void)c; (void)i; return out_cstr(""); }
+static long long sys_unlocked_pdh_value(long long c, long long i) { (void)c; (void)i; return 0; }
+static long long sys_unlocked_pdh_close(long long q) { (void)q; return SYS_UNSUPPORTED; }
 char* salivo_sys_reg_names(long long r, const char* p) { (void)r; (void)p; return out_cstr(""); }
 char* salivo_sys_reg_keys(long long r, const char* p) { (void)r; (void)p; return out_cstr(""); }
 char* salivo_sys_reg_str(long long r, const char* p, const char* n) { (void)r; (void)p; (void)n; return out_cstr(""); }
 long long salivo_sys_reg_byte(long long r, const char* p, const char* n, long long i) { (void)r; (void)p; (void)n; (void)i; return -1; }
 char* salivo_sys_file_info(const char* p, const char* k) { (void)p; (void)k; return out_cstr(""); }
-long long salivo_sys_icon_png(const char* e, const char* o) { (void)e; (void)o; return SYS_UNSUPPORTED; }
-long long salivo_sys_svc_snap(void) { return SYS_UNSUPPORTED; }
-long long salivo_sys_svc_count(long long h) { (void)h; return SYS_UNSUPPORTED; }
-long long salivo_sys_svc_int(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return SYS_UNSUPPORTED; }
-char* salivo_sys_svc_text(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return out_cstr(""); }
-long long salivo_sys_svc_free(long long h) { (void)h; return SYS_UNSUPPORTED; }
-char* salivo_sys_info(const char* k) { (void)k; return out_cstr(""); }
-long long salivo_sys_info_int(const char* k) { (void)k; return SYS_UNSUPPORTED; }
-long long salivo_sys_alive(long long pid) { (void)pid; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_icon_png(const char* e, const char* o) { (void)e; (void)o; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_svc_snap(void) { return SYS_UNSUPPORTED; }
+static long long sys_unlocked_svc_count(long long h) { (void)h; return SYS_UNSUPPORTED; }
+static long long sys_unlocked_svc_int(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return SYS_UNSUPPORTED; }
+static char* sys_unlocked_svc_text(long long h, long long i, long long f) { (void)h; (void)i; (void)f; return out_cstr(""); }
+static long long sys_unlocked_svc_free(long long h) { (void)h; return SYS_UNSUPPORTED; }
+static char* sys_unlocked_info(const char* k) { (void)k; return out_cstr(""); }
+static long long sys_unlocked_info_int(const char* k) { (void)k; return SYS_UNSUPPORTED; }
 long long salivo_sys_heap_blocks(long long a, long long b, long long w) { (void)a; (void)b; (void)w; return SYS_UNSUPPORTED; }
 long long salivo_sys_open(const char* t) { (void)t; return SYS_UNSUPPORTED; }
 long long salivo_sys_reveal(const char* p) { (void)p; return SYS_UNSUPPORTED; }
+
+#endif
+
+/* ---------- Linux system primitives (Salivo OS init and services) ---------- */
+
+#if defined(__linux__)
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+long long salivo_sys_mount(const char* src, const char* target, const char* type, long long flags) {
+    return mount(src, target, type, (unsigned long)flags, NULL) == 0 ? 0 : -errno;
+}
+
+long long salivo_sys_spawn(const char* path, const char* args, const char* tty) {
+    if (!path || !*path) return SYS_INVALID_ARG;
+    /* argv lives in the parent's memory until exec copies it */
+    size_t n = args ? strlen(args) : 0;
+    char* buf = (char*)malloc(n + 1);
+    if (!buf) return SYS_OS;
+    memcpy(buf, args ? args : "", n + 1);
+    size_t count = 2;
+    for (size_t i = 0; i < n; i++) if (buf[i] == '\n') count++;
+    char** argv = (char**)calloc(count + 1, sizeof(char*));
+    if (!argv) { free(buf); return SYS_OS; }
+    size_t argc = 0;
+    if (n == 0) argv[argc++] = (char*)path;
+    else for (char* t = buf; t; ) { char* nl = strchr(t, '\n'); if (nl) *nl = 0; argv[argc++] = t; t = nl ? nl + 1 : NULL; }
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        if (tty && *tty) {
+            int fd = open(tty, O_RDWR);
+            if (fd >= 0) {
+                ioctl(fd, TIOCSCTTY, 1);
+                dup2(fd, 0); dup2(fd, 1); dup2(fd, 2);
+                if (fd > 2) close(fd);
+            }
+        }
+        execv(path, argv);
+        _exit(127);
+    }
+    long long r = pid > 0 ? (long long)pid : -errno;
+    free(argv);
+    free(buf);
+    return r;
+}
+
+long long salivo_sys_reap(long long block) {
+    int st = 0;
+    pid_t pid = waitpid(-1, &st, block ? 0 : WNOHANG);
+    if (pid < 0) return errno == ECHILD ? SYS_INVALID_HANDLE : -errno;
+    return (long long)pid;
+}
+
+long long salivo_sys_power(long long mode) {
+    sync();
+    return reboot(mode == 1 ? RB_AUTOBOOT : RB_POWER_OFF) == 0 ? 0 : -errno;
+}
+
+long long salivo_sys_hostname(const char* name) {
+    if (!name) return SYS_INVALID_ARG;
+    return sethostname(name, strlen(name)) == 0 ? 0 : -errno;
+}
+
+/* Pseudo-terminals: a terminal emulator written in Salivo drives a shell through these. */
+#include <termios.h>
+#include <signal.h>
+typedef struct { int fd; pid_t pid; int alive; int hup; } SysPty;
+#define SYS_PTYS 16
+static SysPty g_pty[SYS_PTYS + 1];
+
+static SysPty* pty_get(long long h) { return h >= 1 && h <= SYS_PTYS && g_pty[h].fd > 0 ? &g_pty[h] : NULL; }
+
+long long salivo_sys_pty_open(const char* path, const char* args, long long cols, long long rows) {
+    if (!path || !*path || cols < 1 || rows < 1) return SYS_INVALID_ARG;
+    long long h = 0;
+    for (int i = 1; i <= SYS_PTYS; i++) if (g_pty[i].fd <= 0) { h = i; break; }
+    if (!h) return -11;
+    int m = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (m < 0) return -errno;
+    if (grantpt(m) != 0 || unlockpt(m) != 0) { int e = errno; close(m); return -e; }
+    char* sname = ptsname(m);
+    if (!sname) { int e = errno; close(m); return -e; }
+    char slave[128];
+    snprintf(slave, sizeof slave, "%s", sname);
+    struct winsize ws; memset(&ws, 0, sizeof ws);
+    ws.ws_col = (unsigned short)cols; ws.ws_row = (unsigned short)rows;
+    size_t n = args ? strlen(args) : 0;
+    char* buf = (char*)malloc(n + 1);
+    char** argv = (char**)calloc(n + 2, sizeof(char*));
+    if (!buf || !argv) { free(buf); free(argv); close(m); return SYS_OS; }
+    memcpy(buf, args ? args : "", n + 1);
+    size_t argc = 0;
+    if (n == 0) argv[argc++] = (char*)path;
+    else for (char* t = buf; t; ) { char* nl = strchr(t, '\n'); if (nl) *nl = 0; argv[argc++] = t; t = nl ? nl + 1 : NULL; }
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int sfd = open(slave, O_RDWR);
+        if (sfd < 0) _exit(127);
+        ioctl(sfd, TIOCSCTTY, 0);
+        ioctl(sfd, TIOCSWINSZ, &ws);
+        dup2(sfd, 0); dup2(sfd, 1); dup2(sfd, 2);
+        if (sfd > 2) close(sfd);
+        setenv("TERM", "xterm-256color", 1);
+        execv(path, argv);
+        _exit(127);
+    }
+    free(argv); free(buf);
+    if (pid < 0) { int e = errno; close(m); return -e; }
+    fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+    ioctl(m, TIOCSWINSZ, &ws);
+    g_pty[h].fd = m; g_pty[h].pid = pid; g_pty[h].alive = 1;
+    return h;
+}
+
+char* salivo_sys_pty_read(long long h) {
+    SysPty* p = pty_get(h);
+    if (!p) return out_cstr("");
+    size_t cap = 4096, len = 0;
+    char* buf = (char*)malloc(cap + 1);
+    if (!buf) return out_cstr("");
+    for (;;) {
+        if (len == cap) { char* nb = (char*)realloc(buf, cap * 2 + 1); if (!nb) break; buf = nb; cap *= 2; }
+        ssize_t r = read(p->fd, buf + len, cap - len);
+        if (r <= 0) break;
+        len += (size_t)r;
+        if (len >= 1 << 20) break;   /* at most 1 MiB per read: the caller draws between reads */
+    }
+    /* Salivo strings end at NUL: drop stray zero bytes */
+    size_t w = 0;
+    for (size_t i = 0; i < len; i++) if (buf[i]) buf[w++] = buf[i];
+    buf[w] = 0;
+    char* out = out_cstr(buf);
+    free(buf);
+    return out;
+}
+
+/* 1 when output is waiting or the program hung up (a read will not block), 0 otherwise */
+long long salivo_sys_pty_ready(long long h) {
+    SysPty* p = pty_get(h);
+    if (!p) return SYS_INVALID_HANDLE;
+    struct pollfd pf = { p->fd, POLLIN, 0 };
+    return poll(&pf, 1, 0) > 0 ? 1 : 0;
+}
+
+long long salivo_sys_pty_write(long long h, const char* text) {
+    SysPty* p = pty_get(h);
+    if (!p) return SYS_INVALID_HANDLE;
+    if (!text) return 0;
+    size_t n = strlen(text), done = 0;
+    while (done < n) {
+        ssize_t r = write(p->fd, text + done, n - done);
+        if (r < 0) {
+            if (errno == EAGAIN) { struct pollfd pf = { p->fd, POLLOUT, 0 }; poll(&pf, 1, 100); continue; }
+            return done ? (long long)done : -errno;
+        }
+        done += (size_t)r;
+    }
+    return (long long)done;
+}
+
+long long salivo_sys_pty_resize(long long h, long long cols, long long rows) {
+    SysPty* p = pty_get(h);
+    if (!p) return SYS_INVALID_HANDLE;
+    if (cols < 1 || rows < 1) return SYS_INVALID_ARG;
+    struct winsize ws; memset(&ws, 0, sizeof ws);
+    ws.ws_col = (unsigned short)cols; ws.ws_row = (unsigned short)rows;
+    return ioctl(p->fd, TIOCSWINSZ, &ws) == 0 ? 0 : -errno;
+}
+
+long long salivo_sys_pty_state(long long h) {
+    SysPty* p = pty_get(h);
+    if (!p) return SYS_INVALID_HANDLE;
+    if (p->alive) {
+        int st;
+        pid_t r = waitpid(p->pid, &st, WNOHANG);
+        if (r == p->pid || (r < 0 && errno == ECHILD)) p->alive = 0;
+    }
+    return p->alive;
+}
+
+long long salivo_sys_pty_close(long long h) {
+    SysPty* p = pty_get(h);
+    if (!p) return SYS_INVALID_HANDLE;
+    if (p->alive) { kill(-p->pid, SIGHUP); kill(p->pid, SIGHUP); waitpid(p->pid, NULL, WNOHANG); }
+    close(p->fd);
+    memset(p, 0, sizeof *p);
+    return 0;
+}
+
+#else
+
+long long salivo_sys_mount(const char* s, const char* t, const char* y, long long f) { (void)s; (void)t; (void)y; (void)f; return SYS_UNSUPPORTED; }
+long long salivo_sys_spawn(const char* p, const char* a, const char* t) { (void)p; (void)a; (void)t; return SYS_UNSUPPORTED; }
+long long salivo_sys_reap(long long b) { (void)b; return SYS_UNSUPPORTED; }
+long long salivo_sys_power(long long m) { (void)m; return SYS_UNSUPPORTED; }
+long long salivo_sys_hostname(const char* n) { (void)n; return SYS_UNSUPPORTED; }
+long long salivo_sys_pty_open(const char* p, const char* a, long long c, long long r) { (void)p; (void)a; (void)c; (void)r; return SYS_UNSUPPORTED; }
+char* salivo_sys_pty_read(long long h) { (void)h; return out_cstr(""); }
+long long salivo_sys_pty_ready(long long h) { (void)h; return SYS_UNSUPPORTED; }
+long long salivo_sys_pty_write(long long h, const char* t) { (void)h; (void)t; return SYS_UNSUPPORTED; }
+long long salivo_sys_pty_resize(long long h, long long c, long long r) { (void)h; (void)c; (void)r; return SYS_UNSUPPORTED; }
+long long salivo_sys_pty_state(long long h) { (void)h; return SYS_UNSUPPORTED; }
+long long salivo_sys_pty_close(long long h) { (void)h; return SYS_UNSUPPORTED; }
 
 #endif
 
@@ -1311,7 +1755,7 @@ long long salivo_sys_reveal(const char* p) { (void)p; return SYS_UNSUPPORTED; }
 #define SYS_TEXT_SLOTS 65536
 static char** g_text;
 
-long long salivo_sys_text_set(long long slot, const char* text) {
+static long long sys_unlocked_text_set(long long slot, const char* text) {
     if (slot < 0 || slot >= SYS_TEXT_SLOTS) return SYS_INVALID_ARG;
     if (!g_text) {
         g_text = (char**)calloc(SYS_TEXT_SLOTS, sizeof(char*));
@@ -1327,7 +1771,7 @@ long long salivo_sys_text_set(long long slot, const char* text) {
     return 0;
 }
 
-char* salivo_sys_text_get(long long slot) {
+static char* sys_unlocked_text_get(long long slot) {
     if (!g_text || slot < 0 || slot >= SYS_TEXT_SLOTS) return out_cstr("");
     return out_cstr(g_text[slot]);
 }
@@ -1400,6 +1844,164 @@ static void args_load(void) {
     g_argc = count;
 #endif
 }
+
+#include <sys/stat.h>
+#include <errno.h>
+/* 0 size, 1 modified time (Unix seconds), 2 directory flag; -errno when the path is missing */
+long long salivo_sys_file_stat(const char* path, long long which) {
+    if (!path || !*path) return SYS_INVALID_ARG;
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_stat64(path, &st) != 0) return -errno;
+    int dir = (st.st_mode & _S_IFDIR) != 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return -errno;
+    int dir = S_ISDIR(st.st_mode);
+#endif
+    if (which == 0) return (long long)st.st_size;
+    if (which == 1) return (long long)st.st_mtime;
+    if (which == 2) return dir;
+    return SYS_INVALID_ARG;
+}
+
+/* Whole-machine counters for a task manager (Linux; -12 elsewhere):
+   0 disk bytes read 1 disk bytes written 2 disk busy time (ms) 3 disk capacity (bytes)
+   4 network bytes received 5 network bytes sent 6 fastest link (Mbps; 0 unknown, -1 no link up)
+   7 CPU clock (MHz, average of the cores; 0 unknown) 8 GPU busy (%; -1 unknown)
+   9 battery charge (%; -1 no battery) 10 on mains power (1/0; -1 unknown) 11 wireless link up (1/0)
+   12 GPU temperature (milli degrees C; -1 unknown) 13 physical disks */
+#if defined(__linux__)
+static long long lx_read_ll(const char* path, long long fallback) {
+    char buf[64];
+    if (!lx_slurp(path, buf, sizeof buf)) return fallback;
+    char* end = 0;
+    long long v = strtoll(buf, &end, 10);
+    return end == buf ? fallback : v;
+}
+
+static int lx_entry_ok(const char* name) { return name[0] != '.'; }
+
+long long salivo_sys_stat(long long f) {
+    char path[512], buf[512];
+    struct dirent* de;
+    DIR* d;
+    long long total = 0, found = 0, best = -1;
+    if ((f >= 0 && f <= 3) || f == 13) {
+        /* whole disks have a device link; loop, ram and zram devices do not */
+        if (!(d = opendir("/sys/block"))) return 0;
+        while ((de = readdir(d))) {
+            if (!lx_entry_ok(de->d_name) || strncmp(de->d_name, "sr", 2) == 0) continue;
+            snprintf(path, sizeof path, "/sys/block/%s/device", de->d_name);
+            if (access(path, F_OK) != 0) continue;
+            found++;
+            if (f == 3) {
+                snprintf(path, sizeof path, "/sys/block/%s/size", de->d_name);
+                total += lx_read_ll(path, 0) * 512;
+                continue;
+            }
+            snprintf(path, sizeof path, "/sys/block/%s/stat", de->d_name);
+            if (!lx_slurp(path, buf, sizeof buf)) continue;
+            long long v[10] = { 0 };
+            sscanf(buf, "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]);
+            if (f == 0) total += v[2] * 512;
+            else if (f == 1) total += v[6] * 512;
+            else if (f == 2) total += v[9];
+        }
+        closedir(d);
+        return f == 13 ? found : total;
+    }
+    if ((f >= 4 && f <= 6) || f == 11) {
+        if (!(d = opendir("/sys/class/net"))) return f == 6 ? -1 : 0;
+        while ((de = readdir(d))) {
+            if (!lx_entry_ok(de->d_name) || strcmp(de->d_name, "lo") == 0) continue;
+            if (f == 4 || f == 5) {
+                snprintf(path, sizeof path, "/sys/class/net/%s/statistics/%s", de->d_name, f == 4 ? "rx_bytes" : "tx_bytes");
+                total += lx_read_ll(path, 0);
+                continue;
+            }
+            snprintf(path, sizeof path, "/sys/class/net/%s/operstate", de->d_name);
+            lx_slurp(path, buf, sizeof buf);
+            if (strncmp(buf, "up", 2) != 0) continue;
+            if (f == 11) {
+                snprintf(path, sizeof path, "/sys/class/net/%s/wireless", de->d_name);
+                if (access(path, F_OK) == 0) found = 1;
+                continue;
+            }
+            snprintf(path, sizeof path, "/sys/class/net/%s/speed", de->d_name);
+            long long speed = lx_read_ll(path, 0);
+            if (speed < 0) speed = 0;
+            if (speed > best) best = speed;
+        }
+        closedir(d);
+        if (f == 6) return best;
+        if (f == 11) return found;
+        return total;
+    }
+    if (f == 7) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        for (long c = 0; c < n && c < 4096; c++) {
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpufreq/scaling_cur_freq", c);
+            long long khz = lx_read_ll(path, -1);
+            if (khz > 0) { total += khz; found++; }
+        }
+        if (found) return total / found / 1000;
+        /* no cpufreq driver (virtual machines): the clock the kernel measured at boot */
+        char info[4096];
+        if (!lx_slurp("/proc/cpuinfo", info, sizeof info)) return 0;
+        char* p = strstr(info, "cpu MHz");
+        if (!p || !(p = strchr(p, ':'))) return 0;
+        return atoll(p + 1);
+    }
+    if (f == 8 || f == 12) {
+        for (int c = 0; c < 8; c++) {
+            if (f == 8) {
+                snprintf(path, sizeof path, "/sys/class/drm/card%d/device/gpu_busy_percent", c);
+                long long v = lx_read_ll(path, -1);
+                if (v >= 0) return v;
+                continue;
+            }
+            snprintf(path, sizeof path, "/sys/class/drm/card%d/device/hwmon", c);
+            if (!(d = opendir(path))) continue;
+            while ((de = readdir(d))) {
+                if (strncmp(de->d_name, "hwmon", 5) != 0) continue;
+                snprintf(buf, sizeof buf, "%s/%s/temp1_input", path, de->d_name);
+                best = lx_read_ll(buf, -1);
+                if (best >= 0) break;
+            }
+            closedir(d);
+            if (best >= 0) return best;
+        }
+        return -1;
+    }
+    if (f == 9 || f == 10) {
+        if (!(d = opendir("/sys/class/power_supply"))) return -1;
+        while ((de = readdir(d))) {
+            if (!lx_entry_ok(de->d_name)) continue;
+            snprintf(path, sizeof path, "/sys/class/power_supply/%s/type", de->d_name);
+            lx_slurp(path, buf, sizeof buf);
+            if (f == 9 && strncmp(buf, "Battery", 7) == 0) {
+                snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", de->d_name);
+                best = lx_read_ll(path, -1);
+                if (best >= 0) break;
+            }
+            if (f == 10 && strncmp(buf, "Mains", 5) == 0) {
+                snprintf(path, sizeof path, "/sys/class/power_supply/%s/online", de->d_name);
+                best = lx_read_ll(path, -1);
+                if (best >= 0) break;
+            }
+        }
+        closedir(d);
+        return best;
+    }
+    return SYS_INVALID_ARG;
+}
+#else
+long long salivo_sys_stat(long long f) { (void)f; return SYS_UNSUPPORTED; }
+#endif
+
+char* salivo_sys_byte(long long b) { char c[2] = { (char)b, 0 }; return out_cstr(b >= 1 && b <= 255 ? c : ""); }
 
 long long salivo_sys_argc(void) { args_load(); return g_argc; }
 
@@ -1485,8 +2087,10 @@ long long salivo_sys_run(const char* cmd, const char* input) {
         }
         if (pid > 0) {
             int st = 0;
-            while (waitpid(pid, &st, 0) < 0) {}
-            code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+            pid_t w;
+            while ((w = waitpid(pid, &st, 0)) < 0 && errno == EINTR) {}
+            /* ECHILD: someone else (sys.reap) collected it; the exit status is lost */
+            code = w < 0 ? 1 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
         }
     }
 #endif
@@ -1523,3 +2127,57 @@ long long salivo_sys_run_free(long long h) {
 
 /* Stage 38.1 desktop windowing / canvas and Stage 38.2 game rendering */
 #include "salivo_gfx_runtime.inc"
+#include "salivo_gfx_linux.inc"
+
+/* ---- Thread safety: the snapshot, counter, service, info, icon and text-store calls share tables
+ * and caches, so each public entry point holds one re-entrant lock (an entry point that calls
+ * another keeps it). Generated from the 'one thread' rows of salivo_sys_abi.def. */
+#ifdef _WIN32
+static SRWLOCK g_sys_mu = SRWLOCK_INIT;
+static __declspec(thread) char g_sys_tl;
+static void sys_mu_lock(void) { AcquireSRWLockExclusive(&g_sys_mu); }
+static void sys_mu_unlock(void) { ReleaseSRWLockExclusive(&g_sys_mu); }
+#else
+#include <pthread.h>
+static pthread_mutex_t g_sys_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread char g_sys_tl;
+static void sys_mu_lock(void) { pthread_mutex_lock(&g_sys_mu); }
+static void sys_mu_unlock(void) { pthread_mutex_unlock(&g_sys_mu); }
+#endif
+static char* volatile g_sys_owner;
+static int g_sys_depth;
+static void sys_lock(void) {
+    if (__atomic_load_n(&g_sys_owner, __ATOMIC_ACQUIRE) == &g_sys_tl) { g_sys_depth++; return; }
+    sys_mu_lock();
+    __atomic_store_n(&g_sys_owner, &g_sys_tl, __ATOMIC_RELEASE);
+    g_sys_depth = 1;
+}
+static void sys_unlock(void) {
+    if (--g_sys_depth == 0) {
+        __atomic_store_n(&g_sys_owner, (char*)0, __ATOMIC_RELEASE);
+        sys_mu_unlock();
+    }
+}
+
+long long salivo_sys_proc_snap(void) { sys_lock(); long long r = sys_unlocked_proc_snap(); sys_unlock(); return r; }
+long long salivo_sys_proc_count(long long h) { sys_lock(); long long r = sys_unlocked_proc_count(h); sys_unlock(); return r; }
+long long salivo_sys_proc_int(long long h, long long i, long long field) { sys_lock(); long long r = sys_unlocked_proc_int(h, i, field); sys_unlock(); return r; }
+char* salivo_sys_proc_text(long long h, long long i, long long field) { sys_lock(); char* r = sys_unlocked_proc_text(h, i, field); sys_unlock(); return r; }
+long long salivo_sys_proc_free(long long h) { sys_lock(); long long r = sys_unlocked_proc_free(h); sys_unlock(); return r; }
+long long salivo_sys_pdh_open(void) { sys_lock(); long long r = sys_unlocked_pdh_open(); sys_unlock(); return r; }
+long long salivo_sys_pdh_add(long long q, const char* path) { sys_lock(); long long r = sys_unlocked_pdh_add(q, path); sys_unlock(); return r; }
+long long salivo_sys_pdh_collect(long long q) { sys_lock(); long long r = sys_unlocked_pdh_collect(q); sys_unlock(); return r; }
+long long salivo_sys_pdh_count(long long c) { sys_lock(); long long r = sys_unlocked_pdh_count(c); sys_unlock(); return r; }
+char* salivo_sys_pdh_name(long long c, long long i) { sys_lock(); char* r = sys_unlocked_pdh_name(c, i); sys_unlock(); return r; }
+long long salivo_sys_pdh_value(long long c, long long i) { sys_lock(); long long r = sys_unlocked_pdh_value(c, i); sys_unlock(); return r; }
+long long salivo_sys_pdh_close(long long q) { sys_lock(); long long r = sys_unlocked_pdh_close(q); sys_unlock(); return r; }
+long long salivo_sys_icon_png(const char* exe, const char* out_path) { sys_lock(); long long r = sys_unlocked_icon_png(exe, out_path); sys_unlock(); return r; }
+long long salivo_sys_svc_snap(void) { sys_lock(); long long r = sys_unlocked_svc_snap(); sys_unlock(); return r; }
+long long salivo_sys_svc_count(long long h) { sys_lock(); long long r = sys_unlocked_svc_count(h); sys_unlock(); return r; }
+long long salivo_sys_svc_int(long long h, long long i, long long field) { sys_lock(); long long r = sys_unlocked_svc_int(h, i, field); sys_unlock(); return r; }
+char* salivo_sys_svc_text(long long h, long long i, long long field) { sys_lock(); char* r = sys_unlocked_svc_text(h, i, field); sys_unlock(); return r; }
+long long salivo_sys_svc_free(long long h) { sys_lock(); long long r = sys_unlocked_svc_free(h); sys_unlock(); return r; }
+char* salivo_sys_info(const char* key) { sys_lock(); char* r = sys_unlocked_info(key); sys_unlock(); return r; }
+long long salivo_sys_info_int(const char* key) { sys_lock(); long long r = sys_unlocked_info_int(key); sys_unlock(); return r; }
+long long salivo_sys_text_set(long long slot, const char* text) { sys_lock(); long long r = sys_unlocked_text_set(slot, text); sys_unlock(); return r; }
+char* salivo_sys_text_get(long long slot) { sys_lock(); char* r = sys_unlocked_text_get(slot); sys_unlock(); return r; }

@@ -269,6 +269,10 @@ pub func tcprecvstr(stream: TcpStream, max_bytes: int) -> Result<string, Network
         return err<string, NetworkError>(neterror(NetworkErrorKind::PlatformProviderUnavailable, "Platform provider unavailable"));
     }
     let data = rtnetrecv(stream.socket.fd, max_bytes);
+    if (data == "" && rtnetlastrecv() < 0) {
+        return err<string, NetworkError>(neterror(NetworkErrorKind::ConnectionReset, "Failed to receive data from socket"));
+    }
+    // Ok("") means the peer closed the connection
     return ok<string, NetworkError>(data);
 }
 
@@ -356,8 +360,14 @@ pub func send(sock: int, data: string) -> int {
     return rtnetsend(sock, data);
 }
 
+/// Received text; "" when the peer closed the connection or on error (lastRecv tells them apart)
 pub func recv(sock: int, max_bytes: int) -> string {
     return rtnetrecv(sock, max_bytes);
+}
+
+/// What this thread's last recv / tcprecvstr got: byte count, 0 when the peer closed, -1 on error
+pub func lastRecv() -> int {
+    return rtnetlastrecv();
 }
 
 pub func close(handle: int) {

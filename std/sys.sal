@@ -1,12 +1,14 @@
 module salivo.std.sys;
 
-// Stage 38 system telemetry (crates/salivo_backend/src/salivo_sys_abi.def). Windows only; on
-// other platforms every call reports -12 and every string is empty.
+// Stage 38 system telemetry (crates/salivo_backend/src/salivo_sys_abi.def). Windows; on Linux the
+// process snapshot, memory, uptime, CPU, terminal and system rows work too. Elsewhere every call
+// reports -12 and every string is empty.
 //
 // Snapshots and counter queries are int handles: release them with procFree / svcFree /
 // counterClose. Negative results are error codes: -7 invalid argument, -8 OS failure,
-// -10 invalid handle, -11 table full, -12 unsupported. Not thread-safe: call from one thread
-// (or one async worker).
+// -10 invalid handle, -11 table full, -12 unsupported. Safe to call from any thread (calls that
+// share snapshot, counter and cache tables are serialized); window, drawing, input and sound calls
+// belong to the thread that created the window.
 
 // ---- Processes ----
 
@@ -34,6 +36,8 @@ pub func procHasWindow(snap: int, i: int) -> bool { return rtsysprocint(snap, i,
 pub func procIoRead(snap: int, i: int) -> int { return rtsysprocint(snap, i, 11); }
 pub func procIoWrite(snap: int, i: int) -> int { return rtsysprocint(snap, i, 12); }
 pub func procIoOther(snap: int, i: int) -> int { return rtsysprocint(snap, i, 13); }
+/// Linux scheduler state as a letter code: R running, S sleeping, D disk wait, Z zombie, T stopped, I idle
+pub func procStateCode(snap: int, i: int) -> int { return rtsysprocint(snap, i, 14); }
 /// Image name, such as "chrome.exe"
 pub func procName(snap: int, i: int) -> string { return rtsysproctext(snap, i, 0); }
 /// Title of the main window, "" without one
@@ -87,6 +91,12 @@ pub func systemHandles() -> int { return rtsysmem(8); }
 pub func systemProcesses() -> int { return rtsysmem(9); }
 pub func systemThreads() -> int { return rtsysmem(10); }
 pub func uptimeMs() -> int { return rtsysuptimems(); }
+/// Time all CPUs spent busy since boot, in 1/100 s (Windows and Linux)
+pub func cpuBusy() -> int { return rtsyscpu(0); }
+/// Time all CPUs spent idle since boot, in 1/100 s
+pub func cpuIdle() -> int { return rtsyscpu(1); }
+/// Logical CPUs
+pub func cpuCount() -> int { return rtsyscpu(2); }
 
 // ---- Services ----
 
@@ -134,7 +144,72 @@ pub func sysInfoInt(key: string) -> int { return rtsysinfoint(key); }
 
 // ---- Text store ----
 
+/// Size of a file in bytes (-errno when it does not exist)
+pub func fileSize(path: string) -> int { return rtsysfilestat(path, 0); }
+/// Last modification time in Unix seconds (-errno when it does not exist)
+pub func fileTime(path: string) -> int { return rtsysfilestat(path, 1); }
+
+// ---- Machine counters (Linux; -12 elsewhere) ----
+
+/// Bytes read from and written to physical disks since boot
+pub func diskRead() -> int { return rtsysstat(0); }
+pub func diskWritten() -> int { return rtsysstat(1); }
+/// Milliseconds the disks spent busy since boot (the change per second is the busy share)
+pub func diskBusyMs() -> int { return rtsysstat(2); }
+/// Capacity of all physical disks in bytes, and how many there are
+pub func diskCapacity() -> int { return rtsysstat(3); }
+pub func diskCount() -> int { return rtsysstat(13); }
+/// Bytes received and sent on every network interface except loopback
+pub func netReceived() -> int { return rtsysstat(4); }
+pub func netSent() -> int { return rtsysstat(5); }
+/// Fastest connected link in Mbps: 0 when the speed is unknown, -1 when no link is up
+pub func netLinkMbps() -> int { return rtsysstat(6); }
+pub func wifiConnected() -> bool { return rtsysstat(11) == 1; }
+/// Current CPU clock in MHz (average of the cores), 0 when unknown
+pub func cpuMhz() -> int { return rtsysstat(7); }
+/// GPU busy percent and temperature (milli degrees C); -1 when the driver does not report it
+pub func gpuBusy() -> int { return rtsysstat(8); }
+pub func gpuTemp() -> int { return rtsysstat(12); }
+/// Battery charge percent (-1 without a battery) and mains power (1 on, 0 off, -1 unknown)
+pub func batteryLevel() -> int { return rtsysstat(9); }
+pub func onMains() -> int { return rtsysstat(10); }
+
 /// Keeps a copy of text in slot 0..65535 (runtime memory, outlives request heaps); replaces and frees the old text
 pub func textStore(slot: int, text: string) -> int { return rtsystextset(slot, text); }
 /// Text in a slot, "" when empty
 pub func textLoad(slot: int) -> string { return rtsystextget(slot); }
+
+// ---- Linux system (Salivo OS init and services; -12 elsewhere) ----
+
+/// mount(2) with MS_* flag bits; 0 or -errno
+pub func mount(source: string, target: string, fsType: string, flags: int) -> int { return rtsysmount(source, target, fsType, flags); }
+/// Starts path in a new session; args are newline-separated with argv[0] first ("" = just path); tty "" inherits ours. pid or -errno
+pub func spawn(path: string, args: string, tty: string) -> int { return rtsysspawn(path, args, tty); }
+/// Reaps one exited child: its pid, 0 when none is ready (block false), -10 when there are no children
+pub func reap(block: bool) -> int {
+    if (block) { return rtsysreap(1); }
+    return rtsysreap(0);
+}
+/// Syncs disks and powers off; returns only on failure (-errno)
+pub func powerOff() -> int { return rtsyspower(0); }
+/// Syncs disks and reboots; returns only on failure (-errno)
+pub func reboot() -> int { return rtsyspower(1); }
+/// sethostname(2); 0 or -errno
+pub func setHostname(name: string) -> int { return rtsyshostname(name); }
+
+// ---- Pseudo-terminals (Linux; -12 elsewhere) ----
+
+/// Runs path (newline-separated args, argv[0] first) on a new terminal of cols x rows; a handle or -errno
+pub func ptyOpen(path: string, args: string, cols: int, rows: int) -> int { return rtsysptyopen(path, args, cols, rows); }
+/// Output written since the last read, "" when none; never blocks
+pub func ptyRead(pty: int) -> string { return rtsysptyread(pty); }
+/// True when output is waiting (or the program hung up): read only then to skip empty reads
+pub func ptyReady(pty: int) -> bool { return rtsysptyready(pty) == 1; }
+/// Types text (keys, escape sequences) into the terminal; bytes written or -errno
+pub func ptyWrite(pty: int, text: string) -> int { return rtsysptywrite(pty, text); }
+/// Tells the program its terminal is now cols x rows
+pub func ptyResize(pty: int, cols: int, rows: int) -> int { return rtsysptyresize(pty, cols, rows); }
+/// True while the program in the terminal runs
+pub func ptyAlive(pty: int) -> bool { return rtsysptystate(pty) == 1; }
+/// Hangs up the terminal and frees the handle
+pub func ptyClose(pty: int) -> int { return rtsysptyclose(pty); }

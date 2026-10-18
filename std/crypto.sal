@@ -239,11 +239,23 @@ pub func sha256hex(input_raw: string) -> string {
 // -----------------------------------------------------------------------------
 
 /// Encrypts plaintext buffer using genuine AES-256 cipher
+/// Size of what encrypt produces for plaintext_len bytes: 12-byte nonce + ciphertext + 16-byte tag
+pub func encryptedLen(plaintext_len: int) -> int {
+    return plaintext_len + 28;
+}
+
+/// Plaintext size of an encrypt result of ciphertext_len bytes
+pub func decryptedLen(ciphertext_len: int) -> int {
+    return ciphertext_len - 28;
+}
+
+/// AES-256-GCM with a fresh random nonce: the result buffer holds encryptedLen(plaintext_len) bytes
+/// (nonce || ciphertext || tag); free it with deallocate(addr, encryptedLen(plaintext_len), 8)
 pub func encrypt(cipher: Aes256, plaintext_addr: int, plaintext_len: int) -> Result<int, CryptoError> {
     if (plaintext_addr == 0 || plaintext_len <= 0) {
         return err<int, CryptoError>(cryptoerror(CryptoErrorKind::BufferTooSmall, "Invalid plaintext buffer"));
     }
-    let alloc_len = ((plaintext_len + 15) / 16) * 16;
+    let alloc_len = plaintext_len + 28;
     let ciphertext_addr = allocate(alloc_len, 8);
     let res = rtcryptoaes256encrypt(cipher.key_address, plaintext_addr, plaintext_len, ciphertext_addr);
     if (res < 0) {
@@ -253,12 +265,13 @@ pub func encrypt(cipher: Aes256, plaintext_addr: int, plaintext_len: int) -> Res
     return ok<int, CryptoError>(ciphertext_addr);
 }
 
-/// Decrypts ciphertext buffer using genuine AES-256 cipher
+/// Opens an encrypt result (AES-256-GCM): AuthenticationFailed when it was modified or the key is
+/// wrong. The plaintext buffer holds decryptedLen(ciphertext_len) bytes
 pub func decrypt(cipher: Aes256, ciphertext_addr: int, ciphertext_len: int) -> Result<int, CryptoError> {
-    if (ciphertext_addr == 0 || ciphertext_len <= 0) {
+    if (ciphertext_addr == 0 || ciphertext_len < 29) {
         return err<int, CryptoError>(cryptoerror(CryptoErrorKind::AuthenticationFailed, "Invalid ciphertext buffer"));
     }
-    let alloc_len = ((ciphertext_len + 15) / 16) * 16;
+    let alloc_len = ciphertext_len - 28;
     let plaintext_addr = allocate(alloc_len, 8);
     let res = rtcryptoaes256decrypt(cipher.key_address, ciphertext_addr, ciphertext_len, plaintext_addr);
     if (res < 0) {

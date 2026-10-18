@@ -297,8 +297,98 @@ pub func fract(float v) -> float {
 // Overflow, Checked, Wrapping, and Saturating Arithmetic
 // -----------------------------------------------------------------------------
 
+/// Checked addition returning Option::Some(sum) or Option::None on overflow
+pub func checkedAdd(a: int, b: int) -> Option<int> {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if ((b > 0 && a > MAX - b) || (b < 0 && a < MIN - b)) {
+        return none<int>();
+    }
+    return some<int>(a + b);
+}
+
+/// Checked subtraction returning Option::Some(diff) or Option::None on overflow
+pub func checkedSub(a: int, b: int) -> Option<int> {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if ((b < 0 && a > MAX + b) || (b > 0 && a < MIN + b)) {
+        return none<int>();
+    }
+    return some<int>(a - b);
+}
+
+/// Checked multiplication returning Option::Some(prod) or Option::None on overflow
+pub func checkedMul(a: int, b: int) -> Option<int> {
+    let MIN = -9223372036854775807 - 1;
+    if (a == 0 || b == 0) {
+        return some<int>(0);
+    }
+    if ((a == -1 && b == MIN) || (b == -1 && a == MIN)) {
+        return none<int>();
+    }
+    let r = a * b;
+    if (r / b != a) {
+        return none<int>();
+    }
+    return some<int>(r);
+}
+
+/// Saturating addition clamping at INT64_MAX or INT64_MIN
+pub func saturatingAdd(a: int, b: int) -> int {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if (b > 0 && a > MAX - b) {
+        return MAX;
+    }
+    if (b < 0 && a < MIN - b) {
+        return MIN;
+    }
+    return a + b;
+}
+
+/// Saturating subtraction clamping at INT64_MAX or INT64_MIN
+pub func saturatingSub(a: int, b: int) -> int {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if (b < 0 && a > MAX + b) {
+        return MAX;
+    }
+    if (b > 0 && a < MIN + b) {
+        return MIN;
+    }
+    return a - b;
+}
+
+/// Saturating multiplication clamping at INT64_MAX or INT64_MIN
+pub func saturatingMul(a: int, b: int) -> int {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    if ((a == -1 && b == MIN) || (b == -1 && a == MIN)) {
+        return MAX;
+    }
+    let r = a * b;
+    if (r / b != a) {
+        if ((a > 0 && b > 0) || (a < 0 && b < 0)) {
+            return MAX;
+        }
+        return MIN;
+    }
+    return r;
+}
+
 /// Saturating addition preventing integer overflow
 pub func satadd(int a, int b, int max_val) -> int {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if (b > 0 && a > MAX - b) {
+        return max_val;
+    }
+    if (b < 0 && a < MIN - b) {
+        return MIN;
+    }
     let sum = a + b;
     if (sum > max_val) {
         return max_val;
@@ -308,6 +398,14 @@ pub func satadd(int a, int b, int max_val) -> int {
 
 /// Saturating subtraction preventing integer underflow
 pub func satsub(int a, int b, int min_val) -> int {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if (b < 0 && a > MAX + b) {
+        return MAX;
+    }
+    if (b > 0 && a < MIN + b) {
+        return min_val;
+    }
     let diff = a - b;
     if (diff < min_val) {
         return min_val;
@@ -317,6 +415,11 @@ pub func satsub(int a, int b, int min_val) -> int {
 
 /// Checked addition returning Option::Some(sum) or Option::None on overflow
 pub func checkedadd(int a, int b, int max_val) -> Option<int> {
+    let MAX = 9223372036854775807;
+    let MIN = -9223372036854775807 - 1;
+    if ((b > 0 && a > MAX - b) || (b < 0 && a < MIN - b)) {
+        return none<int>();
+    }
     let sum = a + b;
     if (sum > max_val) {
         return none<int>();

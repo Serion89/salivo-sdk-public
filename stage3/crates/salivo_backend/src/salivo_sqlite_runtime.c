@@ -4,6 +4,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Strings returned to Salivo code come from the program's string allocator (salivo_task_runtime.c) */
+void* salivo_rt_smalloc(long long n);
+static char* sq_out_str(const char* s, size_t n) {
+    char* r = (char*)salivo_rt_smalloc((long long)n + 1);
+    if (!r) return 0;
+    if (n) memcpy(r, s, n);
+    r[n] = 0;
+    return r;
+}
+static char* sq_out_cstr(const char* s) { return sq_out_str(s ? s : "", s ? strlen(s) : 0); }
+
 /* Diagnostics only with SALIVO_SQLITE_TRACE=1, on stderr: SQL text never reaches stdout by default */
 static int sqlite_trace_on(void) {
     static int v = -1;
@@ -163,22 +174,14 @@ long long salivo_sqlite_column_count(long long stmt_handle) {
 
 char* salivo_sqlite_column_name(long long stmt_handle, long long col_idx) {
     sqlite3_stmt* stmt = get_stmt_by_handle(stmt_handle);
-    if (!stmt) return "";
-    const char* name = sqlite3_column_name(stmt, (int)col_idx);
-    if (!name) return "";
-    char* res = (char*)malloc(strlen(name) + 1);
-    strcpy(res, name);
-    return res;
+    if (!stmt) return sq_out_cstr("");
+    return sq_out_cstr(sqlite3_column_name(stmt, (int)col_idx));
 }
 
 char* salivo_sqlite_column_text(long long stmt_handle, long long col_idx) {
     sqlite3_stmt* stmt = get_stmt_by_handle(stmt_handle);
-    if (!stmt) return "";
-    const char* text = (const char*)sqlite3_column_text(stmt, (int)col_idx);
-    if (!text) return "";
-    char* res = (char*)malloc(strlen(text) + 1);
-    strcpy(res, text);
-    return res;
+    if (!stmt) return sq_out_cstr("");
+    return sq_out_cstr((const char*)sqlite3_column_text(stmt, (int)col_idx));
 }
 
 long long salivo_sqlite_column_int(long long stmt_handle, long long col_idx) {
@@ -266,16 +269,12 @@ static void jb_str(JsonBuf* b, const char* s) {
 char* salivo_sqlite_query_json(long long db_handle, const char* sql) {
     sqlite3* db = get_db_by_handle(db_handle);
     if (!db || !sql) {
-        char* empty = (char*)malloc(3);
-        strcpy(empty, "[]");
-        return empty;
+        return sq_out_cstr("[]");
     }
     sqlite3_stmt* stmt = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        char* empty = (char*)malloc(3);
-        strcpy(empty, "[]");
-        return empty;
+        return sq_out_cstr("[]");
     }
     int col_count = sqlite3_column_count(stmt);
     JsonBuf jb = {NULL, 0, 0, 0};
@@ -289,7 +288,12 @@ char* salivo_sqlite_query_json(long long db_handle, const char* sql) {
             if (i > 0) jb_put(&jb, ", ", 2);
             jb_str(&jb, sqlite3_column_name(stmt, i));
             jb_put(&jb, ": ", 2);
-            jb_str(&jb, (const char*)sqlite3_column_text(stmt, i));
+            int ct = sqlite3_column_type(stmt, i);
+            if (ct == SQLITE_NULL) jb_put(&jb, "null", 4);
+            else if (ct == SQLITE_INTEGER || ct == SQLITE_FLOAT) {
+                const char* num = (const char*)sqlite3_column_text(stmt, i);
+                if (num) jb_put(&jb, num, strlen(num)); else jb_put(&jb, "null", 4);
+            } else jb_str(&jb, (const char*)sqlite3_column_text(stmt, i));
         }
         jb_put(&jb, "}", 1);
     }
@@ -297,11 +301,10 @@ char* salivo_sqlite_query_json(long long db_handle, const char* sql) {
     sqlite3_finalize(stmt);
     if (jb.failed) {
         free(jb.data);
-        char* empty = (char*)malloc(3);
-        if (empty) strcpy(empty, "[]");
-        return empty;
+        return sq_out_cstr("[]");
     }
-    char* res = jb.data;
+    char* res = sq_out_str(jb.data, jb.len);
+    free(jb.data);
     return res;
 }
 

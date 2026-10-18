@@ -994,6 +994,14 @@ static void sa_heap_remove(SaRuntime* rt, int64_t i) {
 
 static void sa_reactor_notify(SaRuntime* rt);
 
+/* Absolute deadline ms milliseconds from now, saturating: a huge timeout means "never", not a past time */
+static int64_t sa_deadline_after_ms(int64_t ms) {
+    int64_t now = sa_now_ns();
+    if (ms <= 0) return now;
+    if (ms > (INT64_MAX - now) / 1000000) return INT64_MAX;
+    return now + ms * 1000000;
+}
+
 static int sa_timer_arm_ex(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms, void (*cb)(SaTimer*)) {
     int notify = 0;
     tm->w = w;
@@ -1010,7 +1018,7 @@ static int sa_timer_arm_ex(SaRuntime* rt, SaTimer* tm, SaWaiter* w, int64_t ms, 
         rt->heap = nh;
         rt->heap_cap = ncap;
     }
-    tm->deadline_ns = sa_now_ns() + ms * 1000000;
+    tm->deadline_ns = sa_deadline_after_ms(ms);
     tm->seq = rt->tm_seq++;
     rt->heap_n++;
     sa_heap_set(rt, rt->heap_n - 1, tm);
@@ -2174,7 +2182,7 @@ int64_t salivo_aio_join(int64_t h, int64_t timeout_ms) {
         rt->state = RT_JOINED;
         return SA_OK;
     }
-    int64_t deadline = timeout_ms >= 0 ? sa_now_ns() + timeout_ms * 1000000 : INT64_MAX;
+    int64_t deadline = timeout_ms >= 0 ? sa_deadline_after_ms(timeout_ms) : INT64_MAX;
     sa_mutex_lock(&rt->tasks_lock);
     while (A_LOAD(&rt->live_tasks) > 0) {
         int64_t left = deadline == INT64_MAX ? -1 : (deadline - sa_now_ns()) / 1000000;

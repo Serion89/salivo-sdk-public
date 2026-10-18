@@ -1,6 +1,9 @@
 
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* pipe2, mkdtemp (salivo_fsx.inc) on glibc */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +19,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
 #include <direct.h>
 #include <io.h>
 #include <intrin.h>
@@ -23,6 +27,7 @@
 #include <sys/stat.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "bcrypt.lib")
 #else
 #include <time.h>
 #include <unistd.h>
@@ -149,6 +154,30 @@ static void* (*g_rt_str_alloc)(long long n);
 void salivo_set_str_alloc(void* f) { g_rt_str_alloc = (void* (*)(long long))f; }
 static void* rt_smalloc(size_t n) { return g_rt_str_alloc ? g_rt_str_alloc((long long)n) : malloc(n); }
 
+/* Hands a malloc'd result string to the program: with a registered string allocator (Stage 3's
+   arena) it is copied there and the malloc block freed, so an arena reset reclaims it like any
+   other string; without one it is returned as is */
+static char* rt_adopt_str(char* buf, size_t len) {
+    if (!g_rt_str_alloc || !buf) return buf;
+    char* r = (char*)g_rt_str_alloc((long long)len + 1);
+    if (!r) return buf;
+    memcpy(r, buf, len);
+    r[len] = '\0';
+    free(buf);
+    return r;
+}
+
+/* Copies n bytes of s into a fresh program string (string allocator when registered, else malloc);
+   the shared empty string when out of memory */
+static char* rt_out_str(const char* s, size_t n) {
+    char* r = (char*)rt_smalloc(n + 1);
+    if (!r) return salivo_empty_str;
+    if (n) memcpy(r, s, n);
+    r[n] = '\0';
+    return r;
+}
+static char* rt_out_cstr(const char* s) { return rt_out_str(s ? s : "", s ? strlen(s) : 0); }
+
 /* Frees a heap string produced by rtconcat/rtsubstr/rtintstr (a heap "" included); only for
  * programs without a registered allocator */
 void rtfreestr(char* s) {
@@ -171,7 +200,7 @@ char* rtconcat(const char* a, const char* b) {
 
 char* salivo_concat_str_len(const char* a, size_t la, const char* b, size_t lb) {
     char* res = (char*)malloc(la + lb + 1);
-    if (!res) return "";
+    if (!res) return salivo_empty_str;
     if (la > 0 && a) memcpy(res, a, la);
     if (lb > 0 && b) memcpy(res + la, b, lb);
     res[la + lb] = '\0';
@@ -269,10 +298,10 @@ static int salivo_utf8_encode_cp(long long cp, char* out) {
 }
 
 char* rtupper(const char* s) {
-    if (!s) return "";
+    if (!s) return rt_out_cstr("");
     long long slen = (long long)strlen(s);
     char* res = (char*)rt_smalloc((size_t)(slen * 4 + 4));
-    if (!res) return "";
+    if (!res) return rt_out_cstr("");
     long long offset = 0;
     long long out_len = 0;
     while (offset < slen) {
@@ -315,10 +344,10 @@ char* rtupper(const char* s) {
 }
 
 char* rtlower(const char* s) {
-    if (!s) return "";
+    if (!s) return rt_out_cstr("");
     long long slen = (long long)strlen(s);
     char* res = (char*)rt_smalloc((size_t)(slen * 4 + 4));
-    if (!res) return "";
+    if (!res) return rt_out_cstr("");
     long long offset = 0;
     long long out_len = 0;
     while (offset < slen) {
@@ -430,14 +459,14 @@ char* rtdebugstr(const char* s) {
 }
 
 char* rttrim(const char* s) {
-    if (!s) return "";
+    if (!s) return rt_out_cstr("");
     while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
         s++;
     }
     if (*s == '\0') {
         char* empty = (char*)rt_smalloc(1);
         if (empty) empty[0] = '\0';
-        return empty ? empty : "";
+        return empty ? empty : salivo_empty_str;
     }
     const char* end = s + strlen(s) - 1;
     while (end > s && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
@@ -445,21 +474,15 @@ char* rttrim(const char* s) {
     }
     size_t len = (size_t)(end - s + 1);
     char* res = (char*)rt_smalloc(len + 1);
-    if (!res) return "";
+    if (!res) return rt_out_cstr("");
     memcpy(res, s, len);
     res[len] = '\0';
     return res;
 }
 
 char* rtgetenv(const char* key) {
-    if (!key) return "";
-    const char* val = getenv(key);
-    if (!val) return "";
-    size_t len = strlen(val);
-    char* res = (char*)malloc(len + 1);
-    if (!res) return "";
-    memcpy(res, val, len + 1);
-    return res;
+    const char* val = key ? getenv(key) : NULL;
+    return rt_out_cstr(val);
 }
 
 // --- STAGE 35.2: UTF-8 & RICH STRING PRIMITIVES (EXPLICIT-LENGTH & ZERO-COPY) ---
@@ -1078,14 +1101,20 @@ static CRITICAL_SECTION g_task_rt_cs;
 static CRITICAL_SECTION g_channel_rt_cs;
 static CRITICAL_SECTION g_mem_rt_cs;
 static CONDITION_VARIABLE g_task_rt_cv;
-static volatile LONG g_rt_mutex_inited = 0;
+static CONDITION_VARIABLE g_channel_rt_cv = CONDITION_VARIABLE_INIT;
+static volatile LONG g_rt_mutex_inited = 0; /* 0 none, 1 initializing, 2 ready */
 
 static void salivo_rt_init_mutex(void) {
+    if (g_rt_mutex_inited == 2) return;
     if (InterlockedCompareExchange(&g_rt_mutex_inited, 1, 0) == 0) {
         InitializeCriticalSection(&g_task_rt_cs);
         InitializeCriticalSection(&g_channel_rt_cs);
         InitializeCriticalSection(&g_mem_rt_cs);
         InitializeConditionVariable(&g_task_rt_cv);
+        InterlockedExchange(&g_rt_mutex_inited, 2);
+    } else {
+        /* another thread is initializing: its critical sections are not usable until it finishes */
+        while (InterlockedCompareExchange(&g_rt_mutex_inited, 2, 2) != 2) Sleep(0);
     }
 }
 
@@ -1111,6 +1140,13 @@ static inline void salivo_channel_lock(void) {
 static inline void salivo_channel_unlock(void) {
     LeaveCriticalSection(&g_channel_rt_cs);
 }
+/* Called with the channel lock held: sleeps until a channel changes */
+static inline void salivo_channel_wait(void) {
+    SleepConditionVariableCS(&g_channel_rt_cv, &g_channel_rt_cs, INFINITE);
+}
+static inline void salivo_channel_wake(void) {
+    WakeAllConditionVariable(&g_channel_rt_cv);
+}
 
 static inline void salivo_mem_lock(void) {
     salivo_rt_init_mutex();
@@ -1134,6 +1170,10 @@ static inline void salivo_task_notify_all(void) { pthread_cond_broadcast(&g_task
 
 static inline void salivo_channel_lock(void) { pthread_mutex_lock(&g_channel_rt_cs); }
 static inline void salivo_channel_unlock(void) { pthread_mutex_unlock(&g_channel_rt_cs); }
+static pthread_cond_t g_channel_rt_cv = PTHREAD_COND_INITIALIZER;
+/* Called with the channel lock held: sleeps until a channel changes */
+static inline void salivo_channel_wait(void) { pthread_cond_wait(&g_channel_rt_cv, &g_channel_rt_cs); }
+static inline void salivo_channel_wake(void) { pthread_cond_broadcast(&g_channel_rt_cv); }
 
 static inline void salivo_mem_lock(void) { pthread_mutex_lock(&g_mem_rt_cs); }
 static inline void salivo_mem_unlock(void) { pthread_mutex_unlock(&g_mem_rt_cs); }
@@ -1814,19 +1854,27 @@ long long salivo_channel_send(long long channel_handle, const char* msg) {
         return -1;
     }
     SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    if (chan->count >= CHANNEL_CAP) {
+    /* a full channel blocks the sender until a receiver makes room (or the channel closes) */
+    while (chan->is_active && chan->count >= CHANNEL_CAP) salivo_channel_wait();
+    if (!chan->is_active) {
         salivo_channel_unlock();
         return -1;
     }
     if (!msg) msg = "";
-    char* copy = (char*)malloc(strlen(msg) + 1);
-    strcpy(copy, msg);
+    size_t mlen = strlen(msg);
+    char* copy = (char*)malloc(mlen + 1);
+    if (!copy) {
+        salivo_channel_unlock();
+        return -1;
+    }
+    memcpy(copy, msg, mlen + 1);
 
     chan->msgs[chan->tail] = copy;
     chan->int_msgs[chan->tail] = 0;
     chan->msg_types[chan->tail] = 0;
     chan->tail = (chan->tail + 1) % CHANNEL_CAP;
     chan->count++;
+    salivo_channel_wake();
     salivo_channel_unlock();
 
     SALIVO_LOG("[CHANNEL_RT] Channel %lld sent msg: '%s'\n", channel_handle, msg);
@@ -1840,7 +1888,9 @@ long long salivo_channel_send_i64(long long channel_handle, long long val) {
         return -1;
     }
     SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    if (chan->count >= CHANNEL_CAP) {
+    /* a full channel blocks the sender until a receiver makes room (or the channel closes) */
+    while (chan->is_active && chan->count >= CHANNEL_CAP) salivo_channel_wait();
+    if (!chan->is_active) {
         salivo_channel_unlock();
         return -1;
     }
@@ -1849,54 +1899,70 @@ long long salivo_channel_send_i64(long long channel_handle, long long val) {
     chan->msg_types[chan->tail] = 1;
     chan->tail = (chan->tail + 1) % CHANNEL_CAP;
     chan->count++;
+    salivo_channel_wake();
     salivo_channel_unlock();
 
     SALIVO_LOG("[CHANNEL_RT] Channel %lld sent i64: %lld\n", channel_handle, val);
     return 0;
 }
 
-char* salivo_channel_recv(long long channel_handle) {
-    SALIVO_BLOCKING("channel_recv");
-    salivo_channel_lock();
-    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active) {
-        salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
-    }
-    SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    if (chan->count <= 0) {
-        salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
-    }
+/* Takes the head message as a malloc'd string (an int message is formatted); NULL when out of memory.
+   Called with the channel lock held and count > 0. */
+static char* salivo_channel_pop_str(SalivoChannelSlot* chan) {
     char* msg = NULL;
     if (chan->msg_types[chan->head] == 1) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%lld", chan->int_msgs[chan->head]);
-        msg = (char*)malloc(strlen(buf) + 1);
-        strcpy(msg, buf);
+        int n = snprintf(buf, sizeof(buf), "%lld", chan->int_msgs[chan->head]);
+        msg = (char*)malloc((size_t)n + 1);
+        if (msg) memcpy(msg, buf, (size_t)n + 1);
     } else {
         msg = chan->msgs[chan->head];
         chan->msgs[chan->head] = NULL;
     }
     chan->head = (chan->head + 1) % CHANNEL_CAP;
     chan->count--;
-    salivo_channel_unlock();
-    SALIVO_LOG("[CHANNEL_RT] Channel %lld recv msg: '%s'\n", channel_handle, msg ? msg : "null");
+    salivo_channel_wake();
     return msg;
 }
 
+/* Hands a popped message to the program as a program string (frees the malloc'd copy) */
+static char* salivo_channel_out(char* msg) {
+    if (!msg) return rt_out_cstr("");
+    char* r = rt_out_str(msg, strlen(msg));
+    free(msg);
+    return r;
+}
+
+/* Blocks until a message arrives; "" once the channel is closed (or the handle is invalid) */
+char* salivo_channel_recv(long long channel_handle) {
+    SALIVO_BLOCKING("channel_recv");
+    salivo_channel_lock();
+    if (channel_handle < 1 || channel_handle > MAX_CHANNELS) {
+        salivo_channel_unlock();
+        return rt_out_cstr("");
+    }
+    SalivoChannelSlot* chan = &g_channel_table[channel_handle];
+    while (chan->is_active && chan->count <= 0) salivo_channel_wait();
+    if (!chan->is_active) {
+        salivo_channel_unlock();
+        return rt_out_cstr("");
+    }
+    char* msg = salivo_channel_pop_str(chan);
+    salivo_channel_unlock();
+    return salivo_channel_out(msg);
+}
+
+/* Blocks until a message arrives; 0 once the channel is closed (or the handle is invalid) */
 long long salivo_channel_recv_i64(long long channel_handle) {
     SALIVO_BLOCKING("channel_recv");
     salivo_channel_lock();
-    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active) {
+    if (channel_handle < 1 || channel_handle > MAX_CHANNELS) {
         salivo_channel_unlock();
         return 0;
     }
     SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    if (chan->count <= 0) {
+    while (chan->is_active && chan->count <= 0) salivo_channel_wait();
+    if (!chan->is_active) {
         salivo_channel_unlock();
         return 0;
     }
@@ -1910,43 +1976,31 @@ long long salivo_channel_recv_i64(long long channel_handle) {
     }
     chan->head = (chan->head + 1) % CHANNEL_CAP;
     chan->count--;
+    salivo_channel_wake();
     salivo_channel_unlock();
     SALIVO_LOG("[CHANNEL_RT] Channel %lld recv i64: %lld\n", channel_handle, val);
     return val;
 }
 
+/* The head message without taking it; "" when the channel is empty, closed or invalid. The copy is
+   made under the lock: a concurrent recv may free the message right after unlock */
 char* salivo_channel_peek(long long channel_handle) {
     salivo_channel_lock();
-    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active) {
+    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active ||
+        g_channel_table[channel_handle].count <= 0) {
         salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
+        return rt_out_cstr("");
     }
     SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    if (chan->count <= 0) {
-        salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
-    }
+    char* copy;
     if (chan->msg_types[chan->head] == 1) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%lld", chan->int_msgs[chan->head]);
-        salivo_channel_unlock();
-        char* copy = (char*)malloc(strlen(buf) + 1);
-        strcpy(copy, buf);
-        return copy;
+        int n = snprintf(buf, sizeof(buf), "%lld", chan->int_msgs[chan->head]);
+        copy = rt_out_str(buf, (size_t)n);
+    } else {
+        copy = rt_out_cstr(chan->msgs[chan->head]);
     }
-    char* msg = chan->msgs[chan->head];
     salivo_channel_unlock();
-    if (!msg) {
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
-    }
-    char* copy = (char*)malloc(strlen(msg) + 1);
-    strcpy(copy, msg);
     return copy;
 }
 
@@ -1977,6 +2031,7 @@ long long salivo_channel_close(long long channel_handle) {
         chan->count--;
     }
     chan->is_active = 0;
+    salivo_channel_wake();
     salivo_channel_unlock();
     SALIVO_LOG("[CHANNEL_RT] Closed channel %lld\n", channel_handle);
     return 0;
@@ -2394,6 +2449,97 @@ static int shim_internalize_ir(const char* path, const char* buf) {
     return fclose(out) == 0;
 }
 
+/* ---- Multi-part builds: Salivo functions get names no C library uses ----
+   A program split into parts keeps its functions external so the parts can call each other. A
+   Salivo function named like a C library function (std.io's open and close, std.mem's realloc,
+   std.process's exit, a program's own connect) would then stand in for the library when the C
+   runtime calls it: open("/dev/dri/card0", O_RDWR | O_CLOEXEC) reached std.io's open and crashed.
+   Every function the module defines, except main, is renamed to "sl.<name>": a dot never appears
+   in a C identifier. The single-part path internalizes them instead; both keep the rule that the
+   C runtime never references IR-defined symbols. */
+static int shim_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$' || c == '-';
+}
+
+static unsigned long shim_hash(const char* s, size_t n) {
+    unsigned long h = 1469598103u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u;
+    return h;
+}
+
+/* Returns a new buffer with every defined function except main renamed (the caller frees both) */
+static char* shim_rename_functions(const char* buf, long size, long* out_size) {
+    /* the names: "define ... @name(" lines; the table keeps at least half its slots free */
+    size_t ndefs = 0;
+    for (const char* s = buf; s && *s;) {
+        if (strncmp(s, "define ", 7) == 0) ndefs++;
+        const char* nl = strchr(s, '\n');
+        s = nl ? nl + 1 : NULL;
+    }
+    size_t cap = 1024;
+    while (cap < ndefs * 2 + 16) cap <<= 1;
+    const char** keys = (const char**)calloc(cap, sizeof(char*));
+    size_t* lens = (size_t*)calloc(cap, sizeof(size_t));
+    if (!keys || !lens) { free(keys); free(lens); return NULL; }
+    size_t count = 0;
+    for (const char* s = buf; s && *s;) {
+        if (strncmp(s, "define ", 7) == 0) {
+            const char* nl = strchr(s, '\n');
+            const char* at = memchr(s, '@', nl ? (size_t)(nl - s) : strlen(s));
+            if (at && at[1] != '"') {
+                const char* e = at + 1;
+                while (shim_ident_char(*e)) e++;
+                size_t n = (size_t)(e - at - 1);
+                if (*e == '(' && n > 0 && !(n == 4 && strncmp(at + 1, "main", 4) == 0) && count * 2 < cap) {
+                    size_t h = shim_hash(at + 1, n) & (cap - 1);
+                    while (keys[h] && !(lens[h] == n && strncmp(keys[h], at + 1, n) == 0)) h = (h + 1) & (cap - 1);
+                    if (!keys[h]) { keys[h] = at + 1; lens[h] = n; count++; }
+                }
+            }
+        }
+        const char* nl = strchr(s, '\n');
+        s = nl ? nl + 1 : NULL;
+    }
+    /* the rewrite: "@name" tokens outside string constants and comments */
+    /* each renamed token grows by 3 bytes and takes at least 2: twice the input always fits */
+    size_t room = (size_t)size * 2 + 64;
+    char* out = (char*)malloc(room + 1);
+    if (!out) { free(keys); free(lens); return NULL; }
+    size_t w = 0;
+    for (long i = 0; i < size;) {
+        char c = buf[i];
+        if (c == ';') {
+            while (i < size && buf[i] != '\n') out[w++] = buf[i++];
+            continue;
+        }
+        if (c == '"') {
+            out[w++] = buf[i++];
+            while (i < size && buf[i] != '"') out[w++] = buf[i++];
+            if (i < size) out[w++] = buf[i++];
+            continue;
+        }
+        if (c == '@' && i + 1 < size && shim_ident_char(buf[i + 1])) {
+            long e = i + 1;
+            while (e < size && shim_ident_char(buf[e])) e++;
+            size_t n = (size_t)(e - i - 1);
+            size_t h = shim_hash(buf + i + 1, n) & (cap - 1);
+            while (keys[h] && !(lens[h] == n && strncmp(keys[h], buf + i + 1, n) == 0)) h = (h + 1) & (cap - 1);
+            out[w++] = '@';
+            if (keys[h]) { out[w++] = 's'; out[w++] = 'l'; out[w++] = '.'; }
+            memcpy(out + w, buf + i + 1, n);
+            w += n;
+            i = e;
+            continue;
+        }
+        out[w++] = buf[i++];
+    }
+    out[w] = 0;
+    *out_size = (long)w;
+    free(keys);
+    free(lens);
+    return out;
+}
+
 /* Splits <path> into <path>.p<k>.ll parts for parallel compilation and returns the part count
    (0 = not split; parts <= 0 means one per CPU). Globals stay defined in part 0 with hidden
    linkage and are declared external elsewhere. Function bodies are balanced by size; each part
@@ -2417,6 +2563,14 @@ long long salivo_split_ir_module(const char* path, long long parts) {
         int ok = shim_internalize_ir(path, buf);
         free(buf);
         return ok ? 1 : 0;
+    }
+    {
+        long renamed_size = 0;
+        char* renamed = shim_rename_functions(buf, size, &renamed_size);
+        if (!renamed) { free(buf); return 0; }
+        free(buf);
+        buf = renamed;
+        size = renamed_size;
     }
 
     long long cap = 1;
@@ -2568,18 +2722,26 @@ char* salivo_c_file_read_string(long long handle) {
     if (size <= 0) size = 0;
     fseek(fp, current_pos, SEEK_SET);
 
-    char* buf = (char*)malloc(size + 1);
+    /* The size is only a hint: files under /proc and /sys report 0 bytes, so read until EOF. */
+    size_t cap = size > 0 ? (size_t)size + 1 : 4096;
+    char* buf = (char*)malloc(cap + 1);
     if (!buf) {
         char* empty = (char*)malloc(1);
         empty[0] = '\0';
         return empty;
     }
     size_t read_bytes = 0;
-    if (size > 0) {
-        read_bytes = fread(buf, 1, (size_t)size, fp);
+    for (;;) {
+        size_t r = fread(buf + read_bytes, 1, cap - read_bytes, fp);
+        read_bytes += r;
+        if (r == 0 || read_bytes < cap) break;
+        char* nb = (char*)realloc(buf, cap * 2 + 1);
+        if (!nb) break;
+        buf = nb;
+        cap *= 2;
     }
     buf[read_bytes] = '\0';
-    return buf;
+    return rt_adopt_str(buf, read_bytes);
 }
 
 long long salivo_c_file_write_buf(long long handle, const char* buf, long long count_bytes) {
@@ -2722,6 +2884,8 @@ long long salivo_c_dir_list(const char* path) {
     int count = 0;
 #ifdef _WIN32
     char search_path[MAX_PATH];
+    /* a longer path would be cut short and list the wrong directory */
+    if (strlen(path) + 3 > sizeof(search_path)) return 0; /* same as a missing directory */
     snprintf(search_path, sizeof(search_path), "%s\\*", path);
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA(search_path, &fd);
@@ -2750,11 +2914,14 @@ char* salivo_c_dir_list_string(const char* path) {
     size_t cap = 1024;
     size_t len = 0;
     char* buf = (char*)malloc(cap);
-    if (!buf) return "";
+    if (!buf) return rt_out_cstr("");
     buf[0] = '\0';
+    int oom = 0;
 
 #ifdef _WIN32
     char search_path[MAX_PATH];
+    /* a longer path would be cut short and list the wrong directory */
+    if (strlen(path) + 3 > sizeof(search_path)) { free(buf); return rt_out_cstr(""); }
     snprintf(search_path, sizeof(search_path), "%s\\*", path);
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA(search_path, &fd);
@@ -2763,9 +2930,12 @@ char* salivo_c_dir_list_string(const char* path) {
             if (strcmp(fd.cFileName, ".") != 0 && strcmp(fd.cFileName, "..") != 0) {
                 size_t nlen = strlen(fd.cFileName);
                 while (len + nlen + 2 > cap) {
+                    char* nb = (char*)realloc(buf, cap * 2);
+                    if (!nb) { oom = 1; break; }
+                    buf = nb;
                     cap *= 2;
-                    buf = (char*)realloc(buf, cap);
                 }
+                if (oom) break;
                 if (len > 0) {
                     buf[len++] = '\n';
                 }
@@ -2784,9 +2954,12 @@ char* salivo_c_dir_list_string(const char* path) {
             if (strcmp(dir->d_name, ".") != 0 && strcmp(dir->d_name, "..") != 0) {
                 size_t nlen = strlen(dir->d_name);
                 while (len + nlen + 2 > cap) {
+                    char* nb = (char*)realloc(buf, cap * 2);
+                    if (!nb) { oom = 1; break; }
+                    buf = nb;
                     cap *= 2;
-                    buf = (char*)realloc(buf, cap);
                 }
+                if (oom) break;
                 if (len > 0) {
                     buf[len++] = '\n';
                 }
@@ -2798,7 +2971,11 @@ char* salivo_c_dir_list_string(const char* path) {
         closedir(d);
     }
 #endif
-    return buf;
+    if (oom) {
+        free(buf);
+        return rt_out_cstr("");
+    }
+    return rt_adopt_str(buf, len);
 }
 
 long long salivo_channel_is_closed(long long channel_handle) {
@@ -3194,23 +3371,63 @@ long long salivo_arc_weak_count_i(long long addr) {
 /* Forward declaration — defined below, needed for PRNG auto-seeding */
 long long salivo_clock_nanos(void);
 
-static unsigned long long g_salivo_prng_seed = 0;
-static int g_salivo_prng_seeded = 0;
-
-long long salivo_random_int(void) {
-    if (!g_salivo_prng_seeded) {
-        /* Seed from high-resolution clock + process ID for per-process entropy */
-        unsigned long long t = (unsigned long long)salivo_clock_nanos();
-#ifdef _WIN32
-        unsigned long long pid = (unsigned long long)GetCurrentProcessId();
-#else
-        unsigned long long pid = (unsigned long long)getpid();
+#if !defined(_WIN32) && defined(__linux__)
+#include <sys/random.h>
 #endif
-        g_salivo_prng_seed = (t ^ (pid << 16)) | 1ULL; /* ensure non-zero */
-        g_salivo_prng_seeded = 1;
+
+/* Fills buf with n bytes from the OS cryptographic RNG; 0 on success, -1 on failure (never a weaker fallback) */
+static int salivo_os_random(unsigned char* buf, size_t n) {
+#ifdef _WIN32
+    while (n > 0) {
+        ULONG part = n > 0x10000000u ? 0x10000000u : (ULONG)n;
+        if (BCryptGenRandom(NULL, buf, part, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return -1;
+        buf += part;
+        n -= part;
     }
-    g_salivo_prng_seed = (g_salivo_prng_seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
-    return (long long)g_salivo_prng_seed;
+    return 0;
+#else
+#if defined(__linux__)
+    while (n > 0) {
+        ssize_t got = getrandom(buf, n, 0);
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            break; /* ENOSYS on an old kernel: try /dev/urandom */
+        }
+        buf += got;
+        n -= (size_t)got;
+    }
+    if (n == 0) return 0;
+#endif
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (!f) return -1;
+    size_t got = fread(buf, 1, n, f);
+    fclose(f);
+    return got == n ? 0 : -1;
+#endif
+}
+
+/* Per-thread xorshift64* state: no data race between threads, seeded once per thread from the OS RNG */
+#ifdef _WIN32
+static __declspec(thread) unsigned long long g_salivo_prng_seed = 0;
+#else
+static __thread unsigned long long g_salivo_prng_seed = 0;
+#endif
+
+/* Non-negative 63-bit pseudo-random integer (not for secrets: use salivo_crypto_random_bytes) */
+long long salivo_random_int(void) {
+    unsigned long long x = g_salivo_prng_seed;
+    if (x == 0) {
+        if (salivo_os_random((unsigned char*)&x, sizeof x) != 0 || x == 0) {
+            unsigned long long t = (unsigned long long)salivo_clock_nanos();
+            x = t ^ ((unsigned long long)(uintptr_t)&x << 17) ^ 0x9E3779B97F4A7C15ULL;
+        }
+        if (x == 0) x = 0x9E3779B97F4A7C15ULL;
+    }
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    g_salivo_prng_seed = x;
+    return (long long)((x * 0x2545F4914F6CDD1DULL) >> 1);
 }
 
 long long salivo_clock_nanos(void) {
@@ -3242,15 +3459,13 @@ void salivo_sleep_nanos(long long nanos) {
 }
 
 char* salivo_process_cwd(void) {
-    char* buf = (char*)malloc(1024);
-    if (!buf) return "";
+    char buf[4096];
 #ifdef _WIN32
-    if (_getcwd(buf, 1024)) return buf;
+    if (_getcwd(buf, (int)sizeof buf)) return rt_out_cstr(buf);
 #else
-    if (getcwd(buf, 1024)) return buf;
+    if (getcwd(buf, sizeof buf)) return rt_out_cstr(buf);
 #endif
-    buf[0] = '\0';
-    return buf;
+    return rt_out_cstr("");
 }
 
 long long salivo_c_file_exists(const char* path) {
@@ -3407,51 +3622,53 @@ double rtstrfloat(const char* s) {
 }
 
 char* rtfloatstr(double val) {
-    char* buf = (char*)malloc(64);
-    if (!buf) return "";
-    snprintf(buf, 64, "%f", val);
-    return buf;
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "%f", val);
+    return rt_out_str(buf, n < 0 ? 0 : (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1);
 }
 
 char* rtboolstr(long long val) {
-    char* buf = (char*)malloc(6);
-    if (!buf) return "";
-    strcpy(buf, val ? "true" : "false");
-    return buf;
+    return rt_out_cstr(val ? "true" : "false");
 }
 
-char* rtcharstr(long long val) {
-    char* buf = (char*)malloc(5);
-    if (!buf) return "";
+/* UTF-8 bytes of a code point into buf (at least 5 bytes, NUL-terminated); returns the length */
+static size_t rt_char_utf8(long long val, char* buf) {
+    size_t n;
     if (val < 0x80) {
         buf[0] = (char)val;
-        buf[1] = '\0';
+        n = 1;
     } else if (val < 0x800) {
         buf[0] = (char)(0xC0 | (val >> 6));
         buf[1] = (char)(0x80 | (val & 0x3F));
-        buf[2] = '\0';
+        n = 2;
     } else if (val < 0x10000) {
         buf[0] = (char)(0xE0 | (val >> 12));
         buf[1] = (char)(0x80 | ((val >> 6) & 0x3F));
         buf[2] = (char)(0x80 | (val & 0x3F));
-        buf[3] = '\0';
+        n = 3;
     } else {
         buf[0] = (char)(0xF0 | (val >> 18));
         buf[1] = (char)(0x80 | ((val >> 12) & 0x3F));
         buf[2] = (char)(0x80 | ((val >> 6) & 0x3F));
         buf[3] = (char)(0x80 | (val & 0x3F));
-        buf[4] = '\0';
+        n = 4;
     }
-    return buf;
+    buf[n] = '\0';
+    return n;
+}
+
+char* rtcharstr(long long val) {
+    char buf[5];
+    size_t n = rt_char_utf8(val, buf);
+    return rt_out_str(buf, n);
 }
 
 char* rtdebugchar(long long val) {
-    char* s = rtcharstr(val);
-    char* buf = (char*)malloc(strlen(s) + 3);
-    if (!buf) return "''";
-    snprintf(buf, strlen(s) + 3, "'%s'", s);
-    free(s);
-    return buf;
+    char buf[8];
+    buf[0] = '\'';
+    size_t n = rt_char_utf8(val, buf + 1);
+    buf[n + 1] = '\'';
+    return rt_out_str(buf, n + 2);
 }
 
 char* rtidentitystr(const char* s) {
@@ -3463,34 +3680,50 @@ char* rtidentitystr(const char* s) {
     return buf;
 }
 
-char* rtreadline(void) {
+/* One stdin line without its line ending, any length, as a malloc'd string ("" at end of input) */
+static char* rt_read_line_malloc(size_t* out_len) {
     fflush(stdout);
-    char temp[2048];
-    if (fgets(temp, sizeof(temp), stdin) == NULL) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty ? empty : "";
+    size_t cap = 256, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { *out_len = 0; return NULL; }
+    int c;
+    while ((c = fgetc(stdin)) != EOF && c != '\n') {
+        if (len + 1 >= cap) {
+            char* bigger = (char*)realloc(buf, cap * 2);
+            if (!bigger) break;
+            buf = bigger;
+            cap *= 2;
+        }
+        buf[len++] = (char)c;
     }
-    size_t len = strlen(temp);
-    while (len > 0 && (temp[len - 1] == '\n' || temp[len - 1] == '\r')) {
-        temp[len - 1] = '\0';
-        len--;
-    }
-    char* res = (char*)malloc(len + 1);
-    if (!res) return "";
-    strcpy(res, temp);
-    return res;
+    while (len > 0 && buf[len - 1] == '\r') len--;
+    buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+
+char* rtreadline(void) {
+    size_t len = 0;
+    char* line = rt_read_line_malloc(&len);
+    if (!line) return rt_out_cstr("");
+    char* r = rt_out_str(line, len);
+    free(line);
+    return r;
 }
 
 long long rtreadint(void) {
-    char* line = rtreadline();
+    size_t len = 0;
+    char* line = rt_read_line_malloc(&len);
+    if (!line) return 0;
     long long val = rtstrint(line);
     free(line);
     return val;
 }
 
 double rtreadfloat(void) {
-    char* line = rtreadline();
+    size_t len = 0;
+    char* line = rt_read_line_malloc(&len);
+    if (!line) return 0.0;
     double val = atof(line);
     free(line);
     return val;
@@ -3716,29 +3949,17 @@ long long salivo_atomic_bool_swap(long long handle, long long val) {
     return salivo_atomic_int_swap(handle, val ? 1 : 0) ? 1 : 0;
 }
 
+/* Takes the head message without waiting; "" when the channel is empty, closed or invalid */
 char* salivo_channel_try_recv(long long channel_handle) {
-    SALIVO_LOG("[CHANNEL_RT] salivo_channel_try_recv called with handle=%lld\n", channel_handle);
     salivo_channel_lock();
-    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active) {
+    if (channel_handle < 1 || channel_handle > MAX_CHANNELS || !g_channel_table[channel_handle].is_active ||
+        g_channel_table[channel_handle].count <= 0) {
         salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
+        return rt_out_cstr("");
     }
-    SalivoChannelSlot* chan = &g_channel_table[channel_handle];
-    SALIVO_LOG("[CHANNEL_RT] Channel %lld count=%d head=%d tail=%d\n", channel_handle, chan->count, chan->head, chan->tail);
-    if (chan->count <= 0) {
-        salivo_channel_unlock();
-        char* empty = (char*)malloc(1);
-        empty[0] = '\0';
-        return empty;
-    }
-    char* msg = chan->msgs[chan->head];
-    chan->head = (chan->head + 1) % CHANNEL_CAP;
-    chan->count--;
+    char* msg = salivo_channel_pop_str(&g_channel_table[channel_handle]);
     salivo_channel_unlock();
-    SALIVO_LOG("[CHANNEL_RT] Channel %lld try_recv msg: '%s' (remaining count=%d)\n", channel_handle, msg, chan->count);
-    return msg;
+    return salivo_channel_out(msg);
 }
 
 // =============================================================================
@@ -3851,7 +4072,7 @@ char* salivo_crypto_sha256_str(const char* s) {
     uint8_t digest[32];
     salivo_sha256_final(&ctx, digest);
     char* hex = (char*)rt_smalloc(65);
-    if (!hex) return "";
+    if (!hex) return rt_out_cstr("");
     static const char hex_digits[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
         hex[i * 2]     = hex_digits[(digest[i] >> 4) & 0x0F];
@@ -3864,11 +4085,9 @@ char* salivo_crypto_sha256_str(const char* s) {
 /* UTF-8 encoding of one code point as a fresh heap string (U+FFFD when invalid) */
 char* salivo_codepoint_str(long long cp) {
     if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
-    char* out = (char*)malloc(5);
-    if (!out) return "";
+    char out[5];
     int n = salivo_utf8_encode_cp(cp, out);
-    out[n] = 0;
-    return out;
+    return rt_out_str(out, (size_t)n);
 }
 
 /* RFC 2104 HMAC-SHA256 of msg under key, as 64 lowercase hex chars */
@@ -3895,7 +4114,7 @@ char* salivo_crypto_hmac_sha256_str(const char* key, const char* msg) {
     salivo_sha256_update(&ctx, inner, 32);
     salivo_sha256_final(&ctx, digest);
     char* hex = (char*)rt_smalloc(65);
-    if (!hex) return "";
+    if (!hex) return rt_out_cstr("");
     static const char hex_digits[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
         hex[i * 2] = hex_digits[digest[i] >> 4];
@@ -3936,28 +4155,10 @@ long long salivo_crypto_sha256_state(const char* s, int state_idx) {
     return (long long)ctx.state[state_idx];
 }
 
+/* count_bytes bytes from the OS cryptographic RNG into out_addr; -1 when it is unavailable */
 long long salivo_crypto_random_bytes(long long out_addr, long long count_bytes) {
     if (out_addr == 0 || count_bytes <= 0) return -1;
-    void* buf = (void*)(uintptr_t)out_addr;
-#ifdef _WIN32
-    HCRYPTPROV hProv = 0;
-    if (CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
-        BOOL ok = CryptGenRandom(hProv, (DWORD)count_bytes, (BYTE*)buf);
-        CryptReleaseContext(hProv, 0);
-        if (ok) return count_bytes;
-    }
-#else
-    FILE* f = fopen("/dev/urandom", "rb");
-    if (f) {
-        size_t n = fread(buf, 1, (size_t)count_bytes, f);
-        fclose(f);
-        if (n == (size_t)count_bytes) return count_bytes;
-    }
-#endif
-    unsigned char* p = (unsigned char*)buf;
-    for (long long i = 0; i < count_bytes; i++) {
-        p[i] = (unsigned char)(salivo_random_int() & 0xFF);
-    }
+    if (salivo_os_random((unsigned char*)(uintptr_t)out_addr, (size_t)count_bytes) != 0) return -1;
     return count_bytes;
 }
 
@@ -3980,39 +4181,24 @@ static const uint8_t sbox[256] = {
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 };
 
-static const uint8_t rsbox[256] = {
-    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
-    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
-    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
-    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
-    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
-    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
-    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
-    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
-    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
-    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
-    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
-    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
-    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
-    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
-    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
-    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
-};
-
 static const uint8_t rcon[15] = {
     0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d
 };
 
-static uint8_t aes_xtime(uint8_t x) {
-    return (uint8_t)((x << 1) ^ (((x >> 7) & 1) * 0x1b));
+/* S-box lookup that reads all 256 entries and keeps one by mask: the memory access pattern does not
+   depend on x, so cache timing reveals nothing about key or state bytes */
+static uint8_t aes_sbox_ct(uint8_t x) {
+    uint8_t r = 0;
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t d = i ^ x;
+        uint8_t mask = (uint8_t)(0 - (((d - 1) >> 8) & 1)); /* 0xFF only when i == x */
+        r |= sbox[i] & mask;
+    }
+    return r;
 }
 
-static uint8_t aes_multiply(uint8_t x, uint8_t y) {
-    return (uint8_t)(((y & 1) * x) ^
-           ((y >> 1 & 1) * aes_xtime(x)) ^
-           ((y >> 2 & 1) * aes_xtime(aes_xtime(x))) ^
-           ((y >> 3 & 1) * aes_xtime(aes_xtime(aes_xtime(x)))) ^
-           ((y >> 4 & 1) * aes_xtime(aes_xtime(aes_xtime(aes_xtime(x))))));
+static uint8_t aes_xtime(uint8_t x) {
+    return (uint8_t)((x << 1) ^ (((x >> 7) & 1) * 0x1b));
 }
 
 static void aes256_key_expansion(const uint8_t* key, uint8_t* round_keys) {
@@ -4022,15 +4208,15 @@ static void aes256_key_expansion(const uint8_t* key, uint8_t* round_keys) {
         memcpy(temp, &round_keys[(i - 1) * 4], 4);
         if (i % 8 == 0) {
             uint8_t t = temp[0];
-            temp[0] = sbox[temp[1]] ^ rcon[i / 8];
-            temp[1] = sbox[temp[2]];
-            temp[2] = sbox[temp[3]];
-            temp[3] = sbox[t];
+            temp[0] = aes_sbox_ct(temp[1]) ^ rcon[i / 8];
+            temp[1] = aes_sbox_ct(temp[2]);
+            temp[2] = aes_sbox_ct(temp[3]);
+            temp[3] = aes_sbox_ct(t);
         } else if (i % 8 == 4) {
-            temp[0] = sbox[temp[0]];
-            temp[1] = sbox[temp[1]];
-            temp[2] = sbox[temp[2]];
-            temp[3] = sbox[temp[3]];
+            temp[0] = aes_sbox_ct(temp[0]);
+            temp[1] = aes_sbox_ct(temp[1]);
+            temp[2] = aes_sbox_ct(temp[2]);
+            temp[3] = aes_sbox_ct(temp[3]);
         }
         for (int j = 0; j < 4; j++) {
             round_keys[i * 4 + j] = round_keys[(i - 8) * 4 + j] ^ temp[j];
@@ -4038,12 +4224,57 @@ static void aes256_key_expansion(const uint8_t* key, uint8_t* round_keys) {
     }
 }
 
+/* AES_TEST_FORCE_SW (test builds only) exercises the portable path on an AES-NI machine */
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(AES_TEST_FORCE_SW)
+#include <immintrin.h>
+#include <wmmintrin.h> /* AES-NI intrinsics: immintrin.h omits them on MSVC targets without -maes */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static int aes_cpu_has_aesni(void) { int r[4]; __cpuid(r, 1); return (r[2] >> 25) & 1; }
+#else
+#include <cpuid.h>
+static int aes_cpu_has_aesni(void) {
+    unsigned a, b, c, d;
+    return __get_cpuid(1, &a, &b, &c, &d) ? (int)((c >> 25) & 1) : 0;
+}
+#endif
+/* AES-NI: one hardware instruction per round, constant time; round keys in the standard byte order */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define AES_NI_TARGET /* MSVC: intrinsics need no target attribute */
+#else
+#define AES_NI_TARGET __attribute__((target("aes,sse2")))
+#endif
+AES_NI_TARGET
+static void aes256_encrypt_block_ni(const uint8_t* in, uint8_t* out, const uint8_t* round_keys) {
+    __m128i st = _mm_xor_si128(_mm_loadu_si128((const __m128i*)in), _mm_loadu_si128((const __m128i*)round_keys));
+    for (int r = 1; r < 14; r++) st = _mm_aesenc_si128(st, _mm_loadu_si128((const __m128i*)(round_keys + 16 * r)));
+    st = _mm_aesenclast_si128(st, _mm_loadu_si128((const __m128i*)(round_keys + 16 * 14)));
+    _mm_storeu_si128((__m128i*)out, st);
+}
+static int g_aes_ni = -1; /* -1 unknown, 0 no, 1 yes (a benign race: every thread computes the same value) */
+#define AES_HAVE_NI 1
+#endif
+
+/* Portable path: constant-time S-box (aes_sbox_ct), slower than AES-NI */
+static void aes256_encrypt_block_sw(const uint8_t* in, uint8_t* out, const uint8_t* round_keys);
+
 static void aes256_encrypt_block(const uint8_t* in, uint8_t* out, const uint8_t* round_keys) {
+#ifdef AES_HAVE_NI
+    if (g_aes_ni < 0) g_aes_ni = aes_cpu_has_aesni();
+    if (g_aes_ni) {
+        aes256_encrypt_block_ni(in, out, round_keys);
+        return;
+    }
+#endif
+    aes256_encrypt_block_sw(in, out, round_keys);
+}
+
+static void aes256_encrypt_block_sw(const uint8_t* in, uint8_t* out, const uint8_t* round_keys) {
     uint8_t state[16];
     memcpy(state, in, 16);
     for (int i = 0; i < 16; i++) state[i] ^= round_keys[i];
     for (int round = 1; round < 14; round++) {
-        for (int i = 0; i < 16; i++) state[i] = sbox[state[i]];
+        for (int i = 0; i < 16; i++) state[i] = aes_sbox_ct(state[i]);
         uint8_t temp[16];
         temp[0] = state[0];  temp[1] = state[5];  temp[2] = state[10]; temp[3] = state[15];
         temp[4] = state[4];  temp[5] = state[9];  temp[6] = state[14]; temp[7] = state[3];
@@ -4058,7 +4289,7 @@ static void aes256_encrypt_block(const uint8_t* in, uint8_t* out, const uint8_t*
         }
         for (int i = 0; i < 16; i++) state[i] ^= round_keys[round * 16 + i];
     }
-    for (int i = 0; i < 16; i++) state[i] = sbox[state[i]];
+    for (int i = 0; i < 16; i++) state[i] = aes_sbox_ct(state[i]);
     uint8_t temp[16];
     temp[0] = state[0];  temp[1] = state[5];  temp[2] = state[10]; temp[3] = state[15];
     temp[4] = state[4];  temp[5] = state[9];  temp[6] = state[14]; temp[7] = state[3];
@@ -4067,69 +4298,113 @@ static void aes256_encrypt_block(const uint8_t* in, uint8_t* out, const uint8_t*
     for (int i = 0; i < 16; i++) out[i] = temp[i] ^ round_keys[14 * 16 + i];
 }
 
-static void aes256_decrypt_block(const uint8_t* in, uint8_t* out, const uint8_t* round_keys) {
-    uint8_t state[16];
-    memcpy(state, in, 16);
-    for (int i = 0; i < 16; i++) state[i] ^= round_keys[14 * 16 + i];
-    for (int round = 13; round > 0; round--) {
-        uint8_t temp[16];
-        temp[0] = state[0];  temp[1] = state[13]; temp[2] = state[10]; temp[3] = state[7];
-        temp[4] = state[4];  temp[5] = state[1];  temp[6] = state[14]; temp[7] = state[11];
-        temp[8] = state[8];  temp[9] = state[5];  temp[10] = state[2];  temp[11] = state[15];
-        temp[12] = state[12]; temp[13] = state[9]; temp[14] = state[6];  temp[15] = state[3];
-        for (int i = 0; i < 16; i++) state[i] = rsbox[temp[i]];
-        for (int i = 0; i < 16; i++) state[i] ^= round_keys[round * 16 + i];
-        for (int c = 0; c < 4; c++) {
-            uint8_t a = state[c * 4], b = state[c * 4 + 1], d = state[c * 4 + 2], e = state[c * 4 + 3];
-            temp[c * 4]     = aes_multiply(a, 0x0e) ^ aes_multiply(b, 0x0b) ^ aes_multiply(d, 0x0d) ^ aes_multiply(e, 0x09);
-            temp[c * 4 + 1] = aes_multiply(a, 0x09) ^ aes_multiply(b, 0x0e) ^ aes_multiply(d, 0x0b) ^ aes_multiply(e, 0x0d);
-            temp[c * 4 + 2] = aes_multiply(a, 0x0d) ^ aes_multiply(b, 0x09) ^ aes_multiply(d, 0x0e) ^ aes_multiply(e, 0x0b);
-            temp[c * 4 + 3] = aes_multiply(a, 0x0b) ^ aes_multiply(b, 0x0d) ^ aes_multiply(d, 0x09) ^ aes_multiply(e, 0x0e);
-        }
-        memcpy(state, temp, 16);
-    }
-    uint8_t temp[16];
-    temp[0] = state[0];  temp[1] = state[13]; temp[2] = state[10]; temp[3] = state[7];
-    temp[4] = state[4];  temp[5] = state[1];  temp[6] = state[14]; temp[7] = state[11];
-    temp[8] = state[8];  temp[9] = state[5];  temp[10] = state[2];  temp[11] = state[15];
-    temp[12] = state[12]; temp[13] = state[9]; temp[14] = state[6];  temp[15] = state[3];
-    for (int i = 0; i < 16; i++) out[i] = rsbox[temp[i]] ^ round_keys[i];
+/* Clears secret bytes so they do not outlive the call (the volatile writes are not optimized away) */
+static void salivo_wipe(void* p, size_t n) {
+    volatile unsigned char* v = (volatile unsigned char*)p;
+    while (n--) *v++ = 0;
 }
 
+/* X = X * H in GF(2^128) (GCM bit order, NIST SP 800-38D 6.3); branch-free on the secret bits */
+static void gcm_mult(uint8_t x[16], const uint8_t h[16]) {
+    uint8_t z[16] = {0};
+    uint8_t v[16];
+    memcpy(v, h, 16);
+    for (int i = 0; i < 128; i++) {
+        uint8_t mask = (uint8_t)(0 - ((x[i >> 3] >> (7 - (i & 7))) & 1));
+        for (int j = 0; j < 16; j++) z[j] ^= v[j] & mask;
+        uint8_t lsb = v[15] & 1;
+        for (int j = 15; j > 0; j--) v[j] = (uint8_t)((v[j] >> 1) | (v[j - 1] << 7));
+        v[0] = (uint8_t)((v[0] >> 1) ^ (0xE1 & (0 - lsb)));
+    }
+    memcpy(x, z, 16);
+}
+
+/* GHASH of data (no additional authenticated data) followed by the length block, into tag */
+static void gcm_ghash(const uint8_t h[16], const uint8_t* data, size_t len, uint8_t tag[16]) {
+    memset(tag, 0, 16);
+    for (size_t off = 0; off < len; off += 16) {
+        size_t n = len - off < 16 ? len - off : 16;
+        for (size_t j = 0; j < n; j++) tag[j] ^= data[off + j];
+        gcm_mult(tag, h);
+    }
+    uint64_t bits = (uint64_t)len * 8;
+    for (int j = 0; j < 8; j++) tag[15 - j] ^= (uint8_t)(bits >> (8 * j));
+    gcm_mult(tag, h);
+}
+
+/* AES-256-CTR over in (len bytes) into out, counter blocks starting at inc32(J0) */
+static void gcm_ctr(const uint8_t* rk, const uint8_t j0[16], const uint8_t* in, size_t len, uint8_t* out) {
+    uint8_t ctr[16], ks[16];
+    memcpy(ctr, j0, 16);
+    for (size_t off = 0; off < len; off += 16) {
+        for (int j = 15; j >= 12; j--) if (++ctr[j] != 0) break;
+        aes256_encrypt_block(ctr, ks, rk);
+        size_t n = len - off < 16 ? len - off : 16;
+        for (size_t j = 0; j < n; j++) out[off + j] = in[off + j] ^ ks[j];
+    }
+    salivo_wipe(ks, sizeof ks);
+}
+
+/* AES-256-GCM seal with a given 12-byte IV: out = ciphertext (len bytes) || tag (16 bytes) */
+static void gcm_seal(const uint8_t* key, const uint8_t iv[12], const uint8_t* in, size_t len, uint8_t* out) {
+    uint8_t rk[240], h[16] = {0}, j0[16], s[16], ek[16];
+    aes256_key_expansion(key, rk);
+    aes256_encrypt_block(h, h, rk);
+    memcpy(j0, iv, 12);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+    gcm_ctr(rk, j0, in, len, out);
+    gcm_ghash(h, out, len, s);
+    aes256_encrypt_block(j0, ek, rk);
+    for (int j = 0; j < 16; j++) out[len + j] = s[j] ^ ek[j];
+    salivo_wipe(rk, sizeof rk);
+    salivo_wipe(h, sizeof h);
+    salivo_wipe(ek, sizeof ek);
+}
+
+/* AES-256-GCM open with a given IV: checks the tag after ct (constant time) before decrypting; 0 or -1 */
+static int gcm_open(const uint8_t* key, const uint8_t iv[12], const uint8_t* ct, size_t len, uint8_t* out) {
+    uint8_t rk[240], h[16] = {0}, j0[16], s[16], ek[16];
+    aes256_key_expansion(key, rk);
+    aes256_encrypt_block(h, h, rk);
+    memcpy(j0, iv, 12);
+    j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
+    gcm_ghash(h, ct, len, s);
+    aes256_encrypt_block(j0, ek, rk);
+    uint8_t diff = 0;
+    for (int j = 0; j < 16; j++) diff |= (uint8_t)((s[j] ^ ek[j]) ^ ct[len + j]);
+    int ok = diff == 0;
+    if (ok) gcm_ctr(rk, j0, ct, len, out);
+    salivo_wipe(rk, sizeof rk);
+    salivo_wipe(h, sizeof h);
+    salivo_wipe(ek, sizeof ek);
+    return ok ? 0 : -1;
+}
+
+/* Test hook (known-answer tests): seal with a caller-chosen IV. Never reuse an IV with one key. */
+long long salivo_crypto_aes256_gcm_seal_iv(long long key_addr, long long iv_addr, long long plain_addr, long long len, long long out_addr) {
+    if (key_addr == 0 || iv_addr == 0 || out_addr == 0 || len < 0 || (len > 0 && plain_addr == 0)) return -1;
+    gcm_seal((const uint8_t*)(uintptr_t)key_addr, (const uint8_t*)(uintptr_t)iv_addr,
+             (const uint8_t*)(uintptr_t)plain_addr, (size_t)len, (uint8_t*)(uintptr_t)out_addr);
+    return len + 16;
+}
+
+/* AES-256-GCM with a fresh random 96-bit nonce. out (len + 28 bytes) = nonce (12) || ciphertext (len) ||
+   tag (16). Returns len + 28, or -1 (bad arguments, OS RNG unavailable). */
 long long salivo_crypto_aes256_encrypt(long long key_addr, long long plain_addr, long long len, long long out_addr) {
     if (key_addr == 0 || plain_addr == 0 || out_addr == 0 || len <= 0) return -1;
-    uint8_t round_keys[240];
-    aes256_key_expansion((const uint8_t*)(uintptr_t)key_addr, round_keys);
-    const uint8_t* p = (const uint8_t*)(uintptr_t)plain_addr;
     uint8_t* o = (uint8_t*)(uintptr_t)out_addr;
-    long long offset = 0;
-    while (offset < len) {
-        uint8_t block[16];
-        memset(block, 0, 16);
-        long long chunk = (len - offset < 16) ? (len - offset) : 16;
-        memcpy(block, p + offset, (size_t)chunk);
-        aes256_encrypt_block(block, o + offset, round_keys);
-        offset += 16;
-    }
-    return offset;
+    if (salivo_os_random(o, 12) != 0) return -1;
+    gcm_seal((const uint8_t*)(uintptr_t)key_addr, o, (const uint8_t*)(uintptr_t)plain_addr, (size_t)len, o + 12);
+    return len + 28;
 }
 
+/* Opens what salivo_crypto_aes256_encrypt produced (len = plaintext + 28). Writes len - 28 plaintext bytes
+   and returns that count, or -1 when the data was tampered with or the key is wrong (nothing written). */
 long long salivo_crypto_aes256_decrypt(long long key_addr, long long cipher_addr, long long len, long long out_addr) {
-    if (key_addr == 0 || cipher_addr == 0 || out_addr == 0 || len <= 0) return -1;
-    uint8_t round_keys[240];
-    aes256_key_expansion((const uint8_t*)(uintptr_t)key_addr, round_keys);
+    if (key_addr == 0 || cipher_addr == 0 || out_addr == 0 || len < 28) return -1;
     const uint8_t* c = (const uint8_t*)(uintptr_t)cipher_addr;
-    uint8_t* o = (uint8_t*)(uintptr_t)out_addr;
-    long long offset = 0;
-    while (offset < len) {
-        uint8_t block[16];
-        memset(block, 0, 16);
-        long long chunk = (len - offset < 16) ? (len - offset) : 16;
-        memcpy(block, c + offset, (size_t)chunk);
-        aes256_decrypt_block(block, o + offset, round_keys);
-        offset += 16;
-    }
-    return offset;
+    if (gcm_open((const uint8_t*)(uintptr_t)key_addr, c, c + 12, (size_t)(len - 28), (uint8_t*)(uintptr_t)out_addr) != 0) return -1;
+    return len - 28;
 }
 
 // =============================================================================
@@ -4590,20 +4865,15 @@ long long salivo_gui_set_clipboard(const char* text) {
 
 char* salivo_gui_get_clipboard(void) {
 #ifdef _WIN32
-    if (!OpenClipboard(NULL)) return "";
+    if (!OpenClipboard(NULL)) return rt_out_cstr("");
     HANDLE hData = GetClipboardData(CF_TEXT);
-    if (!hData) { CloseClipboard(); return ""; }
-    char* pData = (char*)GlobalLock(hData);
-    if (!pData) { CloseClipboard(); return ""; }
-    size_t len = strlen(pData);
-    char* result = (char*)malloc(len + 1);
-    if (result) { memcpy(result, pData, len + 1); }
-    else { result = ""; }
-    GlobalUnlock(hData);
+    char* pData = hData ? (char*)GlobalLock(hData) : NULL;
+    char* result = rt_out_cstr(pData);
+    if (pData) GlobalUnlock(hData);
     CloseClipboard();
     return result;
 #else
-    return "";
+    return rt_out_cstr("");
 #endif
 }
 
@@ -4791,3 +5061,22 @@ void salivo_thread_sleep_ms(long long ms) {
 
 /* Stage 36.4: strings other runtime files hand to Salivo come from the same allocator */
 void* salivo_rt_smalloc(long long n) { return rt_smalloc((size_t)n); }
+
+/* Indirect calls of Salivo function values (func(int) -> int, func(int, int) -> int): std map, filter,
+   reduce and sortBy pass a function as an int. Every Salivo function takes and returns 64-bit values. */
+long long salivo_call_fn1(long long fn, long long a) {
+    return ((long long (*)(long long))(intptr_t)fn)(a);
+}
+long long salivo_call_fn2(long long fn, long long a, long long b) {
+    return ((long long (*)(long long, long long))(intptr_t)fn)(a, b);
+}
+
+#include "salivo_rsa.inc"
+#include "salivo_compress.inc"
+#include "salivo_fsx.inc"
+
+/* n bytes at addr as a new program string (the bytes must not contain 0) */
+char* salivo_buf_str(long long addr, long long n) {
+    if (!addr || n <= 0) return rt_out_cstr("");
+    return rt_out_str((const char*)(uintptr_t)addr, (size_t)n);
+}

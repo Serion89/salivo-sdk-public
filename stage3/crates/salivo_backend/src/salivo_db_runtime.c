@@ -548,11 +548,16 @@ static int parse_url(const char* url, DbUrl* u) {
 }
 
 /* PostgreSQL ------------------------------------------------------------------------------------ */
+/* Largest single server message (PostgreSQL) or packet sequence (MySQL) the client buffers: a hostile or
+   broken server cannot make the client allocate without bound */
+#define DB_MAX_MESSAGE ((size_t)256 << 20)
+
 static int pg_read(Conn* c, uint8_t* type, Buf* body) {
     uint8_t h[5];
     if (conn_recv(c, h, 5)) { c->broken = 1; return -1; }
     uint32_t len = (uint32_t)h[1] << 24 | (uint32_t)h[2] << 16 | (uint32_t)h[3] << 8 | h[4];
-    if (len < 4 || len > (1u << 30)) { c->broken = 1; set_err(c, "protocol error%s", ""); return -1; }
+    if (len < 4) { c->broken = 1; set_err(c, "protocol error%s", ""); return -1; }
+    if ((size_t)len > DB_MAX_MESSAGE) { c->broken = 1; set_err(c, "server message larger than 256 MiB%s", ""); return -1; }
     body->n = 0;
     if (buf_reserve(body, len - 4 + 1)) return -1;
     if (conn_recv(c, body->p, len - 4)) { c->broken = 1; return -1; }
@@ -719,8 +724,9 @@ static int pg_step(Conn* c, Buf* in, Result* r, char** stream_row, int* failed) 
         for (long i = 0; i < (long)r->rows * r->cols; i++) free(r->cells[i]);
         free(r->names); free(r->cells);
         r->cells = NULL; r->rows = r->cap_rows = 0;
-        r->cols = n;
         r->names = (char**)calloc((size_t)(n ? n : 1), sizeof(char*));
+        if (!r->names) { r->cols = 0; set_err(c, "out of memory%s", ""); c->broken = 1; return -1; }
+        r->cols = n;
         size_t off = 2;
         for (int i = 0; i < n; i++) {
             const uint8_t* z = off < in->n ? memchr(in->p + off, 0, in->n - off) : NULL;
@@ -819,6 +825,7 @@ static int my_read(Conn* c, Buf* b) {
         if (conn_recv(c, h, 4)) { c->broken = 1; return -1; }
         size_t len = (size_t)h[0] | (size_t)h[1] << 8 | (size_t)h[2] << 16;
         c->seq = (uint8_t)(h[3] + 1);
+        if (b->n + len > DB_MAX_MESSAGE) { c->broken = 1; set_err(c, "server packet larger than 256 MiB%s", ""); return -1; }
         if (buf_reserve(b, len + 1)) return -1;
         if (conn_recv(c, b->p + b->n, len)) { c->broken = 1; return -1; }
         b->n += len;

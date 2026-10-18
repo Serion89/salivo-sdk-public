@@ -653,6 +653,7 @@ long long salivo_sys_frame_begin(long long win) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
     pixel_projection(w);
     w->in_frame = 1;
     return 0;
@@ -683,6 +684,70 @@ long long salivo_sys_frame_rect(long long win, long long x, long long y, long lo
     glVertex2f((float)x, (float)(y + ht));
     glEnd();
     g_draws++;
+    return glGetError() == GL_NO_ERROR ? 0 : GFX_GRAPHICS;
+}
+
+/* Filled rounded rectangle in screen pixels: a center cross plus four corner fans. */
+long long salivo_sys_frame_round(long long win, long long x, long long y, long long wd, long long ht, long long radius, long long rgba) {
+    long long err = 0;
+    GfxWin* w = frame_win(win, &err);
+    if (!w) return err;
+    if (wd < 0 || ht < 0 || radius < 0 || wd > 1 << 20 || ht > 1 << 20) return SYS_INVALID_ARG;
+    float r = (float)radius;
+    if (r > wd / 2.0f) r = wd / 2.0f;
+    if (r > ht / 2.0f) r = ht / 2.0f;
+    pixel_projection(w);
+    glDisable(GL_TEXTURE_2D);
+    set_color(rgba);
+    float x0 = (float)x, y0 = (float)y, x1 = (float)(x + wd), y1 = (float)(y + ht);
+    glBegin(GL_QUADS);
+    glVertex2f(x0, y0 + r); glVertex2f(x1, y0 + r); glVertex2f(x1, y1 - r); glVertex2f(x0, y1 - r);
+    glVertex2f(x0 + r, y0); glVertex2f(x1 - r, y0); glVertex2f(x1 - r, y0 + r); glVertex2f(x0 + r, y0 + r);
+    glVertex2f(x0 + r, y1 - r); glVertex2f(x1 - r, y1 - r); glVertex2f(x1 - r, y1); glVertex2f(x0 + r, y1);
+    glEnd();
+    float cxs[4] = { x0 + r, x1 - r, x1 - r, x0 + r }, cys[4] = { y0 + r, y0 + r, y1 - r, y1 - r };
+    for (int c = 0; c < 4 && r > 0; c++) {
+        glBegin(GL_TRIANGLE_FAN);
+        glVertex2f(cxs[c], cys[c]);
+        for (int i = 0; i <= 8; i++) {
+            float a = (float)((c + 2) * 1.5707963 + i * 1.5707963 / 8);
+            glVertex2f(cxs[c] + cosf(a) * r, cys[c] + sinf(a) * r);
+        }
+        glEnd();
+    }
+    g_draws++;
+    return glGetError() == GL_NO_ERROR ? 0 : GFX_GRAPHICS;
+}
+
+/* Circle outline as a 48-segment triangle strip; thickness >= radius fills the disc. */
+long long salivo_sys_frame_ring(long long win, long long cx, long long cy, long long radius, long long thick, long long rgba) {
+    long long err = 0;
+    GfxWin* w = frame_win(win, &err);
+    if (!w) return err;
+    if (radius < 0 || thick < 1 || radius > 1 << 16) return SYS_INVALID_ARG;
+    float ro = (float)radius, ri = thick >= radius ? 0.0f : (float)(radius - thick);
+    pixel_projection(w);
+    glDisable(GL_TEXTURE_2D);
+    set_color(rgba);
+    glBegin(GL_TRIANGLE_STRIP);
+    for (int i = 0; i <= 48; i++) {
+        float a = (float)(i * 6.2831853 / 48);
+        glVertex2f((float)cx + cosf(a) * ro, (float)cy + sinf(a) * ro);
+        glVertex2f((float)cx + cosf(a) * ri, (float)cy + sinf(a) * ri);
+    }
+    glEnd();
+    g_draws++;
+    return glGetError() == GL_NO_ERROR ? 0 : GFX_GRAPHICS;
+}
+
+/* Clip rectangle in screen pixels for the rest of the frame; a negative width or height clears it. */
+long long salivo_sys_frame_clip(long long win, long long x, long long y, long long wd, long long ht) {
+    long long err = 0;
+    GfxWin* w = frame_win(win, &err);
+    if (!w) return err;
+    if (wd < 0 || ht < 0) { glDisable(GL_SCISSOR_TEST); return 0; }
+    glEnable(GL_SCISSOR_TEST);
+    glScissor((GLint)x, (GLint)(w->h - y - ht), (GLsizei)wd, (GLsizei)ht);
     return glGetError() == GL_NO_ERROR ? 0 : GFX_GRAPHICS;
 }
 
@@ -944,6 +1009,37 @@ long long salivo_sys_tex_pixel(long long tex, long long x, long long y, long lon
     d[0] = (unsigned char)(rgba >> 24); d[1] = (unsigned char)(rgba >> 16); d[2] = (unsigned char)(rgba >> 8); d[3] = (unsigned char)rgba;
     t->dirty = 1;
     return 0;
+}
+
+/* Shared-memory textures are Linux only (salivo_gfx_linux.inc). */
+long long salivo_sys_tex_shm(long long w, const char* p, long long a, long long b) { (void)w; (void)p; (void)a; (void)b; return SYS_UNSUPPORTED; }
+
+/* New texture holding tex resized to wd x ht: area average when shrinking, nearest when growing. */
+long long salivo_sys_tex_scale(long long tex, long long wd, long long ht) {
+    if (!gfx_thread_ok()) return GFX_WRONG_THREAD;
+    GfxSlot* s = slot_get(tex, K_TEX);
+    if (!s) return SYS_INVALID_HANDLE;
+    GfxTex* t = (GfxTex*)s->p;
+    if (t->adv || !tex_dims_ok(wd, ht)) return SYS_INVALID_ARG;
+    unsigned char* px = (unsigned char*)calloc((size_t)(wd * ht), 4);
+    if (!px) return SYS_OS;
+    for (long long y = 0; y < ht; y++) {
+        for (long long x = 0; x < wd; x++) {
+            int x0 = (int)(x * t->w / wd), x1 = (int)((x + 1) * t->w / wd), y0 = (int)(y * t->h / ht), y1 = (int)((y + 1) * t->h / ht);
+            if (x1 <= x0) x1 = x0 + 1;
+            if (y1 <= y0) y1 = y0 + 1;
+            unsigned long long acc[4] = { 0, 0, 0, 0 }, n = 0;
+            for (int sy = y0; sy < y1 && sy < t->h; sy++)
+                for (int sx = x0; sx < x1 && sx < t->w; sx++) {
+                    const unsigned char* q = t->px + ((size_t)sy * t->w + sx) * 4;
+                    acc[0] += q[0] * q[3]; acc[1] += q[1] * q[3]; acc[2] += q[2] * q[3]; acc[3] += q[3]; n++;
+                }
+            unsigned char* d = px + ((size_t)y * wd + x) * 4;
+            if (acc[3]) { d[0] = (unsigned char)(acc[0] / acc[3]); d[1] = (unsigned char)(acc[1] / acc[3]); d[2] = (unsigned char)(acc[2] / acc[3]); }
+            d[3] = (unsigned char)(n ? acc[3] / n : 0);
+        }
+    }
+    return tex_new(s->owner, (int)wd, (int)ht, px);
 }
 
 /* which: 0 width, 1 height */
@@ -1611,7 +1707,7 @@ long long salivo_sys_sound_destroy(long long h) {
 }
 
 
-#else /* !_WIN32: the desktop platform is Windows-only for now */
+#elif !defined(__linux__) /* Linux: salivo_gfx_linux.inc; elsewhere unsupported */
 
 long long salivo_sys_win_create(const char* t, long long w, long long h) { (void)t; (void)w; (void)h; return SYS_UNSUPPORTED; }
 long long salivo_sys_win_destroy(long long w) { (void)w; return SYS_UNSUPPORTED; }
@@ -1632,12 +1728,17 @@ long long salivo_sys_frame_clear(long long w, long long c) { (void)w; (void)c; r
 long long salivo_sys_frame_rect(long long w, long long x, long long y, long long a, long long b, long long c) { (void)w; (void)x; (void)y; (void)a; (void)b; (void)c; return SYS_UNSUPPORTED; }
 long long salivo_sys_frame_pixel(long long w, long long x, long long y) { (void)w; (void)x; (void)y; return SYS_UNSUPPORTED; }
 long long salivo_sys_frame_present(long long w) { (void)w; return SYS_UNSUPPORTED; }
+long long salivo_sys_frame_round(long long w, long long x, long long y, long long a, long long b, long long r, long long c) { (void)w; (void)x; (void)y; (void)a; (void)b; (void)r; (void)c; return SYS_UNSUPPORTED; }
+long long salivo_sys_frame_clip(long long w, long long x, long long y, long long a, long long b) { (void)w; (void)x; (void)y; (void)a; (void)b; return SYS_UNSUPPORTED; }
+long long salivo_sys_frame_ring(long long w, long long x, long long y, long long r, long long t, long long c) { (void)w; (void)x; (void)y; (void)r; (void)t; (void)c; return SYS_UNSUPPORTED; }
 long long salivo_sys_time_us(void) { return SYS_UNSUPPORTED; }
 long long salivo_sys_cam2d(long long w, long long a, long long b, long long c, long long d) { (void)w; (void)a; (void)b; (void)c; (void)d; return SYS_UNSUPPORTED; }
 long long salivo_sys_tex_create(long long w, long long a, long long b) { (void)w; (void)a; (void)b; return SYS_UNSUPPORTED; }
 long long salivo_sys_tex_load(long long w, const char* p) { (void)w; (void)p; return SYS_UNSUPPORTED; }
 long long salivo_sys_tex_pixel(long long t, long long x, long long y, long long c) { (void)t; (void)x; (void)y; (void)c; return SYS_UNSUPPORTED; }
 long long salivo_sys_tex_size(long long t, long long w) { (void)t; (void)w; return SYS_UNSUPPORTED; }
+long long salivo_sys_tex_scale(long long t, long long w, long long h) { (void)t; (void)w; (void)h; return SYS_UNSUPPORTED; }
+long long salivo_sys_tex_shm(long long w, const char* p, long long a, long long b) { (void)w; (void)p; (void)a; (void)b; return SYS_UNSUPPORTED; }
 long long salivo_sys_tex_destroy(long long t) { (void)t; return SYS_UNSUPPORTED; }
 long long salivo_sys_draw_quad(long long w, long long x, long long y, long long a, long long b, long long r, long long c, long long t) { (void)w; (void)x; (void)y; (void)a; (void)b; (void)r; (void)c; (void)t; return SYS_UNSUPPORTED; }
 long long salivo_sys_mesh_create(long long w) { (void)w; return SYS_UNSUPPORTED; }

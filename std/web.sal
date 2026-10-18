@@ -147,6 +147,8 @@ pub struct WebServer {
     int hstsMaxAge;
     bool hstsSubdomains;
     bool hstsPreload;
+    // gzip text/JSON bodies of at least this many bytes (0 = off)
+    int gzipMin;
     // runtime state
     int listener;
     int port;
@@ -777,12 +779,38 @@ pub func jwtAddKey(v: JwtVerifier, kid: string, alg: string, secretB64: string) 
     return ok<int, JwtError>(veclen<string>(v.kids));
 }
 
+/// Adds an RS256 key from PEM text: a public key (BEGIN PUBLIC KEY / BEGIN RSA PUBLIC KEY) verifies,
+/// a private key (BEGIN PRIVATE KEY / BEGIN RSA PRIVATE KEY) also signs. 2048 to 4096-bit moduli.
+/// RS256 joins the algorithm allowlist; the key is only ever used with RS256.
+pub func jwtAddRsaKey(v: JwtVerifier, kid: string, pem: string) -> Result<int, JwtError> {
+    return jwtAddRsaNormalized(v, kid, rtrsakeypem(pem));
+}
+
+/// Adds an RS256 verification key from a JWK's base64url "n" and "e" (as served by a JWKS endpoint)
+pub func jwtAddJwk(v: JwtVerifier, kid: string, n: string, e: string) -> Result<int, JwtError> {
+    return jwtAddRsaNormalized(v, kid, rtrsakeyjwk(n, e));
+}
+
+func jwtAddRsaNormalized(v: JwtVerifier, kid: string, key: string) -> Result<int, JwtError> {
+    if (len(kid) > 128 || !validHeaderValue(kid)) { return jwtFail(v, "invalid kid"); }
+    if (vecHasStr(v.kids, kid)) { return jwtFail(v, "duplicate kid"); }
+    if (key == "") { return jwtFail(v, "not an RSA key (PEM or JWK n/e expected)"); }
+    // n is "rsa1:" + hex: at least 2048 bits (512 hex digits)
+    let colon = find(slice(key, 5, len(key)), ":");
+    if (colon < 512) { return jwtFail(v, "RSA key shorter than 2048 bits"); }
+    v.kids = push<string>(v.kids, kid);
+    v.algs = push<string>(v.algs, "RS256");
+    v.secrets = push<string>(v.secrets, key);
+    if (!vecHasStr(v.allowed, "RS256")) { v.allowed = push<string>(v.allowed, "RS256"); }
+    return ok<int, JwtError>(veclen<string>(v.kids));
+}
+
 /// Replaces the algorithm allowlist (comma-separated). Every entry must be supported.
 pub func jwtAllow(v: JwtVerifier, algs: string) -> Result<int, JwtError> {
     let list = splitList(algs);
     if (veclen<string>(list) == 0) { return jwtFail(v, "empty algorithm allowlist"); }
     for (let mut i = 0; i < veclen<string>(list); i = i + 1) {
-        if (get<string>(list, i) != "HS256") { return jwtFail(v, "algorithm not supported: " + get<string>(list, i)); }
+        if (get<string>(list, i) != "HS256" && get<string>(list, i) != "RS256") { return jwtFail(v, "algorithm not supported: " + get<string>(list, i)); }
     }
     v.allowed = list;
     return ok<int, JwtError>(0);
@@ -914,9 +942,13 @@ pub func jwtVerify(v: JwtVerifier, token: string, now: int) -> Result<JwtClaims,
     if (get<string>(v.algs, ki) != alg) { return jwtErr(JwtError::KeyMismatch); }
     let sb = base64UrlDecode(slice(token, d2 + 1, n));
     if (!sb.valid) { return jwtErr(JwtError::BadEncoding); }
-    if (veclen<int>(sb.data) != 32) { return jwtErr(JwtError::BadSignature); }
-    let expected = hs256(get<string>(v.secrets, ki), slice(token, 0, d2));
-    if (rtcryptoctequal(expected, bytesHex(sb.data)) != 1) { return jwtErr(JwtError::BadSignature); }
+    if (alg == "RS256") {
+        if (rtrs256verify(get<string>(v.secrets, ki), slice(token, 0, d2), slice(token, d2 + 1, n)) != 1) { return jwtErr(JwtError::BadSignature); }
+    } else {
+        if (veclen<int>(sb.data) != 32) { return jwtErr(JwtError::BadSignature); }
+        let expected = hs256(get<string>(v.secrets, ki), slice(token, 0, d2));
+        if (rtcryptoctequal(expected, bytesHex(sb.data)) != 1) { return jwtErr(JwtError::BadSignature); }
+    }
 
     // Signature is valid; the claims are still untrusted until each one is checked
     let pb = decodeSegment(slice(token, d1 + 1, d2));
@@ -984,11 +1016,12 @@ pub func jwtSign(v: JwtVerifier, kid: string, claimsJson: string) -> Result<stri
     let ki = keyIndex(v, kid, kid != "");
     if (ki < 0) { return err<string, JwtError>(JwtError::UnknownKey); }
     if (!jsonObject(claimsJson, 16).valid) { return err<string, JwtError>(JwtError::Malformed); }
-    let mut header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"";
+    let alg = get<string>(v.algs, ki);
+    let mut header = "{\"alg\":\"" + alg + "\",\"typ\":\"JWT\"";
     if (kid != "") { header = header + ",\"kid\":\"" + jsonEscape(kid) + "\""; }
     header = header + "}";
     let input = base64UrlEncode(header) + "." + base64UrlEncode(claimsJson);
-    return ok<string, JwtError>(input + "." + base64UrlEncodeBytes(hexBytes(hs256(get<string>(v.secrets, ki), input))));
+    return jwsFinish(v, ki, input);
 }
 
 /// Signs with an explicit protected header (tests and interop); the header must be a JSON object.
@@ -996,6 +1029,16 @@ pub func jwsSignRaw(v: JwtVerifier, kid: string, headerJson: string, payloadJson
     let ki = keyIndex(v, kid, kid != "");
     if (ki < 0) { return err<string, JwtError>(JwtError::UnknownKey); }
     let input = base64UrlEncode(headerJson) + "." + base64UrlEncode(payloadJson);
+    return jwsFinish(v, ki, input);
+}
+
+/// input + "." + the signature of input with key ki (HS256 or RS256; an RS256 public key cannot sign)
+func jwsFinish(v: JwtVerifier, ki: int, input: string) -> Result<string, JwtError> {
+    if (get<string>(v.algs, ki) == "RS256") {
+        let sig = rtrs256sign(get<string>(v.secrets, ki), input);
+        if (sig == "") { return err<string, JwtError>(JwtError::Config); }
+        return ok<string, JwtError>(input + "." + sig);
+    }
     return ok<string, JwtError>(input + "." + base64UrlEncodeBytes(hexBytes(hs256(get<string>(v.secrets, ki), input))));
 }
 
@@ -1023,7 +1066,7 @@ pub func webServer() -> WebServer {
         rlHash: vecNew<int>(), rlStart: vecNew<int>(), rlCount: vecNew<int>(),
         jwt: jwtVerifier(), authEnabled: false,
         secNosniff: true, secFrame: "DENY", secReferrer: "no-referrer", secCsp: "", hstsMaxAge: 0,
-        hstsSubdomains: false, hstsPreload: false,
+        hstsSubdomains: false, hstsPreload: false, gzipMin: 0,
         listener: 0, port: 0, lock: rtmutexcreate(), draining: rtatomicintcreate(0), connSocks: vecNew<int>(),
         connHandles: vecNew<int>(), connBusy: vecNew<int>(), connFree: vecNew<int>(), connFreeN: 0, tasks: vecNew<int>(), taskCursor: 0,
         idPrefix: slice(rtcryptosha256str(str(nowMicros()) + ":" + str(rtrandomint())), 0, 12),
@@ -1701,6 +1744,80 @@ func sendHead(ctx: WebCtx, code: int, size: int) -> int {
 
 func atomicLoad(id: int) -> int { return rtatomicintload(id); }
 
+/// Compresses text, JSON, JavaScript, XML and SVG responses (sendText / sendJson) of at least
+/// minBytes with gzip when the client accepts it; 0 turns it off (the default). Streams and
+/// serveStatic files are sent as they are.
+pub func useCompression(srv: WebServer, minBytes: int) -> Result<int, WebError> {
+    if (minBytes < 0) { return configFail(srv, "compression threshold out of range"); }
+    srv.gzipMin = minBytes;
+    return ok<int, WebError>(0);
+}
+
+/// Accept-Encoding allows gzip: a gzip or * coding whose q is not 0
+func webAcceptsGzip(ctx: WebCtx) -> bool {
+    let ae = lower(reqHeader(ctx, "accept-encoding"));
+    let mut star = false;
+    let mut gzip = 0;
+    let mut start = 0;
+    let n = len(ae);
+    for (let mut i = 0; i <= n; i = i + 1) {
+        if (i == n || slice(ae, i, i + 1) == ",") {
+            let item = trim(slice(ae, start, i));
+            let semi = find(item, ";");
+            let mut coding = item;
+            let mut q0 = false;
+            if (semi >= 0) {
+                coding = trim(slice(item, 0, semi));
+                let q = replace(slice(item, semi + 1, len(item)), " ", "");
+                q0 = q == "q=0" || q == "q=0." || q == "q=0.0" || q == "q=0.00" || q == "q=0.000";
+            }
+            if (coding == "gzip") {
+                if (q0) { gzip = 0 - 1; } else { gzip = 1; }
+            }
+            if (coding == "*" && !q0) { star = true; }
+            start = i + 1;
+        }
+    }
+    return gzip == 1 || (gzip == 0 && star);
+}
+
+func webCompressible(ct: string) -> bool {
+    let t = lower(ct);
+    return startswith(t, "text/") || contains(t, "json") || contains(t, "javascript") || contains(t, "xml") || contains(t, "svg");
+}
+
+/// Sends text gzip-compressed (compressed bytes come from a buffer: they can contain 0 bytes)
+func sendGzip(ctx: WebCtx, status: int, text: string) -> int {
+    let n = len(text);
+    let cap = rtdeflatebound(n) + 32;
+    let dst = rtalloc(cap, 8);
+    let m = rtdeflate(rtstrtoptr(text), n, dst, cap, 2, 6);
+    if (m <= 0 || m >= n) {
+        rtdeallocate(dst, cap, 8);
+        let r0 = sendHead(ctx, status, n);
+        if (r0 < 0) { return r0; }
+        let w0 = rtaiohttpwritetext(ctx.sh, text);
+        if (w0 < 0) { return w0; }
+        let f0 = rtaiohttpfinish(ctx.sh);
+        if (f0 < 0) { return f0; }
+        return 0;
+    }
+    let e = setHeader(ctx, "content-encoding", "gzip");
+    let r = sendHead(ctx, status, m);
+    let mut res = r;
+    if (r >= 0) {
+        let w = rtaiohttpwrite(ctx.sh, dst, m);
+        res = w;
+        if (w >= 0) {
+            let f = rtaiohttpfinish(ctx.sh);
+            res = f;
+            if (f >= 0) { res = 0; }
+        }
+    }
+    rtdeallocate(dst, cap, 8);
+    return res;
+}
+
 /// Complete response with a text body. 204, 205 and 304 never carry a body.
 pub func sendText(ctx: WebCtx, status: int, text: string) -> int {
     if (headerIndex(ctx, "content-type") < 0 && !bodyless(status)) {
@@ -1710,6 +1827,14 @@ pub func sendText(ctx: WebCtx, status: int, text: string) -> int {
         let r = sendHead(ctx, status, 0);
         if (r < 0) { return r; }
         return rtaiohttpfinish(ctx.sh);
+    }
+    let cti = headerIndex(ctx, "content-type");
+    if (ctx.srv.gzipMin > 0 && !ctx.done && cti >= 0 && webCompressible(get<string>(ctx.outValues, cti))) {
+        // caches must key the response on Accept-Encoding whether or not this one is compressed
+        let v = appendHeaderToken(ctx, "vary", "Accept-Encoding");
+        if (len(text) >= ctx.srv.gzipMin && headerIndex(ctx, "content-encoding") < 0 && webAcceptsGzip(ctx)) {
+            return sendGzip(ctx, status, text);
+        }
     }
     let r = sendHead(ctx, status, len(text));
     if (r < 0) { return r; }
@@ -1848,7 +1973,25 @@ pub func serveStatic(ctx: WebCtx, root: string, path: string) -> int {
     return 0;
 }
 
-/// A relative path that stays below its root: no "", ".", ".." segment, no "\", ":" or leading "/"
+/// A Windows device name (CON, NUL, AUX, PRN, COM1-9, LPT1-9), with or without an extension:
+/// opening one reaches the device, not a file below the root
+func webDeviceName(seg: string) -> bool {
+    let mut base = seg;
+    let d = find(seg, ".");
+    if (d >= 0) { base = slice(seg, 0, d); }
+    let b = lower(base);
+    if (b == "con" || b == "nul" || b == "aux" || b == "prn") { return true; }
+    if (len(b) == 4) {
+        let head = slice(b, 0, 3);
+        let c = byteAt(b, 3);
+        if ((head == "com" || head == "lpt") && c >= 49 && c <= 57) { return true; }
+    }
+    return false;
+}
+
+/// A relative path that stays below its root: no "", ".", ".." segment, no "\", ":" or leading "/";
+/// no hidden segment (".env", ".git") except ".well-known", no Windows device name, and no segment
+/// ending in "." or " " (Windows drops those, so "a.txt." would open "a.txt")
 func webSafeRelPath(p: string) -> bool {
     let n = len(p);
     if (n == 0) { return false; }
@@ -1857,8 +2000,10 @@ func webSafeRelPath(p: string) -> bool {
         if (i == n || byteAt(p, i) == 47) {
             let seg = i - start;
             if (seg == 0) { return false; }
-            if (seg == 1 && byteAt(p, start) == 46) { return false; }
-            if (seg == 2 && byteAt(p, start) == 46 && byteAt(p, start + 1) == 46) { return false; }
+            if (byteAt(p, start) == 46 && slice(p, start, i) != ".well-known") { return false; }
+            let last = byteAt(p, i - 1);
+            if (last == 46 || last == 32) { return false; }
+            if (webDeviceName(slice(p, start, i))) { return false; }
             start = i + 1;
         } else if (byteAt(p, i) == 92 || byteAt(p, i) == 58) {
             return false;

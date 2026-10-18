@@ -370,6 +370,11 @@ pub func textureLoad(g: Game, path: string) -> int { return rtsystexload(g.win, 
 pub func texturePixel(texture: int, x: int, y: int, color: int) -> int { return rtsystexpixel(texture, x, y, color); }
 pub func textureWidth(texture: int) -> int { return rtsystexsize(texture, 0); }
 pub func textureHeight(texture: int) -> int { return rtsystexsize(texture, 1); }
+/// New texture with the texture resized to width x height (area average when shrinking, smooth when growing)
+pub func textureScale(texture: int, width: int, height: int) -> int { return rtsystexscale(texture, width, height); }
+/// A texture showing a shared-memory file another process draws into (width * height opaque
+/// 0xAARRGGBB pixels), read on every draw with no copy. Linux only; -12 elsewhere.
+pub func textureShared(g: Game, path: string, width: int, height: int) -> int { return rtsystexshm(g.win, path, width, height); }
 pub func textureDestroy(texture: int) -> int { return rtsystexdestroy(texture); }
 
 // ---- 3D ----

@@ -36,6 +36,18 @@ static salivo_io_len_t salivo_io_len(long long n) { return (size_t)n; }
 #include <string.h>
 #include <limits.h>
 
+/* Strings returned to Salivo code come from the program's string allocator (salivo_task_runtime.c),
+   so Stage 3 reclaims them like any other string */
+void* salivo_rt_smalloc(long long n);
+static char* net_out_str(const char* s, size_t n) {
+    char* r = (char*)salivo_rt_smalloc((long long)n + 1);
+    if (!r) return 0;
+    if (n) memcpy(r, s, n);
+    r[n] = 0;
+    return r;
+}
+static char* net_out_cstr(const char* s) { return net_out_str(s ? s : "", s ? strlen(s) : 0); }
+
 #define MAX_SOCKET_HANDLES 1024
 
 #ifdef SALIVO_DEBUG
@@ -242,22 +254,33 @@ long long salivo_net_send(long long handle, const char* data) {
     return (long long)sent;
 }
 
+/* What this thread's last salivo_net_recv got: bytes (> 0), 0 peer closed, -1 error */
+#ifdef _WIN32
+static __declspec(thread) long long g_net_last_recv = 0;
+#else
+static __thread long long g_net_last_recv = 0;
+#endif
+
+long long salivo_net_last_recv(void) { return g_net_last_recv; }
+
 char* salivo_net_recv(long long handle, long long max_bytes) {
+    g_net_last_recv = -1;
     SOCKET s = get_socket_by_handle(handle);
     if (s == INVALID_SOCKET) {
         SALIVO_NET_LOG("[RT] salivo_net_recv error: invalid socket handle %lld\n", handle);
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty ? empty : "";
+        return net_out_cstr("");
     }
     if (max_bytes <= 0) max_bytes = 4096;
     char* buf = (char*)malloc((size_t)max_bytes + 1);
-    if (!buf) return "";
+    if (!buf) return net_out_cstr("");
     int recvd = (int)recv(s, buf, salivo_io_len(max_bytes), 0);
+    g_net_last_recv = recvd < 0 ? -1 : recvd;
     if (recvd < 0) recvd = 0;
     buf[recvd] = '\0';
     SALIVO_NET_LOG("[RT] salivo_net_recv handle=%lld recvd=%d bytes: '%s'\n", handle, recvd, buf);
-    return buf;
+    char* r = net_out_str(buf, (size_t)recvd);
+    free(buf);
+    return r;
 }
 
 long long salivo_net_close(long long handle) {
@@ -278,55 +301,42 @@ long long salivo_net_close(long long handle) {
     return 0;
 }
 
+/* First address of hostname as text: an IPv4 address when the host has one, else IPv6; "" if none */
 char* salivo_net_resolve(const char* hostname) {
     ensure_wsa_init();
-    if (!hostname || strlen(hostname) == 0) return "";
-    struct addrinfo hints, *res;
+    if (!hostname || hostname[0] == '\0') return net_out_cstr("");
+    struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(hostname, NULL, &hints, &res) != 0 || !res) {
-        return "";
+    if (getaddrinfo(hostname, NULL, &hints, &res) != 0 || !res) return net_out_cstr("");
+    const struct addrinfo* pick = NULL;
+    for (const struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+        if (ai->ai_family == AF_INET) { pick = ai; break; }
+        if (ai->ai_family == AF_INET6 && !pick) pick = ai;
     }
-    struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr;
-    char* ip_str = (char*)malloc(64);
-    if (!ip_str) { freeaddrinfo(res); return ""; }
-    inet_ntop(AF_INET, &(ipv4->sin_addr), ip_str, 64);
+    char ip[INET6_ADDRSTRLEN] = "";
+    if (pick && pick->ai_family == AF_INET)
+        inet_ntop(AF_INET, &((struct sockaddr_in*)pick->ai_addr)->sin_addr, ip, sizeof(ip));
+    else if (pick)
+        inet_ntop(AF_INET6, &((struct sockaddr_in6*)pick->ai_addr)->sin6_addr, ip, sizeof(ip));
     freeaddrinfo(res);
-    return ip_str;
+    return net_out_cstr(ip);
 }
 
+/* Host name of an IPv4 or IPv6 address; the address itself when it has no name or does not parse */
 char* salivo_net_reverse_lookup(const char* ip_str) {
     ensure_wsa_init();
-    if (!ip_str || strlen(ip_str) == 0) return "127.0.0.1";
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-#ifdef _WIN32
-    sa.sin_addr.s_addr = inet_addr(ip_str);
-    if (sa.sin_addr.s_addr == INADDR_NONE && strcmp(ip_str, "255.255.255.255") != 0) {
-        char* fallback = (char*)malloc(strlen(ip_str) + 1);
-        if (fallback) strcpy(fallback, ip_str);
-        return fallback ? fallback : "127.0.0.1";
-    }
-#else
-    if (inet_pton(AF_INET, ip_str, &sa.sin_addr) <= 0) {
-        char* fallback = (char*)malloc(strlen(ip_str) + 1);
-        if (fallback) strcpy(fallback, ip_str);
-        return fallback ? fallback : "127.0.0.1";
-    }
-#endif
-    char host[256];
-    if (getnameinfo((struct sockaddr*)&sa, sizeof(sa), host, sizeof(host), NULL, 0, 0) == 0) {
-        char* res = (char*)malloc(strlen(host) + 1);
-        if (res) {
-            strcpy(res, host);
-            return res;
-        }
-    }
-    char* fallback = (char*)malloc(strlen(ip_str) + 1);
-    if (fallback) strcpy(fallback, ip_str);
-    return fallback ? fallback : "127.0.0.1";
+    if (!ip_str || ip_str[0] == '\0') return net_out_cstr("127.0.0.1");
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_NUMERICHOST;
+    if (getaddrinfo(ip_str, NULL, &hints, &res) != 0 || !res) return net_out_cstr(ip_str);
+    char host[NI_MAXHOST];
+    int rc = getnameinfo(res->ai_addr, (socklen_t)res->ai_addrlen, host, sizeof(host), NULL, 0, NI_NAMEREQD);
+    freeaddrinfo(res);
+    return net_out_cstr(rc == 0 ? host : ip_str);
 }
 
 long long salivo_net_send_buf(long long handle, const char* buf_ptr, long long len_bytes) {
@@ -342,8 +352,7 @@ long long salivo_net_recv_buf(long long handle, char* buf_ptr, long long max_byt
     if (s == INVALID_SOCKET) return -1;
     if (!buf_ptr || max_bytes <= 0) return 0;
     int recvd = (int)recv(s, buf_ptr, salivo_io_len(max_bytes), 0);
-    if (recvd < 0) recvd = 0;
-    return (long long)recvd;
+    return recvd < 0 ? -1 : (long long)recvd; /* -1 error, 0 peer closed */
 }
 
 /* Peer IPv4 address packed as a.b.c.d -> (a << 24) | (b << 16) | (c << 8) | d; -1 if unknown.
@@ -356,18 +365,9 @@ long long salivo_net_get_peer_ipv4(long long handle) {
 }
 
 char* salivo_net_get_peer_ip(long long handle) {
-    if (handle < 1 || handle > MAX_SOCKET_HANDLES || !g_socket_table[handle].is_active) {
-        char* unknown = (char*)malloc(8);
-        strcpy(unknown, "0.0.0.0");
-        return unknown;
-    }
-    char* ip = (char*)malloc(64);
-    if (g_socket_table[handle].peer_ip[0] != '\0') {
-        strcpy(ip, g_socket_table[handle].peer_ip);
-    } else {
-        strcpy(ip, "0.0.0.0");
-    }
-    return ip;
+    if (handle < 1 || handle > MAX_SOCKET_HANDLES || !g_socket_table[handle].is_active || g_socket_table[handle].peer_ip[0] == '\0')
+        return net_out_cstr("0.0.0.0");
+    return net_out_cstr(g_socket_table[handle].peer_ip);
 }
 
 long long salivo_net_get_peer_port(long long handle) {

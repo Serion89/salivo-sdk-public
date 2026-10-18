@@ -236,6 +236,9 @@ pub func rmdir(path: string) -> Result<bool, IoError> {
     return ok<bool, IoError>(true);
 }
 
+/// True when the path is an existing directory
+pub func isDir(path: string) -> bool { return rtcdirexists(path) == 1; }
+
 pub func dirlist(path: string) -> Result<string, IoError> {
     if (path == "") {
         return err<string, IoError>(ioerror(IoErrorKind::InvalidInput, "Empty path"));

@@ -322,3 +322,38 @@ pub func removefile(string path) -> int {
     return removeFile(path);
 }
 
+
+/// The system temporary directory
+pub func tempDir() -> string { return rttempdir(); }
+/// Creates a new empty file with a unique name in tempDir(); returns its path, or "" on failure
+pub func tempFile(prefix: string) -> string { return rttempfile(prefix); }
+/// Creates a new empty directory with a unique name in tempDir() (owner-only on Linux); its path, or "" on failure
+pub func tempDirNew(prefix: string) -> string { return rttempmkdir(prefix); }
+/// Moves from to to, replacing an existing to; 0 on success, -1 on failure
+pub func rename(from: string, to: string) -> int { return rtfsrename(from, to); }
+/// Sets POSIX permission bits (0o644 style); on Windows only the owner-write bit applies (read-only attribute)
+pub func chmod(path: string, mode: int) -> int { return rtfschmod(path, mode); }
+/// Creates link pointing at target; 0 on success, -1 on failure (Windows may need Developer Mode)
+pub func symlink(target: string, link: string) -> int { return rtfssymlink(target, link); }
+/// Target of a symbolic link, or "" when path is not one
+pub func readLink(path: string) -> string { return rtfsreadlink(path); }
+pub func isSymlink(path: string) -> bool { return rtfsissymlink(path) == 1; }
+
+/// Watches dir (not its subdirectories) for created, deleted, renamed and modified entries; handle > 0 or -1
+pub func watchOpen(dir: string) -> int { return rtwatchopen(dir); }
+/// Name (relative to the watched dir) of the next change, or "" when none came within timeoutMs (< 0 waits forever)
+pub func watchNext(watch: int, timeoutMs: int) -> string { return rtwatchnext(watch, timeoutMs); }
+/// Stops a watch; do not call while another thread waits in watchNext on it
+pub func watchClose(watch: int) -> int { return rtwatchclose(watch); }
+
+/// Maps a non-empty file into memory (writes go to the file when writable); handle > 0 or -1
+pub func mmapOpen(path: string, writable: bool) -> int {
+    if (writable) { return rtmmapopen(path, 1); }
+    return rtmmapopen(path, 0);
+}
+/// Address of the mapping (read with salivo.std.mem readbyte / writebyte), 0 for a bad handle
+pub func mmapAddr(map: int) -> int { return rtmmapaddr(map); }
+/// Length of the mapping in bytes
+pub func mmapLen(map: int) -> int { return rtmmaplen(map); }
+/// Flushes and unmaps; the address is invalid afterwards
+pub func mmapClose(map: int) -> int { return rtmmapclose(map); }

@@ -1,8 +1,9 @@
 module salivo.std.desktop;
 
 // Stage 38.1 native desktop windowing and canvas (docs/STAGE_38_1_DESKTOP.md). Native Win32 windows
-// with an OpenGL context each; no browser, DOM or JavaScript is involved. Windows only: other
-// platforms report -12.
+// with an OpenGL context each; no browser, DOM or JavaScript is involved. On Linux (Salivo OS) the
+// program owns the whole screen (KMS or fbdev, software rendering, evdev input) and has one window.
+// Other platforms report -12.
 //
 // Windows are int handles. Negative results are error codes (errorName turns one into text):
 // -7 invalid argument, -8 OS failure, -10 invalid or destroyed handle, -11 table full,
@@ -147,6 +148,17 @@ pub func frameClear(win: int, color: int) -> int { return rtsysframeclear(win, c
 pub func fillRect(win: int, x: int, y: int, width: int, height: int, color: int) -> int {
     return rtsysframerect(win, x, y, width, height, color);
 }
+/// Filled rounded rectangle in screen pixels (anti-aliased on Linux)
+pub func fillRound(win: int, x: int, y: int, width: int, height: int, radius: int, color: int) -> int {
+    return rtsysframeround(win, x, y, width, height, radius, color);
+}
+/// Circle outline centered on (cx, cy): radius and line thickness in pixels (thickness >= radius fills it)
+pub func strokeCircle(win: int, cx: int, cy: int, radius: int, thickness: int, color: int) -> int {
+    return rtsysframering(win, cx, cy, radius, thickness, color);
+}
+/// Clips drawing to a rectangle in screen pixels for the rest of the frame; clipClear removes it
+pub func clipRect(win: int, x: int, y: int, width: int, height: int) -> int { return rtsysframeclip(win, x, y, width, height); }
+pub func clipClear(win: int) -> int { return rtsysframeclip(win, 0, 0, -1, -1); }
 /// Reads back one pixel of the frame being drawn as 0xRRGGBBFF (rendering verification)
 pub func framePixel(win: int, x: int, y: int) -> int { return rtsysframepixel(win, x, y); }
 /// Ends the frame and shows it (waits for vertical blank while vsync is on)

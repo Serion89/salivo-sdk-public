@@ -62,3 +62,39 @@ pub func output(cmd: string) -> string {
 
 /// True when cmd ran and exited with code 0
 pub func succeeded(r: ProcessResult) -> bool { return r.started && r.code == 0; }
+
+/// Sets an environment variable for this process and the processes it starts; 0 on success, -1 on failure
+pub func envSet(key: string, value: string) -> int { return rtenvset(key, value); }
+/// Removes an environment variable; 0 on success, -1 on failure
+pub func envUnset(key: string) -> int { return rtenvunset(key); }
+/// Every environment variable as "KEY=VALUE" lines
+pub func envList() -> string { return rtenvlist(); }
+
+// ---- Child processes with streaming pipes ----
+// A child is an int handle (> 0). Release it with childFree, which also stops a child still running.
+
+/// Starts cmd through the system shell with pipes on its stdin, stdout and stderr; a handle, or -1
+pub func childStart(cmd: string) -> int { return rtchildopen(cmd); }
+/// Writes text to the child's stdin; bytes written, or -1 once its input is closed or it has exited
+pub func childWrite(child: int, text: string) -> int { return rtchildwrite(child, text); }
+/// Closes the child's stdin so it sees end of input
+pub func childCloseInput(child: int) -> int { return rtchildcloseinput(child); }
+/// stdout that has arrived, waiting up to timeoutMs (< 0 forever) for the first bytes; "" on timeout or at the end
+pub func childRead(child: int, timeoutMs: int) -> string { return rtchildread(child, 0, timeoutMs); }
+/// Like childRead, for stderr
+pub func childReadErr(child: int, timeoutMs: int) -> string { return rtchildread(child, 1, timeoutMs); }
+/// True once the child's stdout has ended (it exited or closed it)
+pub func childDone(child: int) -> bool { return rtchildeof(child, 0) == 1; }
+/// Waits up to timeoutMs (< 0 forever) for the child to exit: its exit code, or -1 while it still runs
+pub func childWait(child: int, timeoutMs: int) -> int { return rtchildwait(child, timeoutMs); }
+/// Stops the child
+pub func childKill(child: int) -> int { return rtchildkill(child); }
+/// Releases the handle and its pipes (stopping the child first if it still runs)
+pub func childFree(child: int) -> int { return rtchildfree(child); }
+
+/// Everything the child writes to stdout until it ends
+pub func childReadAll(child: int) -> string {
+    let mut out = "";
+    while (!childDone(child)) { out = out + childRead(child, 0 - 1); }
+    return out;
+}
