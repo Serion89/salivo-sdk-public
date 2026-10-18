@@ -8,7 +8,7 @@
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
 [![Version](https://img.shields.io/badge/version-v1.0.22-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux%20x64-brightgreen.svg)](#platform-support)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Ubuntu%20%7C%20Debian%20%7C%20Fedora-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
 
@@ -34,7 +34,6 @@
 - [How compilation works](#how-compilation-works)
 - [Platform support](#platform-support)
 - [Troubleshooting](#troubleshooting)
-- [Universal AI integration](#universal-ai-integration)
 - [Repository structure](#repository-structure)
 - [License](#license)
 - [Author & Maintainer](#author--maintainer)
@@ -77,7 +76,7 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 - **RS256 JWTs** in `std.web` from PEM or JWK keys (`jwtAddRsaKey`, `jwtAddJwk`).
 - **Helpers**: sorting and searching (`sortInts`, `sortStrings`, `sortBy`, `indexOfStr`), `mapInts`/`filterVec`/`reduceVec`, checked and saturating arithmetic; `SALIVO_OVERFLOW_CHECKS=1` panics on unproven integer overflow; `Vec` bounds errors name the index and length.
 - **VS Code Extension 1.0.22**: bundled with this SDK.
-- Windows x64 and Linux x64 SDKs; the Stage 3 compiler bootstraps bit-identically (C2 == C3) on both.
+- **Installers**: a Windows setup `.exe`, `.deb` for Ubuntu/Debian and `.rpm` for Fedora, all in [`installers/`](installers). The compiler builds itself bit-identically (C2 == C3) on Windows and Linux.
 
 ## What's new in 1.0.21
 
@@ -154,30 +153,26 @@ Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; me
 
 ## Install
 
-### Windows (x64)
+Download the installer for your system from the [`installers/`](installers) folder (or the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest)).
 
-1. Download **`salivo-sdk-1.0.22-windows-x64.zip`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest) and extract it.
-2. Double-click **`Salivo Setup.exe`**. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
-3. Open a new terminal (or restart VS Code).
+| System | Installer | How |
+| :--- | :--- | :--- |
+| **Windows 10/11 x64** | [`salivo-1.0.22-windows-x64-setup.exe`](installers/windows/salivo-1.0.22-windows-x64-setup.exe) | Double-click. Installs for your user (no admin rights), adds `sf` to PATH, installs the VS Code extension and the `.sal` icon, then tests itself. |
+| **Ubuntu / Debian x64** | [`salivo_1.0.22_amd64.deb`](installers/linux/salivo_1.0.22_amd64.deb) | `sudo apt install ./salivo_1.0.22_amd64.deb` |
+| **Fedora / RHEL x64** | [`salivo-1.0.22-1.x86_64.rpm`](installers/linux/salivo-1.0.22-1.x86_64.rpm) | `sudo dnf install ./salivo-1.0.22-1.x86_64.rpm` |
+| **Any Linux x64** | [`salivo-sdk-1.0.22-linux-x64.tar.gz`](installers/linux/salivo-sdk-1.0.22-linux-x64.tar.gz) | `tar xzf salivo-sdk-1.0.22-linux-x64.tar.gz && sh salivo-sdk-1.0.22-linux-x64/install.sh` (installs into `~/.salivo`) |
+| **macOS** | coming soon | see [`installers/macos`](installers/macos) |
 
-Setup installs into `%USERPROFILE%\.salivo`, adds `sf` to your user PATH, installs the VS Code extension, gives `.sal` files the Salivo icon, and ends by compiling and running a test program.
+Then open a new terminal and run `sf run hello.sal`.
 
-Prerequisites (setup detects them and offers to install whatever is missing through `winget`):
+**Prerequisites.** Salivo links programs with clang.
 
-- **LLVM** (clang): `winget install -e --id LLVM.LLVM`
-- **Visual Studio 2022 C++ build tools**:
-  `winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`
+- **Windows:** setup detects LLVM (clang) and the Visual Studio C++ build tools and offers to install them with `winget`. Windows may show "Windows protected your PC" because the installer is not code-signed yet: click **More info > Run anyway**.
+- **Linux:** the `.deb` and `.rpm` pull in clang automatically (lld is recommended for WebAssembly builds). For the tarball, install clang 14 or newer first: `sudo apt install clang lld` or `sudo dnf install clang lld`.
 
-### Linux (x64)
+**VS Code / Antigravity:** the Windows setup installs the extension. On Linux, the packages ship it in `/opt/salivo/vscode`: `code --install-extension /opt/salivo/vscode/salivo-1.0.22.vsix`.
 
-1. Download **`salivo-sdk-1.0.22-linux-x64.tar.gz`** from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
-2. Install clang (14 or newer): `sudo apt install clang` (Ubuntu/Debian) or `sudo dnf install clang` (Fedora).
-3. Extract and run the installer:
-   ```bash
-   tar xzf salivo-sdk-1.0.22-linux-x64.tar.gz
-   sh salivo-sdk-1.0.22-linux-x64/install.sh
-   ```
-4. Open a new terminal.
+**Verify the download:** compare it with [`installers/SHA256SUMS.txt`](installers/SHA256SUMS.txt) (`sha256sum -c SHA256SUMS.txt`, or `Get-FileHash` on Windows).
 
 ---
 
@@ -397,7 +392,7 @@ salivodoc src/             # generate documentation
 
 ### VS Code & Antigravity IDE Extension
 
-Installed automatically by setup:
+Installed automatically by the Windows setup (on Linux: `code --install-extension /opt/salivo/vscode/salivo-1.0.22.vsix`):
 - Full syntax highlighting for `><`, `Drop`, and standard library APIs.
 - Embedded `salivo-lsp` language server for real-time error checking and hovers.
 - Instant shortcuts: **Ctrl+F5** warm execution, **Ctrl+Shift+B** build, **Ctrl+Shift+K** check, **Shift+Alt+F** format.
@@ -417,8 +412,10 @@ Each program is compiled as a whole: functions are inlined across user code and 
 
 | Platform | Status |
 | :--- | :--- |
-| Windows 10/11 x64 | Supported. Installer with setup program, VS Code extension, file icons. |
-| Linux x64 (glibc 2.35+) | Supported. `install.sh`; tested on clean Ubuntu 24.04 and Debian 12. |
+| Windows 10/11 x64 | Supported: setup `.exe`, VS Code extension, file icons. |
+| Ubuntu 22.04+ / Debian 12+ x64 | Supported: `.deb` package. |
+| Fedora 39+ / RHEL 9+ x64 | Supported: `.rpm` package. |
+| Other Linux x64 (glibc 2.35+) | Supported: `.tar.gz` with `install.sh`. |
 | Web / WebAssembly (wasm32) | Supported via `sf build --target wasm32` with DOM and reactive UI support. |
 | macOS (Apple Silicon and Intel) | Coming soon. |
 
@@ -426,24 +423,11 @@ Each program is compiled as a whole: functions are inlined across user code and 
 
 ## Troubleshooting
 
-- **"sf is not recognized"**: Open a new terminal after installing (PATH changes apply to new windows).
-- **`.sal` files lost the Salivo icon**: Run `powershell -ExecutionPolicy Bypass -File install.ps1 -RepairFileIcons` from the SDK folder.
-- **PowerShell syntax with quoted path**: In PowerShell, prepend `&` when invoking quoted paths: `& "C:\Users\you\.salivo\bin\sf.exe" run file.sal`.
-- **Linker errors**: Ensure LLVM and Visual Studio C++ build tools are installed.
-- **Uninstall**: Run `powershell -ExecutionPolicy Bypass -File uninstall.ps1` (Windows) or `sh uninstall.sh` (Linux).
-
----
-
-## Universal AI integration
-
-The repository includes rule files so AI coding assistants write idiomatic Salivo:
-
-- **Cursor**: `.cursorrules`
-- **Claude Code**: `CLAUDE.md`
-- **GitHub Copilot**: `.github/copilot-instructions.md`
-- **Windsurf**: `.windsurfrules`
-- **Cline, Roo Code, Aider, Antigravity**: `AGENTS.md`
-- **Chat assistants**: Attach `docs/salivo_quick_reference.md` to the conversation.
+- **"sf is not recognized" / "command not found"**: open a new terminal after installing (PATH changes apply to new windows).
+- **`.sal` files lost the Salivo icon (Windows)**: run the setup again.
+- **PowerShell syntax with a quoted path**: prepend `&`: `& "C:\Users\you\.salivo\bin\sf.exe" run file.sal`.
+- **Linker errors**: make sure clang is installed (and on Windows the Visual Studio C++ build tools).
+- **Uninstall**: Windows: *Settings > Apps > Salivo > Uninstall*. Ubuntu/Debian: `sudo apt remove salivo`. Fedora: `sudo dnf remove salivo`. Tarball: `sh ~/.salivo/uninstall.sh`.
 
 ---
 
@@ -451,21 +435,17 @@ The repository includes rule files so AI coding assistants write idiomatic Saliv
 
 ```
 salivo-sdk-public/
-|-- assets/              Official logo and icons
-|-- bin/                 Windows executables (sf, salivoc Stage 3 compiler, spm, salivofmt,
-|                        salivolint, salivodoc, salivo-lsp)
-|-- docs/                Language guide (PDF, HTML, Markdown) and quick reference
-|-- examples/            Working examples, web starters, games, and benchmarks
-|-- lib/salivo/rt/       Prebuilt native runtime objects
-|-- stage3/              Stage 3 runtime sources and prebuilt objects
-|-- std/                 Standard library (including game, desktop, audio, web, db, sys)
-|-- vscode/              VS Code extension package (.vsix)
-|-- commands/, mcp/, skills/   AI assistant commands, MCP server and skills
-|-- Salivo Setup.exe     Windows installer
-|-- install.ps1 / install.bat / uninstall.ps1   Windows install scripts
-|-- install.sh / uninstall.sh                   Linux install scripts
-`-- AGENTS.md, CLAUDE.md, .cursorrules, .windsurfrules   AI assistant rules
+|-- installers/
+|   |-- windows/   salivo-1.0.22-windows-x64-setup.exe
+|   |-- linux/     salivo_1.0.22_amd64.deb, salivo-1.0.22-1.x86_64.rpm, salivo-sdk-1.0.22-linux-x64.tar.gz
+|   |-- macos/     coming soon
+|   `-- SHA256SUMS.txt
+|-- assets/        logo
+|-- README.md
+`-- LICENSE
 ```
+
+The installers contain the compiled toolchain, the standard library and prebuilt runtime libraries. The compiler source code is not published.
 
 ---
 
