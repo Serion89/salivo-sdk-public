@@ -8,7 +8,7 @@
 
 No garbage collector. No manual `free`. No lifetime annotations. A standard library that already includes a web server, SQL databases, a UI framework and a game engine.
 
-[![Version](https://img.shields.io/badge/version-v1.0.26-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.27-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 
@@ -111,7 +111,7 @@ No framework to import, no build file, no `free`. One file, one command: `sf run
 
 ---
 
-## Latest release: 1.0.26
+## Latest release: 1.0.27
 
 - **Free for any use, including commercial.** No revenue or team-size limits. Hosting Salivo itself as a service or reselling it as a competing product needs a commercial license. Each version converts to Apache 2.0 four years after its release. See [LICENSE](LICENSE) and [TRADEMARK.md](TRADEMARK.md).
 - **One-line installers** for Windows and Linux that check the SHA-256 of the download.
@@ -201,10 +201,10 @@ Or download the installer for your system from the [latest release](https://gith
 
 | System | Installer | How |
 | :--- | :--- | :--- |
-| **Windows 10/11 x64** | [`salivo-1.0.26-windows-x64-setup.exe`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-1.0.26-windows-x64-setup.exe) | Double-click. Installs for your user (no admin rights), adds `sf` to PATH, installs the VS Code extension and the `.sal` icon, then tests itself. |
-| **Ubuntu / Debian x64** | [`salivo_1.0.26_amd64.deb`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo_1.0.26_amd64.deb) | `sudo apt install ./salivo_1.0.26_amd64.deb` |
-| **Fedora / RHEL x64** | [`salivo-1.0.26-1.x86_64.rpm`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-1.0.26-1.x86_64.rpm) | `sudo dnf install ./salivo-1.0.26-1.x86_64.rpm` |
-| **Any Linux x64** | [`salivo-sdk-1.0.26-linux-x64.tar.gz`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-sdk-1.0.26-linux-x64.tar.gz) | `tar xzf salivo-sdk-1.0.26-linux-x64.tar.gz && sh salivo-sdk-1.0.26-linux-x64/install.sh` (installs into `~/.salivo`) |
+| **Windows 10/11 x64** | [`salivo-1.0.27-windows-x64-setup.exe`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.27/salivo-1.0.27-windows-x64-setup.exe) | Double-click. Installs for your user (no admin rights), adds `sf` to PATH, installs the VS Code extension and the `.sal` icon, then tests itself. |
+| **Ubuntu / Debian x64** | [`salivo_1.0.27_amd64.deb`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.27/salivo_1.0.27_amd64.deb) | `sudo apt install ./salivo_1.0.27_amd64.deb` |
+| **Fedora / RHEL x64** | [`salivo-1.0.27-1.x86_64.rpm`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.27/salivo-1.0.27-1.x86_64.rpm) | `sudo dnf install ./salivo-1.0.27-1.x86_64.rpm` |
+| **Any Linux x64** | [`salivo-sdk-1.0.27-linux-x64.tar.gz`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.27/salivo-sdk-1.0.27-linux-x64.tar.gz) | `tar xzf salivo-sdk-1.0.27-linux-x64.tar.gz && sh salivo-sdk-1.0.27-linux-x64/install.sh` (installs into `~/.salivo`) |
 | **macOS** | not available yet | |
 
 Then open a new terminal and run `sf run hello.sal`.
@@ -436,7 +436,7 @@ salivodoc src/             # generate documentation
 
 ### VS Code & Antigravity IDE Extension
 
-Installed automatically by the Windows setup (on Linux: `code --install-extension /opt/salivo/vscode/salivo-1.0.26.vsix`):
+Installed automatically by the Windows setup (on Linux: `code --install-extension /opt/salivo/vscode/salivo-1.0.27.vsix`):
 - Full syntax highlighting for `><`, `Drop`, and standard library APIs.
 - Embedded `salivo-lsp` language server for real-time error checking and hovers.
 - Instant shortcuts: **Ctrl+F5** warm execution, **Ctrl+Shift+B** build, **Ctrl+Shift+K** check, **Shift+Alt+F** format.

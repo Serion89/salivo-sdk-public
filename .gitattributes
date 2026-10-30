@@ -8,3 +8,4 @@
 *.zip binary
 *.png binary
 *.ico binary
+SHA256SUMS.txt text eol=lf
