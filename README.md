@@ -121,6 +121,42 @@ All releases: [github.com/Serion89/salivo-sdk-public/releases](https://github.co
 
 ---
 
+## Kiln: our own compiler backend (in development)
+
+Today Salivo hands its final code generation to LLVM. We are building **Kiln**, a code generator and linker written entirely in Salivo, to replace it. LLVM stays the default and fully supported while Kiln is finished, and you can already try Kiln on your own programs.
+
+**Why build it.** A compiler that owns every step from source to machine code can do things a general-purpose backend cannot: compile much faster, eventually ship without a 90 MB LLVM library, and prove facts about the finished executable instead of hoping.
+
+**What Kiln already does:**
+- **Own code generator and own linker.** No LLVM code generation and no external linker. Windows x64 (PE), Linux x86-64 and Linux arm64 (ELF), including building Linux executables from Windows.
+- **Much faster to build with.** Salivo's own compiler builds itself in about 6 seconds with Kiln versus about 30 seconds with LLVM, using less memory.
+- **Close to LLVM's best optimizer.** On our benchmark gate, Kiln's code runs within about 9% of LLVM at `-O2` (1.086x), and the executables are smaller: the hello world above is 9 KB.
+- **Tested against LLVM.** A fuzzer ran 100,000 generated programs through both backends and found no differences, and the compiler self-hosts on Kiln.
+- **Build-time capability checks.** Tell the compiler what a program must never do and it proves it, naming the exact call chain if it fails:
+
+```
+sf build app.sal --deny net,process
+```
+
+```
+denied capability 'net': inet_pton (WS2_32.dll),
+reached via main -> salivo_aio_tcp_listen -> (static) -> inet_pton
+```
+
+`sf build app.sal --caps app.caps` writes the full list of what a program can touch, dependencies and runtime included. That is a supply-chain check most languages cannot give you.
+
+**What it will allow.** Executables with proven stack and heap budgets, machine-code safety certificates, faster builds everywhere, and a toolchain with no third-party code generator at all. Budgets and certificates are still in progress.
+
+**Try it** (opt-in, Windows x64 is the most complete):
+
+```
+SALIVO_BACKEND=kiln sf run hello.sal
+```
+
+Kiln is not the default and is not finished. Expect rough edges, and use the default LLVM backend for anything you ship today.
+
+---
+
 ## Performance
 
 Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; memory is the peak committed memory of the whole process tree (the compiler plus clang and the linker).
