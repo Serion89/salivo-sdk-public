@@ -1,4 +1,0 @@
-5fe5a39307c501cd3b53dcecfe963668e91c6bf7f59b85071b80994745c7913f  windows/salivo-1.0.23-windows-x64-setup.exe
-1b1899ba67e24ec6c5f4b753d739d266d420b4b23af4dece09e543b58cd771f4  linux/salivo_1.0.23_amd64.deb
-363eb4982b71ee7db7ff1ebd7ca18bb7be4455f9c4861186612cc322c39c824a  linux/salivo-1.0.23-1.x86_64.rpm
-c7dec5b3a8ccc58e98547f111b872dd3507961b04b3ba341ad18a7f875273efe  linux/salivo-sdk-1.0.23-linux-x64.tar.gz

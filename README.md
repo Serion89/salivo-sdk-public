@@ -7,7 +7,7 @@
 **A compiled systems language with a self-hosted compiler, deterministic cleanup, game engine and tiny native binaries**
 *Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
 
-[![Version](https://img.shields.io/badge/version-v1.0.23-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
+[![Version](https://img.shields.io/badge/version-v1.0.26-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Ubuntu%20%7C%20Debian%20%7C%20Fedora-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
@@ -20,6 +20,7 @@
 
 - [What Salivo is](#what-salivo-is)
 - [Why use Salivo](#why-use-salivo)
+- [What's new in 1.0.26](#whats-new-in-1026)
 - [What's new in 1.0.23](#whats-new-in-1023)
 - [What's new in 1.0.22](#whats-new-in-1022)
 - [What's new in 1.0.21](#whats-new-in-1021)
@@ -69,6 +70,14 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 
 ---
 
+## What's new in 1.0.26
+
+- **New license grant:** Salivo is free for any purpose, including commercial use, with no revenue or team-size limits. Offering Salivo itself as a hosted service, or reselling it as a competing product, needs a commercial license. Each version converts to Apache 2.0 four years after its release. See [LICENSE](LICENSE).
+- **Third-party notices:** `THIRD_PARTY_NOTICES.txt` ships in the SDK and the extension with the LLVM license and the licenses of the Rust crates and JavaScript packages Salivo includes.
+- **Trademark policy:** see [TRADEMARK.md](TRADEMARK.md).
+- **One-line installers:** `get.ps1` (Windows) and `get.sh` (Linux) download the latest release and check its SHA-256 before installing.
+- **Extension 1.0.26** for VS Code and Antigravity.
+
 ## What's new in 1.0.23
 
 - **Faster text libraries**: `std.json`, `std.regex`, `std.text` and `std.collections` no longer scan strings in quadratic time, so large documents parse and search much faster.
@@ -86,7 +95,7 @@ The compiler that builds your programs is itself written in Salivo. This SDK shi
 - **RS256 JWTs** in `std.web` from PEM or JWK keys (`jwtAddRsaKey`, `jwtAddJwk`).
 - **Helpers**: sorting and searching (`sortInts`, `sortStrings`, `sortBy`, `indexOfStr`), `mapInts`/`filterVec`/`reduceVec`, checked and saturating arithmetic; `SALIVO_OVERFLOW_CHECKS=1` panics on unproven integer overflow; `Vec` bounds errors name the index and length.
 - **VS Code Extension 1.0.22**: bundled with this SDK.
-- **Installers**: a Windows setup `.exe`, `.deb` for Ubuntu/Debian and `.rpm` for Fedora, all in [`installers/`](installers). The compiler builds itself bit-identically (C2 == C3) on Windows and Linux.
+- **Installers**: a Windows setup `.exe`, `.deb` for Ubuntu/Debian and `.rpm` for Fedora, all on the [releases page](https://github.com/Serion89/salivo-sdk-public/releases/latest). The compiler builds itself bit-identically (C2 == C3) on Windows and Linux.
 
 ## What's new in 1.0.21
 
@@ -163,15 +172,15 @@ Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; me
 
 ## Install
 
-Download the installer for your system from the [`installers/`](installers) folder (or the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest)).
+Download the installer for your system from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
 
 | System | Installer | How |
 | :--- | :--- | :--- |
-| **Windows 10/11 x64** | [`salivo-1.0.23-windows-x64-setup.exe`](installers/windows/salivo-1.0.23-windows-x64-setup.exe) | Double-click. Installs for your user (no admin rights), adds `sf` to PATH, installs the VS Code extension and the `.sal` icon, then tests itself. |
-| **Ubuntu / Debian x64** | [`salivo_1.0.23_amd64.deb`](installers/linux/salivo_1.0.23_amd64.deb) | `sudo apt install ./salivo_1.0.23_amd64.deb` |
-| **Fedora / RHEL x64** | [`salivo-1.0.23-1.x86_64.rpm`](installers/linux/salivo-1.0.23-1.x86_64.rpm) | `sudo dnf install ./salivo-1.0.23-1.x86_64.rpm` |
-| **Any Linux x64** | [`salivo-sdk-1.0.23-linux-x64.tar.gz`](installers/linux/salivo-sdk-1.0.23-linux-x64.tar.gz) | `tar xzf salivo-sdk-1.0.23-linux-x64.tar.gz && sh salivo-sdk-1.0.23-linux-x64/install.sh` (installs into `~/.salivo`) |
-| **macOS** | coming soon | see [`installers/macos`](installers/macos) |
+| **Windows 10/11 x64** | [`salivo-1.0.26-windows-x64-setup.exe`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-1.0.26-windows-x64-setup.exe) | Double-click. Installs for your user (no admin rights), adds `sf` to PATH, installs the VS Code extension and the `.sal` icon, then tests itself. |
+| **Ubuntu / Debian x64** | [`salivo_1.0.26_amd64.deb`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo_1.0.26_amd64.deb) | `sudo apt install ./salivo_1.0.26_amd64.deb` |
+| **Fedora / RHEL x64** | [`salivo-1.0.26-1.x86_64.rpm`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-1.0.26-1.x86_64.rpm) | `sudo dnf install ./salivo-1.0.26-1.x86_64.rpm` |
+| **Any Linux x64** | [`salivo-sdk-1.0.26-linux-x64.tar.gz`](https://github.com/Serion89/salivo-sdk-public/releases/download/v1.0.26/salivo-sdk-1.0.26-linux-x64.tar.gz) | `tar xzf salivo-sdk-1.0.26-linux-x64.tar.gz && sh salivo-sdk-1.0.26-linux-x64/install.sh` (installs into `~/.salivo`) |
+| **macOS** | not available yet | |
 
 Then open a new terminal and run `sf run hello.sal`.
 
@@ -182,7 +191,7 @@ Then open a new terminal and run `sf run hello.sal`.
 
 **VS Code / Antigravity:** the Windows setup installs the extension into VS Code, Antigravity IDE and Antigravity (whichever are installed). On Linux, the packages ship it in `/opt/salivo/vscode`: `code --install-extension /opt/salivo/vscode/salivo-1.0.23.vsix` (use `antigravity-ide` or `antigravity` instead of `code` for Antigravity).
 
-**Verify the download:** compare it with [`installers/SHA256SUMS.txt`](installers/SHA256SUMS.txt) (`sha256sum -c SHA256SUMS.txt`, or `Get-FileHash` on Windows).
+**Verify the download:** compare it with `SHA256SUMS.txt` from the release (`sha256sum -c SHA256SUMS.txt`, or `Get-FileHash` on Windows).
 
 ---
 
@@ -402,7 +411,7 @@ salivodoc src/             # generate documentation
 
 ### VS Code & Antigravity IDE Extension
 
-Installed automatically by the Windows setup (on Linux: `code --install-extension /opt/salivo/vscode/salivo-1.0.23.vsix`):
+Installed automatically by the Windows setup (on Linux: `code --install-extension /opt/salivo/vscode/salivo-1.0.26.vsix`):
 - Full syntax highlighting for `><`, `Drop`, and standard library APIs.
 - Embedded `salivo-lsp` language server for real-time error checking and hovers.
 - Instant shortcuts: **Ctrl+F5** warm execution, **Ctrl+Shift+B** build, **Ctrl+Shift+K** check, **Shift+Alt+F** format.
@@ -445,13 +454,13 @@ Each program is compiled as a whole: functions are inlined across user code and 
 
 ```
 salivo-sdk-public/
-|-- installers/
-|   |-- windows/   salivo-1.0.23-windows-x64-setup.exe
-|   |-- linux/     salivo_1.0.23_amd64.deb, salivo-1.0.23-1.x86_64.rpm, salivo-sdk-1.0.23-linux-x64.tar.gz
-|   |-- macos/     coming soon
-|   `-- SHA256SUMS.txt
+|-- packaging/     WinGet manifest
+|-- get.ps1        one-line Windows installer
+|-- get.sh         one-line Linux installer
 |-- assets/        logo
 |-- README.md
+|-- TRADEMARK.md
+|-- THIRD_PARTY_NOTICES.txt
 `-- LICENSE
 ```
 
