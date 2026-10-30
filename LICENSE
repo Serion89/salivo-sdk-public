@@ -2,38 +2,33 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:               Salivo Core Team / Sahil (@Serion89)
-Licensed Work:          The Salivo Programming Language, Compiler (sf, salivoc),
-                        Runtime, Standard Library, Package Manager (spm), and Toolchain
-Change Date:            2030-01-01
+Licensor:               Sahil (@Serion89)
+Licensed Work:          The Salivo Programming Language, Compiler, Runtime, Standard Library, and Toolchain
+Change Date:            Four years after the date each version of the Licensed Work is first
+                        publicly released (each version has its own Change Date)
 Change License:         Apache License, Version 2.0
 
 Additional Use Grant:
-You may make use of the Licensed Work free of charge for any of the following purposes:
-1. Personal, educational, research, evaluation, and non-commercial development.
-2. Developing, testing, contributing to, and maintaining open-source software projects.
-3. Commercial development and production use by individuals or organizations whose
-   aggregate gross annual revenue does not exceed $100,000 USD and whose team size does
-   not exceed 5 members.
-4. Compiling, linking, packaging, and distributing user application programs. All
-   software, binaries, data, and libraries authored by you using Salivo belong 100% to
-   their respective authors and may be licensed, distributed, and commercialized without
-   restriction, fee, or royalty.
+You may make use of the Licensed Work free of charge for any purpose,
+including commercial production use, with no revenue limit and no team-size
+limit. You may build, sell and operate applications, services and products
+written in Salivo and earn revenue from them.
 
-Commercial Restrictions (Commercial License Required):
-You may not, without obtaining an explicit commercial license agreement from the Licensor:
-1. Use the Licensed Work in a commercial production environment if your organization
-   exceeds the revenue or team size threshold set forth above ($100,000 USD gross annual
-   revenue or more than 5 team members).
-2. Offer, distribute, or provide the Licensed Work or any of its components (including
-   compiler, runtime, standard library, or toolchain) as a hosted cloud service, managed
-   API, Software-as-a-Service (SaaS), Platform-as-a-Service (PaaS), or multi-tenant
-   execution environment to third parties.
-3. Market, advertise, or brand any cloud hosting or remote execution service under
-   the "Salivo" trademark, name, or logo without prior written consent from the Licensor.
+All software, binaries, and libraries authored in Salivo, and everything you
+compile with the Licensed Work, belong 100% to their respective authors and
+may be distributed under any license without restriction or royalty.
 
-For commercial licensing, enterprise support, private deployment agreements, or OEM
-partnerships, contact:
+Restrictions (Commercial License Required):
+You may not, without obtaining a commercial license agreement from the Licensor:
+1. Offer the Licensed Work or any of its components (including compiler,
+   runtime, standard library, or toolchain) to third parties as a hosted or
+   managed service, including cloud compilation, build-as-a-service, online
+   IDE or playground, managed API, or any software-as-a-service offering.
+2. Sell, resell, sublicense, or rebrand the Licensed Work, or a modified
+   version of it, as a language, compiler, or toolchain product that competes
+   with the Licensed Work.
+
+For commercial licensing, enterprise support, or OEM distribution agreements, contact:
 Email:  sahildark789@gmail.com
 GitHub: https://github.com/Serion89/salivo
 
@@ -64,3 +59,4 @@ SOFTWARE.
 Effective on the Change Date, the Licensor hereby permanently grants you a
 license to use, copy, modify, and distribute the Licensed Work under the terms
 of the Change License specified above.
+

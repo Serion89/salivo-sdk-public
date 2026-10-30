@@ -465,23 +465,21 @@ Salivo is distributed under the **Business Source License 1.1** (see [LICENSE](L
 
 ### For Developers and Businesses
 
-- **Personal and Educational Use:** 100% free for learning, personal projects, research, and non-commercial development.
-- **Open-Source Software:** 100% free for creating, maintaining, and distributing open-source projects.
-- **Small Teams and Startups:** 100% free for commercial use by organizations with under $100,000 USD gross annual revenue and up to 5 team members.
+- **Free for everyone:** 100% free for any purpose, including commercial use. Build, sell and operate applications and services written in Salivo and keep the revenue. There is no revenue limit and no team-size limit.
 - **Your Software Belongs to You:** Any application, game, web service, or library authored in Salivo is entirely your property. You may distribute, sell, or license your output binaries and code under any license without royalties or fees.
-- **Open-Source Transition:** Converts permanently to the Apache License, Version 2.0 on January 1, 2030.
+- **Open-Source Transition:** Each version converts to the Apache License, Version 2.0 four years after its own release, so the newest code is always protected.
 
 ### Managed Cloud Service Policy
 
 - **Can cloud hosting providers offer Salivo as a managed cloud service or hosted compiler platform?**  
-  **No.** You may not provide the Salivo compiler, runtime, or developer toolchain as a hosted, managed, or multi-tenant cloud service (including but not limited to "Compiler-as-a-Service", "Salivo-as-a-Service", or remote cloud development environments) to third parties without an explicit commercial partnership agreement from the Salivo Core Team.
+  **No.** You may not provide the Salivo compiler, runtime, or developer toolchain as a hosted, managed, or multi-tenant cloud service (including but not limited to "Compiler-as-a-Service", "Salivo-as-a-Service", or remote cloud development environments) to third parties without a commercial license agreement from the Licensor. Reselling or rebranding Salivo as a competing language or toolchain product also requires a commercial license.
 
 - **Can I deploy web servers, APIs, or products I built in Salivo to the cloud?**  
   **Yes.** You are free to host and run any software, web application, API, or service that you developed using Salivo on any infrastructure or cloud provider (AWS, GCP, Azure, bare-metal, or self-hosted).
 
 ### Commercial Licensing and Enterprise Support
 
-Organizations exceeding the $100,000 USD gross annual revenue threshold, as well as cloud providers seeking partnership or OEM agreements, must obtain a commercial license.
+Cloud providers, hosted-service operators and anyone reselling Salivo as a competing product must obtain a commercial license.
 
 For commercial inquiries, licensing quotes, and dedicated support contracts:
 - Email: `sahildark789@gmail.com`
@@ -489,7 +487,7 @@ For commercial inquiries, licensing quotes, and dedicated support contracts:
 
 ### Trademark Notice
 
-"Salivo", the Salivo logo, and related brand identifiers are trademarks of the Salivo Core Team. Third parties may not use the Salivo name or marks to brand, advertise, or market competing commercial cloud offerings, runtimes, or hosting services without written permission.
+"Salivo", the Salivo logo, and the names of its tools are trademarks of the Licensor. Forks and modified builds must use a different name. See [TRADEMARK.md](TRADEMARK.md).
 
 ---
 
