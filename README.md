@@ -123,9 +123,9 @@ All releases: [github.com/Serion89/salivo-sdk-public/releases](https://github.co
 
 ## Kiln: our own compiler backend (in development)
 
-Today Salivo hands its final code generation to LLVM. We are building **Kiln**, a code generator and linker written entirely in Salivo, to replace it. LLVM stays the default and fully supported while Kiln is finished, and you can already try Kiln on your own programs.
+Today Salivo hands its final code generation to LLVM. We are building **Kiln**, a code generator and linker written entirely in Salivo, with the goal of making it the default backend once it is finished. LLVM stays fully supported as an option (`--backend llvm`), and you can already try Kiln on your own programs.
 
-**Why build it.** A compiler that owns every step from source to machine code can do things a general-purpose backend cannot: compile much faster, eventually ship without a 90 MB LLVM library, and prove facts about the finished executable instead of hoping.
+**Why build it.** A compiler that owns every step from source to machine code can do things a general-purpose backend cannot: compile much faster, and prove facts about the finished executable instead of hoping.
 
 **What Kiln already does:**
 - **Own code generator and own linker.** No LLVM code generation and no external linker. Windows x64 (PE), Linux x86-64 and Linux arm64 (ELF), including building Linux executables from Windows.
@@ -145,7 +145,7 @@ reached via main -> salivo_aio_tcp_listen -> (static) -> inet_pton
 
 `sf build app.sal --caps app.caps` writes the full list of what a program can touch, dependencies and runtime included. That is a supply-chain check most languages cannot give you.
 
-**What it will allow.** Executables with proven stack and heap budgets, machine-code safety certificates, faster builds everywhere, and a toolchain with no third-party code generator at all. Budgets and certificates are still in progress.
+**What it will allow.** Executables with proven stack and heap budgets, machine-code safety certificates, faster builds everywhere, and a default toolchain that owns every step from source to executable, with LLVM still there when you want it. Budgets and certificates are still in progress.
 
 **Try it** (opt-in, Windows x64 is the most complete):
 
@@ -153,7 +153,7 @@ reached via main -> salivo_aio_tcp_listen -> (static) -> inet_pton
 SALIVO_BACKEND=kiln sf run hello.sal
 ```
 
-Kiln is not the default and is not finished. Expect rough edges, and use the default LLVM backend for anything you ship today.
+Kiln is not the default yet and is not finished. Expect rough edges, and use the default LLVM backend for anything you ship today.
 
 ---
 
