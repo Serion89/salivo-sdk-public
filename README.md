@@ -1,144 +1,123 @@
 <div align="center">
 
-<img src="assets/salivo_logo.png" alt="Salivo Logo" width="160" />
+<img src="assets/salivo_logo.png" alt="Salivo Logo" width="140" />
 
-# Salivo SDK
+# Salivo
 
-**A compiled systems language with a self-hosted compiler, deterministic cleanup, game engine and tiny native binaries**
-*Stream imports (><) | Drop-based cleanup | Native code through LLVM | Built-in async runtime*
+**Write safe native code without the ceremony.**
+
+No garbage collector. No manual `free`. No lifetime annotations. A standard library that already includes a web server, SQL databases, a UI framework and a game engine.
 
 [![Version](https://img.shields.io/badge/version-v1.0.26-blue.svg)](https://github.com/Serion89/salivo-sdk-public/releases/latest)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Ubuntu%20%7C%20Debian%20%7C%20Fedora-brightgreen.svg)](#platform-support)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-brightgreen.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-BSL%201.1-purple.svg)](LICENSE)
-[![LLVM](https://img.shields.io/badge/backend-LLVM%2016-red.svg)](https://llvm.org)
+
+[**Download**](https://github.com/Serion89/salivo-sdk-public/releases/latest) | [Install in one line](#install) | [First program](#your-first-program) | [Language tour](#language-tour)
 
 </div>
 
 ---
 
-## Contents
+| | |
+| :--- | :--- |
+| **~0.3 s** | cold build of a program |
+| **~40 ms** | full type check (`sf check`) |
+| **12 KB** | a hello world executable |
+| **0** | packages to download for a web server, a database or a game |
 
-- [What Salivo is](#what-salivo-is)
-- [Why use Salivo](#why-use-salivo)
-- [What's new in 1.0.26](#whats-new-in-1026)
-- [What's new in 1.0.23](#whats-new-in-1023)
-- [What's new in 1.0.22](#whats-new-in-1022)
-- [What's new in 1.0.21](#whats-new-in-1021)
-- [What's new in 1.0.20](#whats-new-in-1020)
-- [What's new in 1.0.19](#whats-new-in-1019)
-- [Performance](#performance)
-- [Install](#install)
-- [Your first program](#your-first-program)
-- [Language tour](#language-tour)
-- [Game Engine & Desktop](#game-engine--desktop)
-- [Standard library](#standard-library)
-- [Tooling](#tooling)
-- [How compilation works](#how-compilation-works)
-- [Platform support](#platform-support)
-- [Troubleshooting](#troubleshooting)
-- [Repository structure](#repository-structure)
-- [Licensing and Usage Policy](#licensing-and-usage-policy)
-- [Author & Maintainer](#author--maintainer)
+```salivo
+pub func main() -> int {
+    outln("Hello, Salivo!");
+    return 0;
+}
+```
+
+```
+sf run hello.sal
+```
 
 ---
 
-## What Salivo is
+## Why developers pick Salivo
 
-Salivo is a statically typed, compiled systems programming language that produces native executables through LLVM. Its syntax is small, modern, and readable: modules are imported with stream headers (`><`), resources are released deterministically through the `Drop` trait, and strings support inline interpolation with modifiers such as `{name:trim:upper}`.
+**Memory safety without the fight.** Values free what they own when they leave scope. No garbage collector pausing your program, no borrow checker to argue with, no manual cleanup. Reading past the end of a list stops with a clear message instead of corrupting memory:
 
-The compiler that builds your programs is itself written in Salivo. This SDK ships that self-hosted **Stage 3 compiler** together with the `sf` driver, the standard library, the package manager, the formatter, the linter, the documentation generator, the language server and the VS Code extension.
+```
+panic: Vec::get index 5 out of bounds (length 1)
+```
+
+**Safety checks that never get in your way.**
+- Live errors as you type from the language server, with no setup.
+- `sf check` type-checks a file in about 40 ms, fast enough to run on every save.
+- `salivolint --deny` turns every warning into a failure: one flag for CI.
+- Errors are values: `Result` and `Option`, postfix `?` to pass an error up in one character, and `match` that must cover every case.
+- `SALIVO_OVERFLOW_CHECKS=1` makes unchecked integer overflow panic, and checked and saturating arithmetic is built in.
+- `spm check-layout` keeps a project's structure honest.
+
+**Cleanup you cannot forget.** Implement `Drop` once and files, sockets, database connections, textures and locks are released at a known point, every time.
+
+**Instant feedback.** A build takes about a quarter of a second. Run an unchanged program again and it starts in milliseconds from the run cache.
+
+**Tiny native executables.** No runtime to install and nothing to bundle. Code goes through LLVM, so it runs at native speed.
+
+**Everything in the box.** HTTP/1.1 and HTTP/2 server, PostgreSQL, MySQL and SQLite, JSON, regex, compression, cryptography, async tasks and channels, a reactive WebAssembly UI framework, and a 2D and 3D game engine with OpenGL, physics, audio and tile maps. Nothing to download before you start.
+
+**One language for the whole stack.** `spm new site --template fullstack` gives you a native server and a browser UI, both written in Salivo and served from one origin.
+
+**A compiler written in Salivo.** It builds itself, and the result is verified bit for bit on Windows and Linux, so what you install is what was tested.
+
+**Complete tooling from day one.** `sf` (build, run, check), `spm` (packages, workspaces, tasks), a formatter, a linter, a documentation generator, a language server and a VS Code extension.
 
 ---
 
-## Why use Salivo
+## What it looks like
 
-**It is self-hosting, and the build is reproducible.** The Stage 3 compiler compiles its own source. The compiler built by the first generation and the one built by the second are bit-for-bit identical (a verified fixed point), on both Windows and Linux.
+```salivo
+module main;
 
-**Builds are fast and light.** A typical program builds in about a quarter of a second, using a fraction of the memory other native toolchains need.
+><salivo.std.core::{Result, ok, err};
+><salivo.std.collections::{Vec, vecNew, push, veclen, get};
 
-**Executables are tiny.** Standalone binaries are usually 15 to 30 KB (including full 2D/3D games with OpenGL contexts). They are easy to ship, copy and attach, and start instantly.
+pub struct Item { name: string, price: int }
 
-**Memory is managed without a garbage collector.** There is no collector pausing your program or causing frame drops in games. Values with a destructor are released when they go out of scope, and the compiler automatically reclaims strings and small structs it proves are no longer shared.
+func parsePrice(text: string) -> Result<int, string> {
+    if (len(text) == 0) { return err<int, string>("empty price"); }
+    return ok<int, string>(text:int);
+}
 
-**Cleanup is deterministic.** Implement `Drop` for a type and its cleanup code runs at a predictable point upon scope exit. File handles, database connections, sockets, textures, and mutex locks are released without manual `close()` calls.
+func total(items: Vec<Item>) -> int {
+    let mut sum = 0;
+    for (let mut i = 0; i < veclen<Item>(items); i = i + 1) {
+        sum = sum + get<Item>(items, i).price;
+    }
+    return sum;
+}
 
-**Hardware-accelerated Game Engine built into standard library.** High-precision microsecond game loops, Win32 + OpenGL windows, 2D sprites, 3D meshes, GLSL shaders, audio playback, 2D physics, tilemaps, and UI widgets come right out of the box with zero external dependencies.
+func run() -> Result<int, string> {
+    let mut cart = vecNew<Item>();
+    cart = push<Item>(cart, Item { name: "tea", price: parsePrice("12")? });
+    cart = push<Item>(cart, Item { name: "cake", price: parsePrice("30")? });
+    return ok<int, string>(total(cart));
+}
 
-**It comes with a real async runtime.** Tasks, channels with backpressure, timers, cancellation, TCP/UDP networking and asynchronous file I/O are part of the standard library (`salivo.std.runtime`), on a work-stealing scheduler.
+pub func main() -> int {
+    let r = run();
+    if (r.is_ok) { outln($"Total: {r.value}"); } else { outln("error: " + r.error); }
+    return 0;
+}
+```
 
-**The tooling is complete from day one.** One install gives you a build tool (`sf`), a package manager with workspaces (`spm`), a formatter (`salivofmt`), a linter (`salivolint`), a documentation generator (`salivodoc`), a language server (`salivo-lsp`) and a VS Code extension with live diagnostics and one-key run (`Ctrl+F5`).
+No framework to import, no build file, no `free`. One file, one command: `sf run cart.sal`.
 
 ---
 
-## What's new in 1.0.26
+## Latest release: 1.0.26
 
-- **New license grant:** Salivo is free for any purpose, including commercial use, with no revenue or team-size limits. Offering Salivo itself as a hosted service, or reselling it as a competing product, needs a commercial license. Each version converts to Apache 2.0 four years after its release. See [LICENSE](LICENSE).
-- **Third-party notices:** `THIRD_PARTY_NOTICES.txt` ships in the SDK and the extension with the LLVM license and the licenses of the Rust crates and JavaScript packages Salivo includes.
-- **Trademark policy:** see [TRADEMARK.md](TRADEMARK.md).
-- **One-line installers:** `get.ps1` (Windows) and `get.sh` (Linux) download the latest release and check its SHA-256 before installing.
-- **Extension 1.0.26** for VS Code and Antigravity.
+- **Free for any use, including commercial.** No revenue or team-size limits. Hosting Salivo itself as a service or reselling it as a competing product needs a commercial license. Each version converts to Apache 2.0 four years after its release. See [LICENSE](LICENSE) and [TRADEMARK.md](TRADEMARK.md).
+- **One-line installers** for Windows and Linux that check the SHA-256 of the download.
+- **Third-party notices** ship with the SDK and the VS Code extension.
 
-## What's new in 1.0.23
-
-- **Faster text libraries**: `std.json`, `std.regex`, `std.text` and `std.collections` no longer scan strings in quadratic time, so large documents parse and search much faster.
-- **Memory fixes**: owned buffers that escape a function are no longer freed early, and `Drop` now runs on the Rust compiler too.
-- **Sources with a byte order mark** compile.
-- **Project layout check**: `spm check-layout` fails when a module line does not match its path, a source lives outside `src/`, the frontend imports server modules, or the backend imports UI modules.
-- **Extension 1.0.23** for VS Code and Antigravity; the installers now install it into Antigravity IDE and Antigravity as well.
-- **Linux packages** are built on Ubuntu 22.04 and run on glibc 2.35 and newer. The compiler builds itself bit-identically (C2 == C3).
-
-## What's new in 1.0.22
-
-- **Strings owned by their holders**: struct fields, `Vec`/`Deque`/`HashMap`/`HashSet` slots, `Option`/`Result` payloads and globals keep their own copies of strings and free them, and functions returning strings hand callers a copy they own. Programs that build and store text no longer leak or read freed memory.
-- **Compression**: new `salivo.std.compress` with DEFLATE, zlib and gzip (`compress`, `decompress`, `gzipText`, `gunzipText`, `crc32`, `adler32`); `std.web` gzips responses with `useCompression`.
-- **Files and processes**: `std.fs` temp files and directories, `rename`, `chmod`, symlinks, directory watching and memory-mapped files; `std.process` child processes with pipes (`childOpen`, `childWrite`, `childReadAll`, `childWait`, `childKill`).
-- **RS256 JWTs** in `std.web` from PEM or JWK keys (`jwtAddRsaKey`, `jwtAddJwk`).
-- **Helpers**: sorting and searching (`sortInts`, `sortStrings`, `sortBy`, `indexOfStr`), `mapInts`/`filterVec`/`reduceVec`, checked and saturating arithmetic; `SALIVO_OVERFLOW_CHECKS=1` panics on unproven integer overflow; `Vec` bounds errors name the index and length.
-- **VS Code Extension 1.0.22**: bundled with this SDK.
-- **Installers**: a Windows setup `.exe`, `.deb` for Ubuntu/Debian and `.rpm` for Fedora, all on the [releases page](https://github.com/Serion89/salivo-sdk-public/releases/latest). The compiler builds itself bit-identically (C2 == C3) on Windows and Linux.
-
-## What's new in 1.0.21
-
-- **No more struct leaks on Stage 3**: a struct stored inside another struct, inside a `Vec`, `Deque` or `HashMap`, or inside an `Option` or `Result` is freed. Plain structs are copied by value in and out of containers.
-- **Owning fields in raw memory**: `readval`/`writeval`/`Slice` structs can hold `String`, `Option`, `Result`, `HashMap`, `HashSet`, `Deque` and `Vec` of owning elements, so these programs no longer fall back to the Rust compiler.
-- **Temporaries freed**: an owning value passed straight to a function (`count(makePlan())`), and the values in `v = addTwo(v)` and `let w = addTwo(fresh())`, are freed.
-- **Same `Option`/`Result` layout on both compilers**, and the Rust compiler frees local collections of scalars at scope end.
-- **VS Code Extension 1.0.21**: bundled with this SDK.
-
-## What's new in 1.0.20
-
-- **More programs on Stage 3**: `sizeof`/`alignof`/`strideof` of structs, enums and generic structs (`Wrapper<bool>`), and `drop<T>(x)`, so std.mem `Slice` programs no longer fall back to the Rust compiler.
-- **Raw memory fixes**: `Slice<bool>`/`Slice<byte>` store one byte per element (8-byte writes used to overwrite neighbours on both compilers); `Slice` of structs and `readval`/`writeval`/`cloneval`/`moveval` work on Stage 3, including `string` and `Vec<T>` fields, plus `Slice<string>` and `Slice<Vec<T>>`.
-- **Same struct layout on both compilers**: the Rust compiler lays out fields in declaration order (it used alphabetical order), so sizes and memory bytes match Stage 3.
-- **VS Code Extension 1.0.20**: bundled with this SDK.
-
-## What's new in 1.0.19
-
-- **Stage 3 String/StrSlice fields**: `String` and `StrSlice` fields compile natively, so std.strings `chars`/`stepchar` no longer fall back to the Rust compiler.
-- **Faster toolchain**: JSON 1.1 MB parse 49 s to 7 ms, pretty/minify about 25 ms, linear text `join`/`title`, HashMap churn 3.3x faster, integer-to-string 1.7x, `outln` about 20% faster; compiler self-build 2.9 s to 2.3 s, peak RAM 592 to 465 MB.
-- **Leak fixes**: flat memory per `std.web` connection, spawn/join leak-free, struct temporaries freed.
-- **VS Code Extension 1.0.19**: execution cache detects runtime source edits; debounced language server diagnostics.
-
-## What's new in 1.0.18
-
-- **Canonical Fullstack Template (`spm new <name> --template fullstack`)**: Scaffolds a complete project layout with native HTTP server (`salivo.std.web`) serving `/api` and WebAssembly UI (`salivo.std.ui`) from a single origin.
-- **Stage 38.3 Native Game Engine Suite**:
-  - `salivo.std.desktop`: Native Win32 windows with hardware-accelerated OpenGL context, VSync, and DPI scaling.
-  - `salivo.std.game`: Frame-accurate input, 2D camera with zoom, textured quads, 3D meshes, perspective camera, and GLSL shaders.
-  - `salivo.std.audio`: Multi-channel sound effects and background music playback.
-  - `salivo.std.physics2d`: 2D rigidbodies, AABB/circle collisions, raycasts, gravity, and restitution impulse resolution.
-  - `salivo.std.tilemap`: Grid-based tile levels with camera viewport culling.
-  - `salivo.std.gui`: Immediate-mode UI widgets (buttons, health bars, progress bars).
-- **VS Code Extension 1.0.18**:
-  - Debounced language server (`salivo-lsp`) with live diagnostics, hover, and definition navigation.
-  - Snippets updated to canonical `salivo.std.web` and `salivo.std.db`.
-- **WASM Package Builds (`sf build <pkg> --target wasm32`)**: Compile packages directly to WebAssembly for the browser.
-- **Optimized Runtime & Standard Library**:
-  - JSON parser parses 1.1 MB in 7 ms (down from 49 s).
-  - High-speed string formatting and stdout buffer flushing.
-  - Zero-leak per-connection request heaps.
-- **Stage 3 Compiler 8802339D**: Frozen self-hosted compiler generation with full private module symbol isolation.
-- Linux x64 builds synchronized to 1.0.21.
+All releases: [github.com/Serion89/salivo-sdk-public/releases](https://github.com/Serion89/salivo-sdk-public/releases)
 
 ---
 
@@ -172,7 +151,17 @@ Measured on a 16-core Windows 11 machine. Times are medians of repeated runs; me
 
 ## Install
 
-Download the installer for your system from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
+**One line** (downloads the latest release and checks its SHA-256 before installing):
+
+```
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Serion89/salivo-sdk-public/main/get.ps1 | iex
+
+# Linux
+curl -fsSL https://raw.githubusercontent.com/Serion89/salivo-sdk-public/main/get.sh | sh
+```
+
+Or download the installer for your system from the [latest release](https://github.com/Serion89/salivo-sdk-public/releases/latest).
 
 | System | Installer | How |
 | :--- | :--- | :--- |
