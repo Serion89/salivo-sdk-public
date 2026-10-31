@@ -46,6 +46,13 @@ sf run hello.sal
 panic: Vec::get index 5 out of bounds (length 1)
 ```
 
+- **Single Structural Holders**: Every allocated object has exactly one owner: a lexical scope, a containing struct, or a collection (`Vec`, `HashMap`). When an element is inserted into a container, ownership transfers directly to that container. When an element is replaced or overwritten, the existing value is immediately and deterministically destroyed.
+- **Compiler-Synthesized Semantic Drops**: The compiler performs semantic analysis across all types to determine resource destruction requirements. At scope boundaries and return points, the compiler automatically synthesizes and inserts destructor hooks (`Drop`) for all active owned variables, preventing memory leaks and eliminating manual deallocation calls.
+- **Owner vs. View Separation**: Borrowed slices (`StrSlice`, `ByteSlice`) and container lookups act as non-owning views. The compiler's intermediate representation tracks view lifetimes relative to their parent containers, preventing use-after-free conditions without requiring manual lifetime annotations (`<'a>`).
+- **SSA Temporary Liveness Analysis**: Intermediate heap values produced during string concatenations, template interpolations, and type conversions are analyzed in the SSA pipeline. Temporaries consumed by read-only operations are reclaimed immediately after execution within the same basic block.
+- **Generational Resource Handles**: System resources (such as network sockets, asynchronous tasks, file descriptors, and window contexts) are accessed through generational integer handles (`(generation << 24) | slot`). Accessing a released or recycled handle safely fails with an invalid handle status rather than causing dangling pointer access or memory corruption.
+- **Deterministic Reference Counting for Shared State**: For scenarios requiring shared ownership across multiple concurrent execution contexts, `Arc` provides atomic reference counting with compiler-managed retain and release semantics, eliminating tracing garbage collection cycles.
+
 **Safety checks that never get in your way.**
 - Live errors as you type from the language server, with no setup.
 - `sf check` type-checks a file in about 40 ms, fast enough to run on every save.
